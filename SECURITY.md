@@ -32,6 +32,8 @@ Los nombres de empresa, clientes y sistemas no se pueden escribir en un repo pú
 ~/.config/ai-harness/public-denylist.txt
 ```
 
+Cada término se compara como palabra completa y sin distinguir mayúsculas. Si un nombre es además una palabra corriente, se escribe con el prefijo `cs:` y la mayúscula exacta (`cs:Nombre`): así solo coincide escrito de esa forma y no marca la palabra en minúscula.
+
 La ruta se puede cambiar con `HARNESS_PUBLIC_DENYLIST`. Si el fichero no existe, el guard lo avisa en cada ejecución: sin él, esos nombres no se están comprobando.
 
 ### Excepciones
