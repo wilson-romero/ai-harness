@@ -4,8 +4,9 @@ import os
 
 import pytest
 
+from harness.memory.config import load_memory_settings
 from harness.memory.paths import SKIP_HARD_LINK, SKIP_LINK, walk_vault
-from tests.conftest import make_symlink, query, write_note
+from tests.conftest import make_symlink, write_note
 
 OUTSIDE_CANARY = "CANARIO-FUERA-8842"
 
@@ -54,7 +55,8 @@ def test_vault_root_that_is_a_link(cli, vault, tmp_path, data_dir):
     code, out, err = cli("memory", "search", "orquestador ventas", HARNESS_VAULT_ROOT=str(link))
     assert code == 0, err
     assert "projects/demo-alpha/_project.md" in out
-    assert query(data_dir, "SELECT vault_root FROM memory_binding") == [(str(vault.resolve()),)]
+    # Reading is confined to the real directory the link points to.
+    assert load_memory_settings({"HARNESS_VAULT_ROOT": str(link)}).vault_root == vault.resolve()
 
 
 def test_hard_linked_file_is_skipped(vault, outside):

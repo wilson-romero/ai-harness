@@ -13,7 +13,7 @@ from harness.config import Settings
 from harness.core.contracts import RequestStatus
 from harness.core.errors import HarnessError, InvalidInput
 from harness.core.service import SessionService
-from harness.memory.config import MemorySettings, bind_data_dir, load_memory_settings
+from harness.memory.config import MemorySettings, load_memory_settings
 from harness.memory.context import ProjectContext, build_context
 from harness.memory.maintenance import maintenance_report
 from harness.memory.paths import validate_project_slug
@@ -90,12 +90,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _run(args: argparse.Namespace) -> int:
     settings = Settings.from_env(os.environ)
     if args.command == "memory":
-        return _memory(args, settings)
+        return _memory(args)
     memory: MemorySettings | None = None
     if args.command == "ask" and args.project is not None:
         # Same order as the memory commands: arguments, then configuration, then the vault.
         validate_project_slug(args.project)
-        memory = load_memory_settings(os.environ, settings.data_dir)
+        memory = load_memory_settings(os.environ)
     conn = open_database(settings.data_dir)
     try:
         service = SessionService(
@@ -113,7 +113,6 @@ def _run(args: argparse.Namespace) -> int:
         if args.command == "session":
             return _list_sessions(service)
         if args.command == "ask" and memory is not None:
-            bind_data_dir(conn, memory)
             service.check_project_question(args.session_id, args.prompt, args.project)
             context = build_context(memory.vault_root, args.project, memory.context_max_bytes)
             _context_summary(context)
@@ -169,7 +168,7 @@ def _history(service: SessionService, session_id: str) -> int:
 # -- memory -------------------------------------------------------------------------------------
 
 
-def _memory(args: argparse.Namespace, settings: Settings) -> int:
+def _memory(args: argparse.Namespace) -> int:
     # Arguments are validated before the configuration, and both before the vault is read.
     if args.memory_command == "search":
         terms = parse_query(args.query)
@@ -181,13 +180,8 @@ def _memory(args: argparse.Namespace, settings: Settings) -> int:
     elif not args.dry_run:
         raise InvalidInput("memory maintain only exists as --dry-run in this build")
 
-    memory = load_memory_settings(os.environ, settings.data_dir)
-    conn = open_database(settings.data_dir)
-    try:
-        bind_data_dir(conn, memory)
-    finally:
-        conn.close()
-
+    # The memory commands only read the vault: they open no database and write nothing.
+    memory = load_memory_settings(os.environ)
     if args.memory_command == "search":
         return _search(memory.vault_root, terms, args.project, args.limit)
     if args.memory_command == "context":

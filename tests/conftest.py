@@ -29,12 +29,9 @@ HARNESS_VARS = [
     "HARNESS_MOCK_BEHAVIOR",
     "HARNESS_MOCK_DELAY_MS",
     "HARNESS_VAULT_ROOT",
-    "HARNESS_PROFILE",
     "HARNESS_MEMORY_CONTEXT_MAX_BYTES",
-    # Read by the work-profile sync check; a developer machine may define them.
-    "OneDrive",
-    "OneDriveCommercial",
-    "OneDriveConsumer",
+    # No longer read by the harness; cleared so a developer's shell cannot change a test.
+    "HARNESS_PROFILE",
 ]
 VAULT_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "vault-synthetic"
 

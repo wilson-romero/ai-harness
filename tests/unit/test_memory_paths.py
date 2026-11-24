@@ -5,7 +5,7 @@ from pathlib import PurePosixPath, PureWindowsPath
 import pytest
 
 from harness.core.errors import InvalidProject
-from harness.memory.paths import is_network_path, is_within, validate_project_slug
+from harness.memory.paths import is_within, validate_project_slug
 
 REJECTED = [
     "..",
@@ -49,27 +49,6 @@ def test_rejected_project_identifiers(raw):
 )
 def test_accepted_project_identifiers(raw):
     assert validate_project_slug(raw) == raw
-
-
-@pytest.mark.parametrize(
-    "path",
-    [
-        PureWindowsPath(r"\\servidor\recurso\vault"),
-        PureWindowsPath(r"\\servidor\recurso"),
-        PureWindowsPath("//servidor/recurso/vault"),
-        PurePosixPath("//servidor/recurso/vault"),
-    ],
-)
-def test_network_paths(path):
-    assert is_network_path(path)
-
-
-@pytest.mark.parametrize(
-    "path",
-    [PureWindowsPath(r"C:\vault"), PureWindowsPath(r"\vault"), PurePosixPath("/srv/vault")],
-)
-def test_local_paths(path):
-    assert not is_network_path(path)
 
 
 def test_containment_windows_is_case_insensitive():

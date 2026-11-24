@@ -29,7 +29,7 @@ def test_first_run_creates_the_schema(conn):
         row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
     session_core = {"sessions", "requests", "messages", "audit_events", "schema_migrations"}
-    assert tables == session_core | {"memory_binding", "request_context"}
+    assert tables == session_core | {"request_context"}
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
 
@@ -100,17 +100,6 @@ def test_audit_round_trip(conn):
     row = conn.execute("SELECT * FROM audit_events").fetchone()
     assert (row["event_type"], row["outcome"], row["actor"]) == ("session.created", "ok", "cli")
     assert row["session_id"] == str(session.session_id) and row["request_id"] is None
-
-
-def test_memory_binding_holds_a_single_row(conn):
-    with transaction(conn):
-        repo.insert_memory_binding(conn, "work", "/vault-a")
-    with pytest.raises(sqlite3.IntegrityError):
-        with transaction(conn):
-            repo.insert_memory_binding(conn, "work", "/vault-b")
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute("UPDATE memory_binding SET profile = 'casa'")
-    assert repo.get_memory_binding(conn) == ("work", "/vault-a")
 
 
 def test_request_context_needs_an_existing_request(conn):

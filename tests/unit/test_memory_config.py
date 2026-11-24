@@ -35,25 +35,33 @@ def test_missing_root_rejected(cli, tmp_path):
     assert code != 0 and out == "" and "does not exist" in err
 
 
-def test_default_profile_is_work(cli, vault, tmp_path, data_dir):
-    code, _, err = cli("memory", "search", "orquestador", HARNESS_VAULT_ROOT=str(vault))
-    assert code == 0, err
-    assert query(data_dir, "SELECT profile FROM memory_binding") == [("work",)]
-    # ...and the work rules apply: a vault in a sync folder is refused without a profile set.
-    synced = tmp_path / "CloudStorage" / "vault"
-    synced.parent.mkdir()
+def test_memory_commands_open_no_database(cli, vault, data_dir):
+    for command in [
+        ("memory", "search", "orquestador"),
+        ("memory", "context", "demo-alpha"),
+        ("memory", "maintain", "--dry-run"),
+    ]:
+        assert cli(*command, HARNESS_VAULT_ROOT=str(vault))[0] == 0, command
+    assert not data_dir.exists()
+
+
+def test_synced_folders_and_repositories_are_accepted(cli, vault, tmp_path):
+    # Revised on 2026-11-24 (D3 reverted): the harness is for work only and the vault may live
+    # in a corporate sync folder. A sync folder name, a git repository with a remote or a
+    # leftover HARNESS_PROFILE no longer refuse anything.
+    synced = tmp_path / "OneDrive - Ejemplo" / "CloudStorage" / "vault"
+    synced.parent.mkdir(parents=True)
     vault.rename(synced)
-    code, _, err = cli("memory", "search", "orquestador", HARNESS_VAULT_ROOT=str(synced))
-    assert code != 0 and "'CloudStorage'" in err
-
-
-def test_unknown_profile(cli, vault, data_dir):
-    code, out, err = cli(
-        "memory", "search", "orquestador", HARNESS_VAULT_ROOT=str(vault), HARNESS_PROFILE="casa"
-    )
-    assert code != 0 and out == ""
-    assert "HARNESS_PROFILE must be one of work, personal" in err
-    assert not (data_dir / "harness.sqlite3").exists()  # rejected before anything else
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text('[remote "origin"]\n')
+    data = tmp_path / "Dropbox" / "data"
+    for profile in ["", "work", "personal", "casa"]:
+        code, out, err = cli(
+            "memory", "context", "demo-alpha",
+            HARNESS_VAULT_ROOT=str(synced), HARNESS_DATA_DIR=str(data), HARNESS_PROFILE=profile,
+        )
+        assert code == 0, (profile, err)
+        assert "projects/demo-alpha/_project.md" in out
 
 
 @pytest.mark.parametrize("value", ["1023", "65537", "0", "-5", "ocho mil"])
@@ -74,14 +82,13 @@ def test_context_limit_out_of_range(cli, vault, value):
 )
 def test_context_limit_accepted(vault, data_dir, value, expected):
     env = {"HARNESS_VAULT_ROOT": str(vault), "HARNESS_MEMORY_CONTEXT_MAX_BYTES": value}
-    settings = load_memory_settings(env, data_dir)
+    settings = load_memory_settings(env)
     assert settings.context_max_bytes == expected
-    assert settings.profile == "work"
     assert settings.vault_root == vault.resolve()
 
 
 def test_ask_without_project_does_not_read_the_vault(cli, tmp_path):
-    env = {"HARNESS_VAULT_ROOT": str(tmp_path / "does-not-exist"), "HARNESS_PROFILE": "casa"}
+    env = {"HARNESS_VAULT_ROOT": str(tmp_path / "does-not-exist")}
     session_id = cli("session", "create", "Sin memoria", **env)[1].strip()
     code, out, err = cli("ask", session_id, "pregunta", **env)
     assert code == 0, err

@@ -75,12 +75,6 @@ def _is_valid_slug(raw: str) -> bool:
     return stem not in _WINDOWS_RESERVED
 
 
-def is_network_path(path: PurePath) -> bool:
-    """UNC paths (`\\\\server\\share`) and POSIX paths that start with `//`."""
-    text = str(path)
-    return path.drive.startswith(("\\\\", "//")) or text.startswith(("\\\\", "//"))
-
-
 def is_within(path: PurePath, root: PurePath) -> bool:
     """Containment with the path flavour's own rules (case-insensitive for Windows paths)."""
     return path.is_relative_to(root)
