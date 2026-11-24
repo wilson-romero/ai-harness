@@ -538,10 +538,13 @@ class SkillEngine:
         if approval is None:
             raise InvalidInput(f"approval {approval_id} does not exist")
         proposal = self._proposal(state, step)
-        if proposal is None or (
+        own = approval["run_id"] == state.run_id and approval["step_key"] == step.id
+        if own and (proposal is None or (
             approval["status"] == "granted" and proposal.sha256 != approval["proposal_hash"]
-        ):
+        )):
             return self._revoke(state, step, row, approval)
+        if proposal is None:
+            return self._stop(state, step.id, row, "limit:proposal_bytes", limit="proposal_bytes")
         effect = self._effects[step.effect]
         effect_context = self._effect_context(state, step)
         prepared = effect.prepare(effect_context, self._output(state, step.of))
@@ -568,6 +571,9 @@ class SkillEngine:
                 self._audit("approval.consumed", "consumed", state.session, state.run_id,
                             self._approval_detail(approval))
         if consumed != 1:
+            if own and row["status"] not in ("completed", "failed"):
+                # This run's own approval could not be used (expired): ask again on resume.
+                self._set_awaiting(state, row)
             return RunOutcome(
                 state.run_id, self._require_run(state.run_id)["status"],
                 message="the approval could not be used (already used, expired or for another "
