@@ -37,6 +37,9 @@ HARNESS_VARS = [
     "HARNESS_COPILOT_MAX_PROMPT_CHARS",
     "HARNESS_VAULT_ROOT",
     "HARNESS_MEMORY_CONTEXT_MAX_BYTES",
+    "HARNESS_MOCK_RESPONSES",
+    "HARNESS_SKILLS_DIR",
+    "HARNESS_APPROVAL_TTL_S",
     # No longer read by the harness; cleared so a developer's shell cannot change a test.
     "HARNESS_PROFILE",
 ]

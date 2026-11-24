@@ -17,6 +17,7 @@ class Settings:
     request_timeout_s: float
     mock_behavior: str
     mock_delay_ms: int
+    mock_responses: str  # path of the scripted answers of the Mock, or empty
     # Copilot Web and its dedicated Edge profile. Real values live only in the local `.env`.
     copilot_url: str | None = None
     edge_profile: Path | None = None
@@ -36,6 +37,7 @@ class Settings:
             request_timeout_s=_number(env, "HARNESS_REQUEST_TIMEOUT_S", 120.0),
             mock_behavior=env.get("HARNESS_MOCK_BEHAVIOR") or "ok",
             mock_delay_ms=int(_number(env, "HARNESS_MOCK_DELAY_MS", 0)),
+            mock_responses=(env.get("HARNESS_MOCK_RESPONSES") or "").strip(),
             copilot_url=env.get("HARNESS_COPILOT_URL") or None,
             edge_profile=Path(profile) if profile else data_dir / "edge-profile",
             copilot_ready_timeout_s=_number(env, "HARNESS_COPILOT_READY_TIMEOUT_S", 60.0),
