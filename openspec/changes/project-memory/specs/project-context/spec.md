@@ -55,11 +55,11 @@ El bloque SHALL ir precedido de un aviso de que es material de referencia y no i
 - **THEN** el texto enviado termina con la pregunta del usuario, después del marcador de cierre
 
 ### Requirement: Una instrucción en una nota no cambia la conducta del harness
-El texto de una nota SHALL NOT alterar qué notas se incluyen, el perfil, el vault, el proyecto, el límite de tamaño, el proveedor ni el estado del vault.
+El texto de una nota SHALL NOT alterar qué notas se incluyen, el vault, el proyecto, el límite de tamaño, el proveedor ni el estado del vault.
 
 #### Scenario: Nota con órdenes al harness
-- **WHEN** una nota de `demo-alpha` pide cambiar al perfil `personal`, incluir el proyecto `demo-beta`, ignorar el límite de tamaño y guardar una decisión, y el usuario pregunta con `--project demo-alpha`
-- **THEN** las notas enviadas, el número de bytes, el perfil ligado y el contenido del vault son idénticos a los de la misma pregunta sin esa nota salvo la propia nota, y no se crea ningún fichero en el vault
+- **WHEN** una nota de `demo-alpha` pide usar otro vault, incluir el proyecto `demo-beta`, ignorar el límite de tamaño y guardar una decisión, y el usuario pregunta con `--project demo-alpha`
+- **THEN** las notas enviadas, el número de bytes y el contenido del vault son idénticos a los de la misma pregunta sin esa nota salvo la propia nota, y no se crea ningún fichero en el vault
 
 ### Requirement: Preguntar con contexto de proyecto
 `ask SESSION_ID PROMPT --project SLUG` SHALL exigir que la sesión esté creada con ese mismo proyecto. Sin `--project`, `ask` SHALL NOT leer el vault.

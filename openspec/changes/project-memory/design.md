@@ -41,43 +41,40 @@ Restricciones que mandan sobre todo lo que sigue:
 
 - Escribir en el vault (decisiones, curación, Sueño, reparación).
 - Un índice persistente, búsqueda por relevancia o semántica.
-- Detectar cualquier mecanismo de sincronización posible (D3 dice cuáles).
+- Detectar o impedir la sincronización del vault por otros programas (D3, revisada: el harness solo garantiza que él no lo copia, sube ni modifica).
 - Garantizar que un modelo de lenguaje no obedezca una instrucción escrita en una nota (D6 dice qué sí se garantiza).
 
 ## Decisions
 
-### D1 · Configuración del vault y del perfil
+### D1 · Configuración del vault (Revisada el 2026-11-24: el perfil se retira)
 
-- **Qué:** `HARNESS_VAULT_ROOT` (ruta absoluta a la carpeta que contiene `projects/`, `Memoria/`…, equivalente a `MEMORIA_VAULT_ROOT`) y `HARNESS_PROFILE` (`work` | `personal`, `work` si falta). Se validan solo cuando un comando necesita la memoria (`memory …` o `ask --project`); `ask` sin `--project`, `session` e `history` no las leen. Límites: `HARNESS_MEMORY_CONTEXT_MAX_BYTES` (8192 por defecto, admitido 1024–65536). Constantes, no configurables en este corte: 3000 bytes por nota, 3 notas de sesión, 20 resultados de búsqueda (máx. 200 con `--limit`), 1 MiB por fichero leído, 20 000 ficheros por recorrido.
-- **Por qué:** los nombres ya están en `.env.example` y en §5 del plan maestro. `work` por defecto porque olvidar la variable debe dar la conducta más estricta. 8192 bytes queda cerca de los ~6 KB que inyecta `memoria-load.sh` (medido) con margen para decisiones; 3000 por nota es el mismo recorte de la nota de proyecto que usa ese script.
+- **Revisión (2026-11-24):** Wilson decidió el 2026-11-24 que el harness se usa solo para trabajo, que el repositorio no comparte ninguna información y que el vault tiene que poder vivir en el OneDrive corporativo para no perderse. Con un solo uso posible, el perfil (`HARNESS_PROFILE`, `work` | `personal`) no distingue nada y se retira con todo lo que dependía de él (D2 y D3, revertidas). Queda de esta decisión solo la raíz del vault y el límite del contexto. Si `HARNESS_PROFILE` sigue definida en un entorno, el harness la ignora.
+- **Qué:** `HARNESS_VAULT_ROOT` (ruta absoluta a la carpeta que contiene `projects/`, `Memoria/`…, equivalente a `MEMORIA_VAULT_ROOT`). Se valida solo cuando un comando necesita la memoria (`memory …` o `ask --project`); `ask` sin `--project`, `session` e `history` no la leen. Límites: `HARNESS_MEMORY_CONTEXT_MAX_BYTES` (8192 por defecto, admitido 1024–65536). Constantes, no configurables en este corte: 3000 bytes por nota, 3 notas de sesión, 20 resultados de búsqueda (máx. 200 con `--limit`), 1 MiB por fichero leído, 20 000 ficheros por recorrido.
+- **Por qué:** el nombre ya está en `.env.example` y en §5 del plan maestro. 8192 bytes queda cerca de los ~6 KB que inyecta `memoria-load.sh` (medido) con margen para decisiones; 3000 por nota es el mismo recorte de la nota de proyecto que usa ese script.
 - **Alternativas rechazadas:**
   - Leer `~/.claude/memoria.env` de `claude-memory-system`: acopla el harness a la configuración de otra herramienta, que además es bash con `source` y puede ejecutar código al leerse.
   - Hacer configurables todas las constantes: más variables que nadie va a tocar antes de saber el límite real de Copilot.
-- **Impacto:** spec `memory-vault` (Vault configurado y válido, Perfil de confidencialidad), `project-context` (Contexto acotado); README; tareas 1.x. El límite de entrada de Copilot Web **no está medido**: lo mide la sonda del Corte 2 y, si es menor, se baja el valor por defecto.
+  - (Revertida) Un perfil `work` | `personal` con `work` por defecto: era la base de D2 y D3; sin un uso `personal` solo añadía una variable y rechazos.
+- **Impacto:** spec `memory-vault` (Vault configurado y válido; el requisito «Perfil de confidencialidad» se borró del delta), `project-context` (Contexto acotado); README; `.env.example` (sin `HARNESS_PROFILE`); tareas 1.x. El límite de entrada de Copilot Web **no está medido**: lo mide la sonda del Corte 2 y, si es menor, se baja el valor por defecto.
 
-### D2 · El directorio de datos queda ligado a un perfil y un vault
+### D2 · El directorio de datos queda ligado a un perfil y un vault (Revertida el 2026-11-24)
 
-- **Qué:** una tabla `memory_binding` de una sola fila (`profile`, `vault_root` resuelta, `created_at`). El primer comando de memoria la escribe; los siguientes comparan y rechazan si el perfil o la raíz resuelta difieren. Para cambiar de perfil se usa otro `HARNESS_DATA_DIR`.
-- **Por qué:** es lo que impide la contaminación entre perfiles. Las sesiones, su historial y la procedencia viven en el directorio de datos: si un mismo directorio pudiera usarse con el vault `work` y con el `personal`, una sesión creada con uno recibiría contexto del otro, y la conversación remota de Copilot (que recuerda lo que se le envió) mezclaría los dos. `claude-memory-system` no deja marca de perfil dentro del vault (medido), así que la ligadura tiene que vivir del lado del harness.
+- **Revertida el 2026-11-24.** Wilson decidió el 2026-11-24 que el harness se usa solo para trabajo, que el repositorio no comparte ninguna información y que el vault tiene que poder vivir en el OneDrive corporativo para no perderse. Sin perfiles, la ligadura solo protegía de cambiar de vault sobre el mismo directorio de datos, y con un único uso eso producía un rechazo confuso («el vault cambió») sin evitar ninguna mezcla real. Se retiran la tabla `memory_binding`, la función de ligadura y su error; como la migración `002_memory.sql` no se había mergeado en ninguna rama, se editó en su sitio y solo crea `request_context` (no hay migración 003). Los comandos `memory …` ya no abren la base de datos: solo leen el vault. Lo que sigue es la decisión original, conservada como registro.
+- **Qué (original):** una tabla `memory_binding` de una sola fila (`profile`, `vault_root` resuelta, `created_at`). El primer comando de memoria la escribe; los siguientes comparan y rechazan si el perfil o la raíz resuelta difieren. Para cambiar de perfil se usa otro `HARNESS_DATA_DIR`.
+- **Por qué (original):** impedir la contaminación entre perfiles; `claude-memory-system` no deja marca de perfil dentro del vault (medido), así que la ligadura tenía que vivir del lado del harness.
+- **Alternativas rechazadas (original):** marcador de perfil en la raíz del vault (escritura en un vault ajeno, rompe D9); perfil por sesión (permite mezclar en la misma base); no ligar nada y confiar en la configuración. Con la revisión, esta última es la que queda: hay una sola configuración posible.
+- **Impacto de la reversión:** spec `memory-vault` (se borró del delta el requisito «Directorio de datos ligado a un perfil y un vault» con sus tres escenarios); migración `002_memory.sql`; tareas 2.1 y 2.2 (revisadas).
+
+### D3 · SEC-13: qué significa «denegar» en una CLI local (Revertida el 2026-11-24 en su punto 2)
+
+- **Revertida el 2026-11-24 en su punto 2.** Wilson decidió el 2026-11-24 que el harness se usa solo para trabajo, que el repositorio no comparte ninguna información y que el vault tiene que poder vivir en el OneDrive corporativo para no perderse. El harness ya **no rechaza** ninguna ubicación, ni para el vault ni para `HARNESS_DATA_DIR`: ni carpetas de OneDrive, Dropbox, iCloud o Google Drive, ni rutas de red, ni carpetas dentro de un repositorio git con remoto (el `./data` por defecto dentro de un clon de este repo funciona). Se retiran `location_refusal`, `collect_markers`, `is_network_path`, el error `SyncedLocationRefused` y sus tests. Esto también resuelve la pregunta abierta sobre OneDrive corporativo: cuenta como ubicación válida.
+- **Qué queda (puntos 1 y 3 reformulados):** SEC-13 se cubre con un único hecho, y solo con ese: el harness **no contiene ningún camino de código que copie, suba o sincronice el vault, y nunca escribe en él**. Oráculo: el test de arquitectura que busca en `harness/memory/` primitivas de red, de subproceso, de copia y de escritura (`shutil.copy*`, `subprocess`, `urllib`, `http`, `socket`, `open(` en modo escritura, `write_text`, `os.replace`…) y no encuentra ninguna, y la huella del vault (rutas, tamaños, `mtime_ns`, SHA-256) idéntica antes y después de cada comando de memoria y de `ask --project`. **No se afirma más:** si el vault vive en una carpeta sincronizada, lo que haga el cliente de sincronización con él es cosa de ese cliente y de la configuración de la máquina, no del harness.
+- **Por qué:** una CLI no puede impedir que otro programa suba una carpeta; lo que sí puede garantizar es no ser ella quien la suba ni la modifique.
 - **Alternativas rechazadas:**
-  - Escribir un fichero marcador de perfil en la raíz del vault: es una escritura en un vault cuyo dueño es otro sistema y rompe la premisa de solo lectura (D9).
-  - Guardar el perfil por sesión: permite tener sesiones `work` y `personal` en la misma base, que es justo la mezcla que se quiere evitar.
-  - No ligar nada y confiar en la configuración: «una configuración está a una edición de estar mal» es la lección que `claude-memory-system` escribió tras su v1.5.0.
-- **Impacto:** spec `memory-vault` (Directorio de datos ligado a un perfil y un vault); migración nueva; tareas 2.x.
-
-### D3 · SEC-13: qué significa «denegar» en una CLI local
-
-- **Qué:** tres cosas, y solo estas:
-  1. El harness **no tiene ningún camino de código que copie, suba o sincronice** el vault ni el directorio de datos. Un test lo vigila con un grep (sin `shutil.copy*`, `subprocess`, `urllib`, `http`, `socket` en `harness/memory/`) y con la huella del vault antes y después de cada comando.
-  2. Con perfil `work`, antes de leer nada, el harness **se niega** a usar una raíz de vault o un `HARNESS_DATA_DIR` que: es una ruta de red (`PureWindowsPath` con unidad `\\servidor\recurso`, o raíz que empiece por `//`); o tiene un componente de ruta reconocido como carpeta de sincronización (`CloudStorage` y `Mobile Documents` de macOS, cualquier componente que empiece por `OneDrive`, `Dropbox`, `Google Drive`, `iCloud Drive`); o está bajo la ruta de una de las variables `OneDrive`, `OneDriveCommercial`, `OneDriveConsumer` si existen; o tiene en ella o en un ancestro un marcador de cliente de sincronización (`.dropbox`, `.stfolder`, `.sync`) o un `.git` cuyo `config` declara un `[remote`. La comprobación es una función pura sobre el texto de la ruta y una lista de nombres presentes, igual en las dos plataformas (una variable que no existe en la Mac simplemente no aporta rutas).
-  3. El rechazo es un error controlado que **nombra el motivo** (qué componente o marcador), con código 1. No hay variable para saltárselo en este corte.
-- **Por qué:** una CLI no puede impedir que otro programa (un cliente de OneDrive, un bisync de rclone lanzado por un timer) suba una carpeta. Lo que sí puede es no ser ella quien la suba y no aceptar trabajar donde sabe que la carpeta sale de la máquina. Medido: `sync-obsidian.sh` sincroniza el vault entero sin mirar el perfil, así que un vault `work` en una máquina mal configurada saldría por esa vía; el harness no puede verlo y lo deja escrito como límite.
-- **Alternativas rechazadas:**
-  - Una variable de escape (`HARNESS_ALLOW_SYNCED_WORK_VAULT`): la misma «configuración a una edición de estar mal». Si Wilson decide que el OneDrive corporativo es un destino aceptable, se añade como lista explícita en un change propio.
+  - (Original, ahora revertida) Negarse con perfil `work` a usar una carpeta de sincronización reconocida, una ruta de red o un repositorio con remoto: dejaba fuera justo el sitio donde Wilson necesita el vault (OneDrive corporativo) y rechazaba el `./data` por defecto dentro de un clon.
+  - Una variable de escape para la comprobación anterior: «una configuración a una edición de estar mal»; con la reversión deja de tener objeto.
   - Consultar los procesos en ejecución o el estado de los clientes de sync: depende de cada plataforma y de cada cliente, y no prueba nada sobre el futuro.
-  - Comprobar solo al configurar: el vault puede moverse después; la comprobación cuesta microsegundos y se hace en cada comando.
-- **Impacto:** spec `memory-vault` (Un vault de trabajo no se usa desde una ubicación sincronizada); tareas 3.x; README («qué detecta y qué no»).
-- **Decisión que Wilson debe confirmar antes de implementar:** con esta regla, un vault `work` dentro de **OneDrive corporativo** queda rechazado. Si el vault de trabajo real vive ahí (no se ha medido), el harness no servirá en esa máquina hasta que se decida si OneDrive corporativo cuenta como «sincronización externa».
+- **Impacto:** spec `memory-vault` (se borró del delta el requisito «Un vault de trabajo no se usa desde una ubicación sincronizada» con sus escenarios «Vault work en carpeta sincronizada», «Vault work en ruta de red» y «Vault personal en carpeta sincronizada»; el escenario «Ningún comando de memoria escribe fuera del directorio de datos» pasa al requisito nuevo «El harness no copia, sincroniza ni modifica el vault»); tarea 3.3 (revisada) y 3.4; README.
 
 ### D4 · SEC-04: confinamiento con un solo camino de código
 
@@ -85,7 +82,7 @@ Restricciones que mandan sobre todo lo que sigue:
   - **Raíz:** `Path(raw)`; debe ser absoluta; se resuelve una vez con `Path.resolve(strict=True)` (la raíz puede ser un enlace: se confina a su destino real).
   - **Identificador de proyecto** (función pura, la única entrada del usuario que se convierte en ruta): solo `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`; se rechazan además `.`/`..`, nombres que acaban en punto o espacio, y los nombres reservados de Windows (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, con o sin extensión) con una lista propia, porque `is_reserved()` está obsoleto y `os.path.isreserved` no existe en la Mac (medido). La expresión ya excluye `/`, `\`, `:` y por tanto unidades, UNC y flujos alternativos de NTFS. Después, el nombre debe aparecer **exactamente** en `os.listdir(root / "projects")`: así `Demo-Alpha` no abre `demo-alpha` ni en APFS ni en NTFS, que no distinguen mayúsculas por defecto.
   - **Recorrido:** `os.walk(root, followlinks=False)` filtrando en cada nivel; cada entrada se descarta si `is_symlink()` o `is_junction()` (existe en las dos plataformas, medido) y cada fichero si `st_nlink > 1`. Para cada fichero aceptado: `Path.resolve()` debe cumplir `is_relative_to(root_real)`; comprobación redundante a propósito, porque cubre lo que el filtro no vea (una unión mal reportada, un enlace en un ancestro).
-  - **Pruebas:** la lógica pura (validación de proyecto, ruta de red, carpeta sincronizada, contención) se prueba en la Mac con `PureWindowsPath` y `PurePosixPath`; la de ficheros se prueba con enlaces simbólicos reales creados por el test en un directorio temporal.
+  - **Pruebas:** la lógica pura (validación de proyecto, que también rechaza formas de ruta de red, y contención) se prueba en la Mac con `PureWindowsPath` y `PurePosixPath`; la de ficheros se prueba con enlaces simbólicos reales creados por el test en un directorio temporal.
 - **Por qué:** `resolve()` + `is_relative_to()` es la misma llamada en las dos plataformas y ya sabe de separadores, unidades y mayúsculas (medido con `PureWindowsPath`). Descartar enlaces en vez de seguirlos y validar su destino evita tener que razonar sobre enlaces que cambian de destino.
 - **Alternativas rechazadas:**
   - Seguir enlaces que apunten dentro de la raíz: cómodo, pero un enlace puede cambiar de destino entre la comprobación y la lectura, y obliga a detectar ciclos.
@@ -116,7 +113,7 @@ Restricciones que mandan sobre todo lo que sigue:
   - Rellenar el presupuesto con notas de menor prioridad que sí caben: el contenido enviado dependería del tamaño de notas ajenas y sería más difícil de explicar.
   - Delimitar con un marcador fijo (como bloques de código Markdown): una nota puede contener el cierre.
   - Escapar el contenido (JSON, base64): el proveedor real es una interfaz web; el texto debe seguir siendo legible para el modelo.
-- **Qué prueba SEC-03 y qué no:** el Mock no interpreta texto, así que ningún test puede demostrar que un modelo real no obedecerá una nota. Se prueba lo que sí depende del harness: una nota con órdenes al harness (cambiar de perfil, incluir `demo-beta`, ignorar el límite, guardar una decisión) produce **exactamente** el mismo conjunto de notas, los mismos bytes salvo la propia nota, el mismo perfil ligado y el vault intacto que sin esas órdenes; y un marcador falsificado no saca texto del bloque. Oráculo: un proveedor de prueba que registra el texto recibido, la huella del vault y `SELECT` sobre `memory_binding` y `request_context`. En este corte no hay herramientas ni escrituras que una instrucción pueda disparar; cuando lleguen (cortes 4 y 5) la defensa son las políticas y las aprobaciones, no este aviso.
+- **Qué prueba SEC-03 y qué no:** el Mock no interpreta texto, así que ningún test puede demostrar que un modelo real no obedecerá una nota. Se prueba lo que sí depende del harness: una nota con órdenes al harness (usar otro vault, incluir `demo-beta`, ignorar el límite, guardar una decisión) produce **exactamente** el mismo conjunto de notas, los mismos bytes salvo la propia nota y el vault intacto que sin esas órdenes; y un marcador falsificado no saca texto del bloque. Oráculo: un proveedor de prueba que registra el texto recibido, la huella del vault y `SELECT` sobre `request_context` (la comprobación de `memory_binding` se retiró con D2, revertida). En este corte no hay herramientas ni escrituras que una instrucción pueda disparar; cuando lleguen (cortes 4 y 5) la defensa son las políticas y las aprobaciones, no este aviso.
 - **Impacto:** spec `project-context` completa; tareas 5.x.
 
 ### D7 · `ask --project`: el contexto viaja aparte y no se guarda
@@ -160,7 +157,7 @@ Restricciones que mandan sobre todo lo que sigue:
 
 ### D11 · Paquete, CLI y migración
 
-- **Qué:** `harness/memory/` con `config.py` (perfil, raíz, ligadura, sync), `paths.py` (validación pura y recorrido), `notes.py` (lectura y frontmatter), `redaction.py`, `search.py`, `context.py`, `maintenance.py`. CLI: `memory search QUERY [--project SLUG] [--limit N]`, `memory context SLUG`, `memory maintain --dry-run`, y `ask ... --project SLUG`. Códigos de salida de D10 de `session-core` (0, 1, 2). Migración `002_memory.sql` con `memory_binding` y `request_context` (FK a `requests`); la 002 estaba libre porque el bloqueo de sesión se reimplementó sobre SQLite sin migración.
+- **Qué:** `harness/memory/` con `config.py` (raíz y límite), `paths.py` (validación pura y recorrido), `notes.py` (lectura y frontmatter), `redaction.py`, `search.py`, `context.py`, `maintenance.py`. CLI: `memory search QUERY [--project SLUG] [--limit N]`, `memory context SLUG`, `memory maintain --dry-run`, y `ask ... --project SLUG`. Códigos de salida de D10 de `session-core` (0, 1, 2). Migración `002_memory.sql` con `request_context` (FK a `requests`); la 002 estaba libre porque el bloqueo de sesión se reimplementó sobre SQLite sin migración. (Revisada el 2026-11-24: `memory_binding` se retiró con D2 y la migración se editó en su sitio, porque no se había mergeado.) `config.py` queda con la raíz y el límite; los comandos `memory …` no abren la base de datos.
 - **Por qué:** subconjunto de `harness/memory/` de §4 del plan maestro sin `capture`, `curator` ni `dream`, que no existen en este corte.
 - **Alternativas rechazadas:** un único módulo `memory.py`: mezclaría la parte pura (probada con `PureWindowsPath`) con la de ficheros.
 - **Impacto:** tareas 1.x y 2.x.
@@ -169,7 +166,7 @@ Restricciones que mandan sobre todo lo que sigue:
 
 - [El vault de trabajo real no sigue la estructura de `claude-memory-system` (en Windows ese sistema no corre, medido)] → la tarea 7.3 la mide Wilson en local y aporta solo recuentos (notas por categoría, notas seleccionadas para un proyecto), nunca nombres ni contenido. Si no coincide, se ajusta la selección de D6 en este mismo change.
 - [Pocas notas curadas declaran proyecto: el frontmatter medido de `Lecciones/` y `Memoria-CC/` no obliga a `project_slug` ni a etiquetas] → el contexto quedaría reducido a la nota de proyecto y las sesiones. Se mide en 7.3; ampliar la regla (por ejemplo, por enlace `[[projects/<slug>/...]]`) es un cambio de spec y se decide con el dato.
-- [Una herramienta de sincronización no reconocida sube un vault `work`] → no se detecta. Límite escrito en README; la defensa de fondo es la configuración de la máquina (medido: `sync-obsidian.sh` no mira el perfil).
+- [El vault vive en una carpeta sincronizada (por ejemplo, OneDrive corporativo) y su cliente lo sube] → aceptado por decisión de Wilson (D3, revisada): el harness no lo impide ni lo detecta; garantiza solo que él no copia, sube ni modifica el vault. Escrito en README.
 - [Carrera entre la comprobación de enlace y la lectura (TOCTOU)] → un proceso local que cambie un fichero por un enlace en ese microsegundo podría hacer leer fuera; la comprobación `resolve()` posterior la reduce pero no la elimina sin `O_NOFOLLOW`, que no existe en Windows. Amenaza local de un solo usuario; se acepta y se escribe.
 - [Una nota maliciosa convence al modelo real] → mitigación, no garantía (D6). La defensa real llega con políticas y aprobaciones en los cortes 4–5.
 - [Credenciales de formato desconocido] → pasan sin tocar (D8). Escrito.
@@ -180,7 +177,7 @@ Restricciones que mandan sobre todo lo que sigue:
 
 ## Migration Plan
 
-Migración SQLite aditiva (dos tablas nuevas); no toca `sessions`, `requests` ni `messages`. Sin `HARNESS_VAULT_ROOT`, todo lo de `session-core` sigue igual. Vuelta atrás: revertir el change; las tablas nuevas quedan sin uso.
+Migración SQLite aditiva (una tabla nueva, `request_context`); no toca `sessions`, `requests` ni `messages`. Sin `HARNESS_VAULT_ROOT`, todo lo de `session-core` sigue igual. Vuelta atrás: revertir el change; las tablas nuevas quedan sin uso.
 
 ## Open Questions
 
