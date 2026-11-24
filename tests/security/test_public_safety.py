@@ -4,6 +4,7 @@ Every bad sample is assembled at run time so that this file itself stays clean.
 """
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -129,14 +130,42 @@ def test_case_sensitive_term_spares_the_ordinary_word():
 
 
 def test_missing_denylist_is_reported_not_hidden(tmp_path):
+    # The parent environment is passed through: wiping it removes USERPROFILE on Windows,
+    # which is not what this test is about.
+    env = {**os.environ, guard.DENYLIST_ENV: str(tmp_path / "absent.txt")}
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "README.md"],
         cwd=REPO_ROOT,
-        env={"PATH": "", guard.DENYLIST_ENV: str(tmp_path / "absent.txt")},
+        env=env,
         capture_output=True,
         text=True,
     )
+    assert result.returncode == 0, result.stderr
     assert "WARNING no local denylist" in result.stderr
+
+
+def _no_home():
+    raise RuntimeError("Could not determine home directory.")
+
+
+def test_denylist_variable_does_not_need_a_home_directory(tmp_path, monkeypatch):
+    monkeypatch.setattr(guard.Path, "home", staticmethod(_no_home))
+    denylist = tmp_path / "denylist.txt"
+    denylist.write_text("termino\n", encoding="utf-8")
+    terms, path, configured = guard.load_denylist({guard.DENYLIST_ENV: str(denylist)})
+    assert (terms, path, configured) == (["termino"], denylist, True)
+
+
+def test_no_home_directory_means_no_local_denylist(monkeypatch, capsys):
+    # macOS falls back to the password database when HOME is missing, so the Windows
+    # failure (no USERPROFILE) is reproduced by making Path.home raise.
+    monkeypatch.setattr(guard.Path, "home", staticmethod(_no_home))
+    terms, path, configured = guard.load_denylist({})
+    assert (terms, path, configured) == ([], None, False)
+    assert guard.main(["README.md"]) == 0
+    assert "WARNING no local denylist (the home directory could not be determined)" in (
+        capsys.readouterr().err
+    )
 
 
 def test_lock_file_content_is_not_scanned():
