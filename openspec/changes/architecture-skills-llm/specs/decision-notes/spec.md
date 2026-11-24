@@ -40,10 +40,10 @@ La nota SHALL empezar con un frontmatter que el lector de memoria acepta como v�
 - **THEN** la nota aparece en la sección `Decisiones` del bloque y `memory maintain --dry-run` no la cuenta en `invalid_frontmatter`
 
 ### Requirement: Escritura atómica que nunca sobrescribe
-La nota SHALL escribirse en un temporal oculto dentro de `Decisiones/` que después se renombra al nombre final, y SHALL NOT escribirse si el nombre final ya existe, de cualquier tipo. Un lector SHALL ver la nota entera o ninguna nota.
+La nota SHALL escribirse en un temporal oculto dentro de `Decisiones/` que después se publica con su nombre final mediante una operación que falla si ese nombre ya existe, de cualquier tipo, y SHALL NOT sustituir nunca un fichero existente. Un lector SHALL ver la nota entera o ninguna nota.
 
 #### Scenario: Destino ocupado
-- **WHEN** justo antes del renombrado el fichero de destino ya existe con otro contenido
+- **WHEN** justo antes de publicar la nota el fichero de destino ya existe con otro contenido
 - **THEN** no se sobrescribe, el temporal se borra, el paso queda `failed` con `conflict` y el fichero existente conserva sus bytes
 
 #### Scenario: Temporal invisible para la memoria
@@ -84,19 +84,19 @@ Dos procesos del harness SHALL NOT escribir decisiones en el mismo vault a la ve
 - **THEN** la escritura falla con un error controlado, la aprobación sigue `granted` y el vault queda intacto
 
 ### Requirement: Escritura interrumpida se reconcilia sin repetir
-Si el proceso muere después de consumir la aprobación y antes de registrar el final de la escritura, el paso SHALL quedar `uncertain`. Al reanudar, el sistema SHALL comprobar el vault sin escribir: si existe la nota con ese identificador y los bytes aprobados, el paso se completa; si no existe, se pide una aprobación nueva; si existe con otros bytes, el paso queda `failed`.
+Si el proceso muere después de consumir la aprobación y antes de registrar el final de la escritura, el paso SHALL quedar `uncertain`. Al reanudar, el sistema SHALL comprobar el vault sin escribir: si existe la nota con ese identificador y los bytes aprobados, el paso se completa; si no existe, se pide una aprobación nueva; si existe con otros bytes, el paso SHALL seguir `uncertain` y `resume` SHALL negarse con código 1 sin escribir nada, para que una persona revise el vault.
 
 #### Scenario: Muerte tras el renombrado
-- **WHEN** el proceso muere justo después de renombrar la nota y se reanuda la ejecución
+- **WHEN** el proceso muere justo después de publicar la nota (con el temporal todavía presente o ya borrado) y se reanuda la ejecución
 - **THEN** el paso queda `completed` sin escribir otra vez y el vault tiene una sola nota con ese identificador
 
 #### Scenario: Muerte antes del renombrado
-- **WHEN** el proceso muere después de consumir la aprobación y antes de renombrar, y se reanuda en una terminal
+- **WHEN** el proceso muere después de consumir la aprobación y antes de publicar la nota (con o sin temporal escrito), y se reanuda en una terminal
 - **THEN** se pide una aprobación nueva para los mismos bytes y solo con ella se escribe la nota
 
 #### Scenario: Nota distinta con el mismo identificador
 - **WHEN** al reconciliar existe una nota con ese identificador y otro contenido
-- **THEN** el paso queda `failed` con `conflict` y no se escribe nada
+- **THEN** el paso sigue `uncertain`, `resume` termina con código 1 nombrando el conflicto y no se escribe nada
 
 ### Requirement: Nada del contenido en SQLite con proveedor real
 Con un proveedor que no declara contenido sintético, SQLite SHALL guardar de la nota solo su identificador de decisión, su SHA-256 y su tamaño, nunca su ruta ni su texto.
