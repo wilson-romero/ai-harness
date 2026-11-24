@@ -63,7 +63,7 @@ Cada llamada, permitida o denegada, SHALL dejar una fila con servidor, herramien
 - **THEN** existe una fila con decisión `denied` y motivo `server_not_allowed`, con el nombre pedido saneado y recortado
 
 ### Requirement: Resultados como datos no confiables
-Todo texto de un resultado SHALL pasar, antes de imprimirse, por el mismo saneado de caracteres de control y de formato y la misma redacción de credenciales que el texto del vault. Un resultado SHALL NOT poder cambiar qué servidor, herramienta o argumentos usa el harness ni aprobar nada.
+Todo texto de un resultado SHALL pasar, antes de imprimirse, por el mismo saneado de caracteres de control y de formato y la misma redacción de credenciales que el texto del vault, después de quitar enteras las secuencias de escape de terminal (revisada el 2026-11-24, D7). Un resultado SHALL NOT poder cambiar qué servidor, herramienta o argumentos usa el harness ni aprobar nada.
 
 #### Scenario: Credencial en un resultado
 - **WHEN** la herramienta sintética devuelve un texto con un token con formato de GitHub

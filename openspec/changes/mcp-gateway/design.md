@@ -6,6 +6,7 @@ Parte de `develop` en `8cb2ec5` (cortes 0, 1 y 3 mergeados y archivados). La mot
 
 - CLI `argparse` en `harness/cli.py` con códigos de salida 0, 1, 2 y 130 (D10 de `session-core`) y salida en UTF-8 por capacidad (`reconfigure`), no por plataforma.
 - SQLite con migraciones numeradas `001_initial.sql` y `002_memory.sql`; `audit_events` sin columna de detalle. `feature/skill-engine` (no mergeada) añade `003_skills.sql`, `approvals`, `audit_events.run_id`/`detail` y generaliza `SessionLock` a `NamedLock`; `feature/copilot-web-provider` (no mergeada) añade `playwright`, `harness/browser/` y un bloqueo con nombre `browser`. Este change no toca ninguno de esos ficheros y su migración toma el número libre al integrar.
+- *Revisada el 2026-11-24 (develop mergeado en la rama, `d0ca004`):* `skill-engine` ya está en `develop` con `003_skills.sql`, `NamedLock` (`harness/storage/locks.py`), las aprobaciones (`harness/skills/approvals.py` y el consumo en `harness/skills/engine.py`) y sus importaciones de `harness.memory.safe_text`/`redaction`. La migración de este change es por tanto la **`004_tool_calls.sql`**; `feature/architecture-skills-llm`, en curso, podría añadir otra: el segundo en integrar renumera.
 - `harness/memory/safe_text.py` y `harness/memory/redaction.py`: el saneado común (quitar `Cc`, `Cf` y separadores de línea, después redactar 13 patrones lineales). Es lo que se reutiliza para los resultados (D7).
 - `tests/unit/test_portability.py`: ninguna rama por plataforma fuera de `harness/enterprise_architect/`.
 
@@ -29,6 +30,12 @@ Todas comprobadas el 2026-11-24, en la Mac (arm64, CPython 3.14.8, uv 0.13.1), s
   - **Cierre:** al salir del bloque, cierra stdin, espera 2 s (`PROCESS_TERMINATION_TIMEOUT`), y si sigue vivo mata el árbol: en POSIX el grupo de procesos (el hijo se crea con sesión propia) con SIGTERM y 2 s después SIGKILL; en Windows termina el Job Object del servidor, que mata también a sus hijos. Si sobrevive a todo, registra un aviso y lo **abandona**. Un servidor que **sale solo** al cerrar su stdin deja vivos a sus hijos en POSIX (documentado en `docs/migration.md`).
   - **Lectura de stdout:** acumula en un `str` hasta el salto de línea (`buffer = (buffer + chunk).split("\n")`), **sin límite**: una línea enorme sin salto crece en memoria y el coste de concatenar es cuadrático. Una línea que no es JSON-RPC se devuelve como excepción a la sesión, que la entrega al `message_handler` del cliente; el SDK además la registra con `logger.exception`, cuyo texto incluye un trozo de la línea.
   - **Servidor:** `MCPServer` (antes `FastMCP`) por stdio mueve el protocolo a descriptores privados y desvía a stderr lo que se escriba en stdout mientras sirve; lo escrito antes de empezar a servir sí llega al canal.
+- *Revisada el 2026-11-24, medido ya con el SDK instalado (`uv add "mcp==2.3.0"`, 25 paquetes nuevos en el lock: anyio, attrs, cffi, click, cryptography, h11, httpcore2, httpx2, httpx2-jsfetch, idna, jsonschema, jsonschema-specifications, mcp, mcp-types, opentelemetry-api, pycparser, pyjwt, python-multipart, pywin32 —solo Windows—, referencing, rpds-py, sse-starlette, starlette, truststore, uvicorn):*
+  - Ida y vuelta stdio real en CPython 3.14.8: el cliente negocia y llama a un `MCPServer` del SDK (test `test_a_server_written_with_the_official_sdk`).
+  - **Línea sin límite, ejecutado:** con `stdio_client` del SDK, un servidor que escribe 8 MiB sin salto lleva el proceso a 484 MiB de RSS; con 16 MiB, a 1003 MiB. Supera el umbral de 512 MiB de la tarea 2.6, así que D1 se reabrió (ver D1).
+  - `import mcp` carga `starlette`, `uvicorn`, `httpx2`, `mcp.server` y `socketserver` (unos 227 ms). Ninguno abre un socket al importarse (el test de audit hook de D9 no ve ningún `bind` que no sea de `socketpair`), pero el harness lo importa solo dentro de los comandos `mcp`.
+  - `Client.call_tool` repite la llamada en las rondas «input required» y vuelve a listar herramientas si cambia una cabecera; `client.session.call_tool` hace una sola petición y valida igualmente `structured_content` contra `output_schema` con `jsonschema`.
+  - Sin `sampling_callback`, el SDK responde a una petición de muestreo del servidor con el error JSON-RPC **-32600** (medido con el modo `sampling`).
 - **`uv run --with`** (documentación de uv en Context7, `/astral-sh/uv`, `docs/concepts/projects/run.md`): añade una dependencia «para una sola invocación». Medido en la Mac: `uv run --with pywin32 python -c ...` falla al resolver («pywin32>=311 has no wheels with a matching platform tag (e.g., `macosx_26_0_arm64`)») y `git status` queda limpio, es decir, no toca `uv.lock` ni `pyproject.toml`. Lo usa la sonda de `ea-read`, no este change.
 
 ## Goals / Non-Goals
@@ -57,6 +64,7 @@ Todas comprobadas el 2026-11-24, en la Mac (arm64, CPython 3.14.8, uv 0.13.1), s
   - `mcp` sin fijar o con `>=`: el lock lo fija igual, pero un `uv lock --upgrade` cambiaría la conducta de cierre sin que nadie lo revise.
 - **Coste aceptado:** 25 paquetes nuevos en el lock, entre ellos servidores web (`starlette`, `uvicorn`) que este proyecto no importa. Se justifica porque el SDK no ofrece un paquete solo-cliente (`mcp-types` solo trae los tipos). `pywin32` entra en el lock de Windows por el propio SDK, antes incluso de `ea-read`.
 - **Impacto:** `pyproject.toml`, `uv.lock`; tarea 1.2; `ea-read` hereda la dependencia.
+- *Revisada el 2026-11-24.* **Decisión de Wilson:** el 2026-11-24, a pregunta directa, Wilson aprobó usar el SDK oficial `mcp==2.3.0` en lugar de un cliente propio. **Lo que cambia la medida de la tarea 2.6:** `stdio_client` acumula la línea sin límite (484 MiB con 8 MiB sin salto), así que el transporte es propio y acotado, `harness/mcp/transport.py` (`bounded_stdio`), y reutiliza del SDK fijado las funciones que ya llevan las ramas por plataforma: `_create_platform_compatible_process` (grupo de procesos o Job Object), `_get_executable_command`, `_stop_server_process` (cierre de stdin, 2 s, terminación del árbol) y `_drain_stdout`. Son funciones privadas: por eso la versión está fijada con `==` y los tests del grupo 3 son el oráculo al subirla; un test estructural comprueba que solo `transport.py` las usa. Del resto del SDK se usan `Client(transport, mode="legacy")`, `client.session.call_tool` y los tipos y el validador de mensajes JSON-RPC. `MCPServer` solo aparece en un fixture de interoperabilidad.
 
 ### D2 · La lista local de servidores: formato, ubicación y quién la edita
 
@@ -90,7 +98,9 @@ Todas comprobadas el 2026-11-24, en la Mac (arm64, CPython 3.14.8, uv 0.13.1), s
     ```
 
   - **Reglas:** nombre de servidor y de herramienta `[a-z][a-z0-9_-]{0,63}`; `command` es una lista no vacía y `command[0]` una ruta absoluta (sin búsqueda en `PATH`, para que un ejecutable plantado en el directorio actual o al principio de `PATH` no se cuele); `cwd` nulo o absoluto; `env` es una lista de **nombres** cuyos valores se copian de `os.environ` del harness (nunca valores escritos en la lista, para que no se guarden secretos en ella); plazos entre 1 y 300 s; `operation` obligatorio, `read` o `write`; `max_result_bytes` entre 1 KiB y 1 MiB (64 KiB por defecto); argumentos de tipo `string` (`max_length` ≤ 4096 obligatorio, `pattern` opcional con `re.fullmatch`), `integer` (`minimum`, `maximum` obligatorios), `boolean` o `enum` (lista de cadenas). Sin objetos anidados en este corte: las herramientas de `ea-read` no los necesitan.
-  - Los servidores **incorporados** (el de EA en `ea-read`) se declaran con `"builtin": "<nombre>"` en lugar de `command`: la orden y la lista de herramientas las fija el código, y la entrada solo aporta los datos locales (el destino).
+  - Los servidores **incorporados** (el de EA en `ea-read`) se declaran con `"builtin": "<nombre>"` en lugar de `command`: la orden y la lista de herramientas las fija el código, y la entrada solo aporta los datos locales (el destino). *Revisada el 2026-11-24:* este change no implementa `builtin` (el modelo lo rechaza como campo desconocido); lo añade `ea-read`, que es quien tiene un servidor incorporado.
+  - *Revisada el 2026-11-24, entorno base:* además de los nombres declarados, el servidor recibe —copiados de `os.environ`, solo si existen— la unión de las dos listas del SDK más `TMP`, `TMPDIR`, `WINDIR` y `COMSPEC` (`BASE_ENV_NAMES` en `harness/mcp/client.py`): `APPDATA`, `COMSPEC`, `HOME`, `HOMEDRIVE`, `HOMEPATH`, `LOCALAPPDATA`, `LOGNAME`, `PATH`, `PATHEXT`, `PROCESSOR_ARCHITECTURE`, `SHELL`, `SYSTEMDRIVE`, `SYSTEMROOT`, `TEMP`, `TERM`, `TMP`, `TMPDIR`, `USER`, `USERNAME`, `USERPROFILE`, `WINDIR`. Una sola lista para todos los sistemas (sin ramas): en Windows `SYSTEMROOT` es imprescindible para arrancar cualquier proceso y `TEMP`/`TMP`/`USERPROFILE` para que Python y sus módulos encuentren dónde escribir. Medido en la Mac: el servidor sintético arranca con solo esa base (`test_the_server_starts_with_only_the_base_environment`). En Windows no medido.
+  - *Revisada el 2026-11-24, ruta de la lista:* la comprobación de Git está en `harness/core/git_guard.py` (`git check-ignore`, con plazo propio y sin heredar tubos); la lista se lee de un descriptor abierto y se compara con `os.stat` de la ruta para rechazar un cambio entre la comprobación y la lectura; como mucho 256 KiB.
 - **Por qué:** JSON se lee con la biblioteca estándar y Pydantic ya valida los contratos del proyecto. Declarar los argumentos en local (y no fiarse del esquema del servidor) es lo que hace la política deny-by-default de verdad: lo que la persona no escribió no existe. Pedir nombres de variables y no valores evita que la lista se convierta en un almacén de secretos.
 - **Alternativas rechazadas:**
   - El formato `mcpServers` de otros clientes (orden como cadena, `env` con valores): admite una orden de shell y secretos en claro.
@@ -107,6 +117,7 @@ Todas comprobadas el 2026-11-24, en la Mac (arm64, CPython 3.14.8, uv 0.13.1), s
   - Mantener servidores vivos en segundo plano entre comandos: exige un proceso demonio, un canal para hablar con él (que sería una superficie de entrada, SEC-09) y un dueño del ciclo de vida.
   - Dejar el stderr del servidor en la terminal (el valor por defecto del SDK): mezclaría contenido no saneado con la salida del harness.
 - **Impacto:** spec `mcp-client` (Descubrir herramientas, Llamar a una herramienta); tareas 3.1 y 3.2.
+- *Revisada el 2026-11-24:* el arranque no usa `stdio_client` sino el transporte acotado de D1 con el mismo `errlog`; lo demás de esta decisión se mantiene.
 
 ### D4 · Plazos duros y ciclo de vida del subproceso (SEC-10)
 
@@ -123,6 +134,7 @@ Todas comprobadas el 2026-11-24, en la Mac (arm64, CPython 3.14.8, uv 0.13.1), s
   - `pytest-timeout`: una dependencia de desarrollo para lo que `faulthandler` ya hace.
 - **Límite que no se arregla:** en POSIX, un servidor que **sale solo** al cerrarse su stdin deja vivos a los hijos que haya lanzado (decisión documentada del SDK 2.x); el harness no los ve ni los mata. En Windows los mata el Job Object. El servidor de EA no lanza hijos (ver `ea-read`). Se escribe en el README.
 - **Impacto:** spec `mcp-client` (Plazos duros, Ningún proceso propio queda vivo); tareas 3.3 a 3.6.
+- *Revisada el 2026-11-24, lo implementado:* el hilo de trabajo corre `anyio.run` con un único `CancelScope` de fase cuyo plazo pasa de `startup_timeout_s` (arranque, negociación y `list_tools`) a `call_timeout_s` (llamada) y a infinito (cierre protegido). El hilo principal espera en trozos de 0,1 s contra plazos monótonos que mide él mismo: a arranque + llamada + **15 s** (`CANCEL_MARGIN_S`) pide cancelar con `loop.call_soon_threadsafe(scope.cancel)`; a arranque + llamada + **20 s** (`ABANDON_MARGIN_S`) abandona el hilo, audita `abandoned` y termina con `os._exit(1)`. Tras Ctrl+C concede 15 s al cierre y un segundo Ctrl+C no los acorta. El cierre del transporte registra si el proceso terminó (`server_stopped` en la auditoría).
 
 ### D5 · Motor de políticas: una función pura, deny-by-default
 
@@ -143,6 +155,7 @@ Todas comprobadas el 2026-11-24, en la Mac (arm64, CPython 3.14.8, uv 0.13.1), s
   - Validar argumentos solo contra el `inputSchema` del servidor con `jsonschema` (que el SDK ya trae): el esquema podría aceptar `path` o un objeto arbitrario; además `jsonschema` no es dependencia directa del proyecto.
   - Una política en un fichero aparte de la lista de servidores: dos ficheros que pueden discrepar sobre el mismo servidor.
 - **Impacto:** spec `tool-policy` (Denegado por defecto, Escrituras denegadas sin aprobación, Lo que dice el servidor no amplía la política); tareas 2.3 y 2.4.
+- *Revisada el 2026-11-24:* la función pura se partió en dos, `decide_before_start` (pasos 1–4, 6 y 7) y `decide_offered` (paso 5), porque la primera corre sin proceso y la segunda necesita la respuesta de `list_tools`; el resultado es el mismo orden. Se añade `args_not_json` (el texto de `--args` no es JSON estricto: profundidad ≤ 32, sin claves duplicadas, `NaN` ni sustitutos sueltos). `args_not_json`, `args_not_object` y `args_too_large` son errores de uso (código 2); el resto, código 1. El tamaño se mide sobre el texto recibido antes de analizarlo.
 
 ### D6 · Escrituras: denegadas aquí; en el Corte 6, la aprobación de `skill-engine`
 
@@ -152,6 +165,7 @@ Todas comprobadas el 2026-11-24, en la Mac (arm64, CPython 3.14.8, uv 0.13.1), s
   - Una confirmación `[s/N]` en `mcp call` para escrituras: se aprueba sin leer y sin hash; el Corte 6 tendría que retirarla.
   - Diseñar ya la columna de aprobación en `tool_calls`: `approvals` no existe en `develop`; se añade con la migración del Corte 6.
 - **Impacto:** spec `tool-policy` (Escrituras denegadas sin aprobación); ninguna tarea de este change implementa aprobaciones.
+- *Revisada el 2026-11-24, con el código ya mergeado:* lo que el Corte 6 reutilizará está en `harness/skills/approvals.py` (`PROPOSAL_FORMAT = "ai-harness/approval/1"`, `HASH_DOMAIN`, `Proposal`, `proposal_hash`, `render_for_terminal`, `decide` con `TtyTerminal` y `CODE_LENGTH = 8`) y el consumo de uso único en `SkillEngine` (`harness/skills/engine.py`: `UPDATE approvals SET status = 'consumed' … WHERE approval_id = ? AND status = 'granted' AND proposal_hash = ? AND expires_at > ?` en la misma transacción que deja el paso `applying`), con `reconcile` de `harness/skills/effects.py` para un efecto interrumpido. Ese código vive dentro de `harness/skills/`; el Corte 6 tendrá que sacar la parte común a un módulo neutral, como D7 hizo con el saneado. Este change no lo toca.
 
 ### D7 · Resultados como datos no confiables, con el saneado común movido a un módulo neutral
 
@@ -165,6 +179,11 @@ Todas comprobadas el 2026-11-24, en la Mac (arm64, CPython 3.14.8, uv 0.13.1), s
   - Dejar el saneado en `harness/memory/` e importarlo desde `harness/mcp/`: un paquete de herramientas dependería del de memoria por un detalle de ubicación.
   - Imprimir el JSON crudo y sanear solo los textos: las claves quedarían sin sanear.
   - Guardar el resultado con un proveedor sintético, como los mensajes del Mock: el resultado no lo escribe el proveedor; podría ser contenido real del modelo de EA.
+- *Revisada el 2026-11-24, lo implementado:*
+  - El movimiento es el commit `617309c`, aparte y sin cambio de conducta: los tests de memoria y de `skill-engine` pasan con solo las importaciones cambiadas, y `test_memory_no_writes.py` permite `harness.text.` y analiza también ese paquete.
+  - El tamaño se mide **en el transporte**, por mensaje JSON-RPC y antes de analizarlo: el límite es 1 MiB durante la negociación y el listado, y `max_result_bytes` durante la llamada; una línea que lo pasa se descarta mientras llega (sin acumularla) y la sesión termina con `result_too_large` o `message_too_large`.
+  - Texto ajeno: `safe_text` solo quitaba el carácter ESC, y el resto de una secuencia de color (`[31m`) quedaba pegado a un token y rompía el límite de palabra de la redacción. Se añadió `drop_escape_sequences` (CSI y OSC enteras, expresión lineal) y `safe_foreign_line`/`safe_foreign_text`, que la usan antes del saneado común; todo `harness/mcp/` usa esas dos. El saneado de la memoria no cambia (lo que lee del vault sigue con `safe_text`; queda como decisión abierta).
+  - Las claves que colisionan tras sanearse reciben un sufijo con un contador por clave (lineal; medido con 25 600 claves que colisionan, dentro del límite de 5 s del test).
 - **Impacto:** spec `tool-policy` (Resultados como datos no confiables); requisito ADDED «Resultados de herramientas enmascarados» de `secret-redaction`; tareas 1.3 y 4.1. Cuando el Corte 7 envíe resultados a un proveedor, los envolverá con el aviso y los delimitadores con nonce de D6 de `project-memory`, que también se moverán a `harness/text/` entonces.
 
 ### D8 · Sin bucles ni recursión
@@ -178,6 +197,7 @@ Todas comprobadas el 2026-11-24, en la Mac (arm64, CPython 3.14.8, uv 0.13.1), s
   - Un contador de profundidad que permita N niveles: no hay ningún caso de uso que necesite recursión.
   - Detectar la recursión por el árbol de procesos: depende de la plataforma.
 - **Límite:** la marca es una variable de entorno; un servidor malicioso puede borrarla antes de lanzar el harness. Protege contra el error y el encadenamiento accidental, no contra un servidor que ya ejecuta código arbitrario con los permisos del usuario.
+- *Revisada el 2026-11-24:* medido, el SDK 2.3.0 sin callback responde al muestreo con el error JSON-RPC -32600. La llamada usa `client.session.call_tool` y no `Client.call_tool`, que puede repetir la petición (ver premisas): así «como mucho una llamada» lo garantiza el código del harness y no una conducta del SDK.
 - **Impacto:** spec `tool-policy` (Sin bucles ni recursión); tareas 3.7 y 3.8. Los Skills del Corte 7 añadirán un límite de llamadas por ejecución (SEC-15).
 
 ### D9 · SEC-09 en este corte: qué se cubre y qué no
@@ -206,6 +226,7 @@ Todas comprobadas el 2026-11-24, en la Mac (arm64, CPython 3.14.8, uv 0.13.1), s
 - **Alternativas rechazadas:**
   - Usar `audit_events`: no tiene columnas para servidor, herramienta ni motivo en `develop`; `skill-engine` le añade `detail` como texto libre, que es justo lo que no se puede consultar con un `SELECT`.
   - Guardar los argumentos con un proveedor sintético: pueden contener un GUID real de EA.
+- *Revisada el 2026-11-24:* la migración es `004_tool_calls.sql`. Añade `server_stopped` (0/1/NULL: si el proceso había terminado al cerrar la sesión) y vocabularios cerrados con `CHECK`: `reason` (`allowed` y los motivos de D5 salvo `recursion`, que se niega antes de leer la configuración y de abrir la base, y por tanto no se audita) y `error_code` (`tool_error`, `timeout`, `protocol_error`, `server_exited`, `spawn_failed`, `invalid_result`, `result_too_large`, `message_too_large`, `interrupted`, `internal_error`, `abandoned`), y la coherencia `decision='denied'` ⇔ `status='denied'` y `decision='allowed'` ⇔ `reason='allowed'`. `server` y `tool` se guardan con `safe_foreign_line` (D7). La recuperación usa 900 s, por encima del plazo total máximo (300 + 300 + 20 s).
 - **Límite:** el SHA-256 de unos argumentos de pocos valores posibles (un nombre de proyecto) permite comprobar una suposición por fuerza bruta a quien lea la base. La base es local y del usuario; se acepta y se escribe.
 - **Impacto:** spec `tool-policy` (Auditoría de cada decisión sin contenido); `harness/storage/migrations/`; tareas 1.4 y 4.3.
 
@@ -215,6 +236,7 @@ Todas comprobadas el 2026-11-24, en la Mac (arm64, CPython 3.14.8, uv 0.13.1), s
 - **Por qué:** cada conducta del spec necesita un servidor que la provoque de forma determinista; un único fichero con modos se mantiene mejor que doce.
 - **Alternativas rechazadas:** servidores de terceros (los de referencia de MCP): red, otra cadena de herramientas y conducta que no controlamos.
 - **Impacto:** fixtures; todas las tareas de los grupos 3 y 4; `scripts/demo_mcp_gateway.py`.
+- *Revisada el 2026-11-24:* el servidor sintético no usa `MCPServer` sino solo la biblioteca estándar: `MCPServer` filtra o reescribe lo que se escribe en stdout mientras sirve, y los modos `garbage`, `long-line` y `flood` necesitan escribir bytes exactos en el canal; además, un fixture sin el SDK no depende de la versión que se está probando. Modos añadidos: `die-init`, `chatty-stderr`. Herramientas añadidas: `drop_project` (ofrecida y no declarada), `rename_project` (esquema incompatible), `env_names` y `echo_argv`. La interoperabilidad con el SDK la prueba un segundo fixture, `tests/fixtures/mcp/sdk_server.py`, un `MCPServer` mínimo.
 
 ### D13 · Paquete y límites estructurales
 
@@ -222,10 +244,12 @@ Todas comprobadas el 2026-11-24, en la Mac (arm64, CPython 3.14.8, uv 0.13.1), s
 - **Por qué:** subconjunto de `harness/mcp/` de §4 del plan maestro sin `server.py` (Corte 8).
 - **Alternativas rechazadas:** un único `mcp.py`: mezclaría la parte pura (política, configuración) con la de procesos.
 - **Impacto:** tareas 1.1 y 4.4.
+- *Revisada el 2026-11-24:* se añade `transport.py` (D1). La comprobación de Git de la lista está en `harness/core/git_guard.py`, porque no es específica de MCP. El SDK se importa dentro de las funciones de los comandos `mcp`: `harness.cli` no lo carga para los demás comandos (test). El test estructural (`tests/security/test_mcp_structure.py`) prohíbe también `socket`, `multiprocessing`, `uvicorn`, `starlette`, `mcp.server`, los transportes HTTP del SDK, `anyio.open_process`, `Popen`, `exec` y `eval`.
 
 ## Risks / Trade-offs
 
-- [El SDK lee líneas sin límite: un servidor que escribe una línea enorme sin salto agota memoria y CPU (medido en el código, no ejecutado)] → la tarea 2.6 lo mide con el modo `long-line` (8 MiB) y el plazo total corta el comando; si la memoria o el tiempo medidos no son aceptables, se reabre D1 (transporte propio que cumpla `Transport`). Mientras, solo arrancan servidores que la persona escribió en su lista.
+- [El SDK lee líneas sin límite: un servidor que escribe una línea enorme sin salto agota memoria y CPU (medido en el código, no ejecutado)] → la tarea 2.6 lo mide con el modo `long-line` (8 MiB) y el plazo total corta el comando; si la memoria o el tiempo medidos no son aceptables, se reabre D1 (transporte propio que cumpla `Transport`). Mientras, solo arrancan servidores que la persona escribió en su lista. *Revisada el 2026-11-24:* medido (484 MiB), D1 se reabrió y el transporte es propio y acotado.
+- [*Añadido el 2026-11-24.* El transporte usa funciones privadas del SDK] → versión fijada con `==`; un test estructural las limita a `transport.py`; los tests del grupo 3 son el oráculo al subir de versión.
 - [Un servidor que sale solo deja vivos a sus hijos en POSIX] → limitación documentada del SDK (D4); README. El servidor de EA no lanza hijos.
 - [Cambio de conducta del SDK al subir de versión] → versión fijada con `==`; los tests de ciclo de vida (grupo 3) son el oráculo al subirla.
 - [`os._exit` como última barrera deja la auditoría con la fila en `abandoned` y sin `finished_at`] → aceptado: es el estado verdadero; la recuperación de D11 la cierra en el siguiente comando.
@@ -233,11 +257,11 @@ Todas comprobadas el 2026-11-24, en la Mac (arm64, CPython 3.14.8, uv 0.13.1), s
 - [Un servidor de terceros corre con los permisos del usuario y puede hacer cualquier cosa en su proceso] → no se arregla: el harness decide qué arranca (lista local), qué le pasa (argumentos declarados, entorno acotado), cuánto espera y qué deja salir. Se escribe en `SECURITY.md`.
 - [La lista local en una carpeta de OneDrive que bloquea el fichero] → solo se lee; un error de lectura es un error controlado. No medido.
 - [Colisión de número de migración con `skill-engine`] → número libre al integrar; `test_migrating_twice_changes_nothing` lo detecta.
-- [Mover `safe_text`/`redaction` choca con otra rama que los toque] → `feature/skill-engine` los importa desde `harness/memory/`; al integrar, el segundo en llegar actualiza la importación. Se deja en `Workflow follow-up`.
+- [Mover `safe_text`/`redaction` choca con otra rama que los toque] → `feature/skill-engine` los importa desde `harness/memory/`; al integrar, el segundo en llegar actualiza la importación. Se deja en `Workflow follow-up`. *Revisada el 2026-11-24:* `skill-engine` llegó primero; `617309c` actualizó sus importaciones.
 
 ## Migration Plan
 
-Aditivo: una tabla nueva y un subcomando nuevo. Sin `HARNESS_MCP_CONFIG` el harness se comporta como en `8cb2ec5` salvo `mcp list`, que dice que no hay servidores. El movimiento de `safe_text`/`redaction` no cambia conducta (los tests de memoria son el oráculo). Vuelta atrás: revertir el change; la tabla queda sin uso.
+Aditivo: una tabla nueva y un subcomando nuevo. Sin `HARNESS_MCP_CONFIG` el harness se comporta como en `8cb2ec5` (*revisada el 2026-11-24:* como en `develop` con `skill-engine`) salvo `mcp list`, que dice que no hay servidores. El movimiento de `safe_text`/`redaction` no cambia conducta (los tests de memoria son el oráculo). Vuelta atrás: revertir el change; la tabla queda sin uso.
 
 ## Open Questions
 
