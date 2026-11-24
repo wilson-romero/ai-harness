@@ -228,6 +228,23 @@ class SkillEngine:
             row = self._require_run(run_id)  # re-read with the lock held
             if row["status"] in FINAL_RUN_STATES:
                 raise InvalidInput(f"run {run_id} is {row['status']}; there is nothing to resume")
+            if any(s["status"] in ("running", "applying")
+                   for s in self._latest_steps(run_id).values()):
+                # We hold the lock: whoever left these steps half done is gone.
+                with transaction(self._conn):
+                    _recover_run(self._conn, run_id, row["session_id"])
+            latest = self._latest_steps(run_id)
+            self._check_resume_inputs(row, skill, latest, inputs)
+            state = _Run(run_id, session, provider, skill, inputs, started=self._monotonic())
+            for key, step_row in latest.items():
+                if step_row["kind"] == "approval" and step_row["status"] == "uncertain":
+                    if retry_step == key:
+                        raise InvalidInput(
+                            f"step {key!r} of run {run_id} is an approval whose effect may "
+                            "have been applied: it is never retried. `skill resume "
+                            f"{run_id}` checks whether the effect is in place"
+                        )
+                    self._reconcile(state, key, step_row)
             latest = self._latest_steps(run_id)
             uncertain = [key for key, step in latest.items() if step["status"] == "uncertain"]
             if uncertain and retry_step is None:
@@ -241,7 +258,6 @@ class SkillEngine:
                 raise InvalidInput(
                     f"step {retry_step!r} is not an uncertain step of run {run_id}; nothing changed"
                 )
-            self._check_resume_inputs(row, skill, latest, inputs)
             missing = self._missing_outputs(skill, latest)
             if missing:
                 self._finish_run(run_id, session, "failed", "outputs_not_retained")
@@ -265,7 +281,6 @@ class SkillEngine:
                     self._audit("skill.step.reconciled", "retry", session, run_id,
                                 f"step={retry_step};attempt={attempt + 1}")
             self._set_run(run_id, "running")
-            state = _Run(run_id, session, provider, skill, inputs, started=self._monotonic())
             return await self._advance(state)
         finally:
             lock.release()
@@ -592,11 +607,17 @@ class SkillEngine:
                     self._audit("approval.expired", "expired", state.session, state.run_id,
                                 self._approval_detail(approval))
             else:
+                # One transaction: the approval is used, the step is `applying` with what will
+                # be applied (its SHA-256, for `reconcile`) and the run is `running`, so that a
+                # process that dies from here on is always found by `recover_runs` (review 8.1).
+                content = proposal.content.encode("utf-8")
                 self._conn.execute(
-                    "UPDATE skill_steps SET status = 'applying', prepared_at = ?, effect_ref = ? "
-                    "WHERE step_id = ?",
-                    (now, proposed.effect_ref, row["step_id"]),
+                    "UPDATE skill_steps SET status = 'applying', prepared_at = ?, effect_ref = ?, "
+                    "output_sha256 = ?, output_bytes = ? WHERE step_id = ?",
+                    (now, proposed.effect_ref, hashlib.sha256(content).hexdigest(), len(content),
+                     row["step_id"]),
                 )
+                self._set_run(state.run_id, "running")
                 self._audit("approval.consumed", "consumed", state.session, state.run_id,
                             self._approval_detail(approval))
         if consumed != 1:
@@ -618,6 +639,63 @@ class SkillEngine:
             return RunOutcome(state.run_id, "failed", message=f"the effect failed: {exc}")
         self._complete(state, step.id, row, proposal.content)
         return None
+
+    def _reconcile(self, state: _Run, key: str, row: sqlite3.Row) -> None:
+        """An approval step interrupted after its approval was consumed (review 8.1).
+
+        The effect says whether the content approved (by its SHA-256) is in place:
+        - `applied`: the step completes without applying anything again;
+        - `absent`: nothing happened; a new attempt of the step asks a person for a new approval;
+        - `conflict` (or anything unknown): the step stays `uncertain` and a person must look;
+          the resume is refused with an error (exit code 1) and nothing changes.
+        """
+        step = state.skill.step(key)
+        assert isinstance(step, ApprovalStep)
+        effect = self._effects[step.effect]
+        context = self._effect_context(state, step)
+        expected = row["output_sha256"]
+        result = (effect.reconcile(context, row["effect_ref"], expected)
+                  if expected is not None else "conflict")
+        detail = f"step={key};attempt={row['attempt']}"
+        if result == "applied":
+            stored = None
+            if state.provider.synthetic_content:
+                proposed = self._propose(state, step)
+                if proposed.proposal is not None and hashlib.sha256(
+                    proposed.proposal.content.encode("utf-8")
+                ).hexdigest() == expected:
+                    stored = proposed.proposal.content
+            with transaction(self._conn):
+                self._conn.execute(
+                    "UPDATE skill_steps SET status = 'completed', output_text = ?, "
+                    "error_code = NULL, finished_at = ? WHERE step_id = ?",
+                    (stored, utc_iso(self._clock()), row["step_id"]),
+                )
+                if stored is not None:
+                    state.outputs[key] = stored
+                self._audit("skill.step.reconciled", "applied", state.session, state.run_id,
+                            detail)
+            return
+        if result == "absent":
+            if row["attempt"] >= MAX_ATTEMPTS:
+                self._limit(state.session, state.run_id, key, "attempts")
+                raise InvalidInput(
+                    f"step {key!r} already had {MAX_ATTEMPTS} attempts; cancel the run with "
+                    f"`skill cancel {state.run_id}`"
+                )
+            with transaction(self._conn):
+                self._insert_step(state.run_id, key, row["position"], step.kind,
+                                  row["attempt"] + 1)
+                self._audit("skill.step.reconciled", "absent", state.session, state.run_id,
+                            detail)
+            return
+        with transaction(self._conn):
+            self._audit("skill.step.reconciled", "conflict", state.session, state.run_id, detail)
+        raise InvalidInput(
+            f"step {key!r} of run {state.run_id} was interrupted while applying its effect and "
+            "the effect cannot tell whether it is in place (conflict): a person must check the "
+            f"target, then `skill cancel {state.run_id}`; nothing was applied again"
+        )
 
     def _revoke(
         self, state: _Run, step: ApprovalStep, row: sqlite3.Row, approval: sqlite3.Row
@@ -874,10 +952,18 @@ class SkillEngine:
 
 
 def recover_runs(conn: sqlite3.Connection, data_dir: Path) -> list[str]:
-    """Runs left `running` by a dead process (D10). A run whose session is locked is alive."""
+    """Runs left by a dead process (D10). A run whose session is locked is alive.
+
+    A run is looked at when it is `running` or when any of its steps is `running` or `applying`,
+    whatever the run's own state says (review 8.1, 2026-11-24): an `applying` step always
+    becomes `uncertain`, so that its effect is reconciled and never simply applied again.
+    """
     recovered = []
     rows = conn.execute(
-        "SELECT run_id, session_id FROM skill_runs WHERE status = 'running'"
+        "SELECT run_id, session_id FROM skill_runs r WHERE r.status NOT IN "
+        "('completed', 'failed', 'cancelled') AND (r.status = 'running' OR EXISTS ("
+        "SELECT 1 FROM skill_steps s WHERE s.run_id = r.run_id AND s.status IN "
+        "('running', 'applying')))"
     ).fetchall()
     for run in rows:
         lock = SessionLock(data_dir, UUID(run["session_id"]))
@@ -885,41 +971,44 @@ def recover_runs(conn: sqlite3.Connection, data_dir: Path) -> list[str]:
             continue
         try:
             with transaction(conn):
-                steps = conn.execute(
-                    "SELECT * FROM skill_steps WHERE run_id = ? AND status IN "
-                    "('running', 'applying')",
-                    (run["run_id"],),
-                ).fetchall()
-                uncertain = False
-                for step in steps:
-                    if step["kind"] == "validate":
-                        new_status = "pending"
-                    else:
-                        new_status, uncertain = "uncertain", True
-                    request_id = step["request_id"]
-                    if request_id is None and step["kind"] == "llm":
-                        found = conn.execute(
-                            "SELECT request_id FROM requests WHERE session_id = ? AND "
-                            "started_at >= ? ORDER BY started_at DESC LIMIT 1",
-                            (run["session_id"], step["started_at"] or ""),
-                        ).fetchone()
-                        request_id = found["request_id"] if found else None
-                    conn.execute(
-                        "UPDATE skill_steps SET status = ?, request_id = ?, error_code = "
-                        "CASE WHEN ? = 'uncertain' THEN 'interrupted' ELSE error_code END "
-                        "WHERE step_id = ?",
-                        (new_status, request_id, new_status, step["step_id"]),
-                    )
-                status = "uncertain" if uncertain else "pending"
-                conn.execute(
-                    "UPDATE skill_runs SET status = ?, error_code = CASE WHEN ? = 'uncertain' "
-                    "THEN 'interrupted' ELSE error_code END WHERE run_id = ?",
-                    (status, status, run["run_id"]),
-                )
-                repo.insert_audit(conn, event_type="skill.run", outcome=status, actor="recovery",
-                                  session_id=UUID(run["session_id"]), run_id=run["run_id"],
-                                  detail="recovered")
+                _recover_run(conn, run["run_id"], run["session_id"])
             recovered.append(run["run_id"])
         finally:
             lock.release()
     return recovered
+
+
+def _recover_run(conn: sqlite3.Connection, run_id: str, session_id: str) -> None:
+    """Mark what a dead process left half done; the caller holds the lock and a transaction."""
+    steps = conn.execute(
+        "SELECT * FROM skill_steps WHERE run_id = ? AND status IN ('running', 'applying')",
+        (run_id,),
+    ).fetchall()
+    uncertain = False
+    for step in steps:
+        if step["kind"] == "validate":
+            new_status = "pending"
+        else:
+            new_status, uncertain = "uncertain", True
+        request_id = step["request_id"]
+        if request_id is None and step["kind"] == "llm":
+            found = conn.execute(
+                "SELECT request_id FROM requests WHERE session_id = ? AND "
+                "started_at >= ? ORDER BY started_at DESC LIMIT 1",
+                (session_id, step["started_at"] or ""),
+            ).fetchone()
+            request_id = found["request_id"] if found else None
+        conn.execute(
+            "UPDATE skill_steps SET status = ?, request_id = ?, error_code = "
+            "CASE WHEN ? = 'uncertain' THEN 'interrupted' ELSE error_code END "
+            "WHERE step_id = ?",
+            (new_status, request_id, new_status, step["step_id"]),
+        )
+    status = "uncertain" if uncertain else "pending"
+    conn.execute(
+        "UPDATE skill_runs SET status = ?, error_code = CASE WHEN ? = 'uncertain' "
+        "THEN 'interrupted' ELSE error_code END WHERE run_id = ?",
+        (status, status, run_id),
+    )
+    repo.insert_audit(conn, event_type="skill.run", outcome=status, actor="recovery",
+                      session_id=UUID(session_id), run_id=run_id, detail="recovered")

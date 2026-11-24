@@ -275,6 +275,40 @@ def test_recovery_of_an_interrupted_validate_step(conn, data_dir):
     assert _rows(conn, "SELECT status FROM skill_steps WHERE step_key = 'check'") == [("pending",)]
 
 
+def test_recovery_of_an_applying_step_whatever_the_run_state(conn, data_dir):
+    """8.1: an `applying` step becomes `uncertain` even if its run was left `awaiting_approval`."""
+    from harness.skills.engine import recover_runs
+
+    engine, sessions, _ = build(conn, data_dir)
+    session = sessions.create_session("Demo")
+    outcome = _run(engine, "demo-echo", session, text="x")
+    assert outcome.status == "awaiting_approval"
+    conn.execute("UPDATE skill_steps SET status = 'applying' WHERE step_key = 'confirm'")
+    assert recover_runs(conn, data_dir) == [outcome.run_id]
+    assert _rows(conn, "SELECT status FROM skill_runs") == [("uncertain",)]
+    assert _rows(conn, "SELECT status, error_code FROM skill_steps WHERE step_key = 'confirm'"
+                 ) == [("uncertain", "interrupted")]
+
+
+def test_retry_step_of_an_approval_is_refused(conn, data_dir):
+    """8.1: `--retry-step` never names an approval step; nothing changes."""
+    from harness.skills.engine import recover_runs
+
+    engine, sessions, provider = build(conn, data_dir)
+    session = sessions.create_session("Demo")
+    outcome = _run(engine, "demo-echo", session, text="x")
+    conn.execute("UPDATE skill_steps SET status = 'applying', output_sha256 = ? "
+                 "WHERE step_key = 'confirm'", ("0" * 64,))
+    recover_runs(conn, data_dir)
+    before = _rows(conn, "SELECT step_key, attempt, status FROM skill_steps ORDER BY position")
+    with pytest.raises(InvalidInput, match="never retried") as caught:
+        _resume(engine, outcome.run_id, "confirm", text="x")
+    assert type(caught.value) is InvalidInput  # exit code 1, not a usage error
+    assert _rows(conn, "SELECT step_key, attempt, status FROM skill_steps ORDER BY position"
+                 ) == before
+    assert provider.calls == 1
+
+
 # -- 4.4 resume and cancel ------------------------------------------------------------------------
 
 

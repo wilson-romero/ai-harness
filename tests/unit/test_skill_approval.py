@@ -345,6 +345,26 @@ def test_apply_receives_exactly_the_hashed_proposal(conn, data_dir, tmp_path):
     assert effect.prepared == 1
 
 
+def test_the_run_is_running_while_the_effect_runs(conn, data_dir, tmp_path):
+    """8.1: consuming the approval puts the run in `running` in the same transaction."""
+    seen = []
+
+    class Watching(WriteEffect):
+        def apply(self, context, *args):
+            seen.append(tuple(conn.execute(
+                "SELECT r.status, s.status FROM skill_runs r JOIN skill_steps s USING (run_id) "
+                "WHERE s.step_key = 'confirm'").fetchone()))
+            super().apply(context, *args)
+
+    root = copy_skills(tmp_path)
+    with_effect(root, "demo-echo", "test.write")
+    engine, sessions, _ = build(conn, data_dir, root=root, terminal=ApprovingTerminal(),
+                                effects={"test.write": Watching(tmp_path / "efecto")})
+    session = sessions.create_session("Demo")
+    assert _run(engine, session).status == "completed"
+    assert seen == [("running", "applying")]
+
+
 def test_applying_an_approval_is_private_and_takes_the_session_lock(conn, data_dir, tmp_path):
     """8.9: the direct way into an effect is not public and takes the session lock."""
     from harness.core.errors import SessionBusy
