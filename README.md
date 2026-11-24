@@ -71,6 +71,75 @@ El harness no tiene ningún código que copie, suba o sincronice el vault, y nun
 
 `HARNESS_DATA_DIR` no puede estar dentro del vault: `memory …` y `ask --project` lo rechazan con un error (código 1) antes de escribir nada, también si se llega por un enlace. El vault dentro del directorio de datos sí vale. `session …`, `history` y `ask` sin `--project` no leen el vault y no lo comprueban.
 
+## Skills
+
+Un Skill es una carpeta con instrucciones declarativas que el harness ejecuta paso a paso dentro de una sesión. **No contiene código**: el harness nunca ejecuta ni carga nada de un Skill.
+
+```sh
+export HARNESS_SKILLS_DIR="$PWD/tests/fixtures/skills"   # ruta absoluta; por defecto, skills/ del repo
+# Respuesta guionizada del Mock para el paso `draft` (la del Mock sin guion no pasa el `validate`).
+mkdir -p data && printf '%s' '{"tarea: demo-echo/draft": "## Resumen\nok\n\n## Preguntas pendientes\n- Ninguna."}' > data/respuestas.json
+export HARNESS_MOCK_RESPONSES="$PWD/data/respuestas.json"
+uv run python main.py skill list
+uv run python main.py skill show demo-echo
+uv run python main.py session create "Demo"
+uv run python main.py skill run demo-echo --session SESSION_ID --input text="Texto de prueba"
+uv run python main.py skill status RUN_ID
+uv run python main.py skill resume RUN_ID --input text="Texto de prueba"
+uv run python main.py skill cancel RUN_ID
+```
+
+- `skill list` muestra cada Skill con su versión y `valid` o `invalid` con el motivo; `skill show NAME` imprime descripción, versión, hash, entradas y pasos sin preguntar nada ni crear ninguna ejecución (un Skill inválido termina con código 1 y sus motivos).
+- `skill run NAME --session ID [--input N=V]… [--input-file N=RUTA]…` ejecuta los pasos en orden y, si termina, imprime la salida declarada por stdout. Las entradas tienen que ser las declaradas, de hasta 64 KiB cada una y 128 KiB en total; `--input-file` lee UTF-8 y comprueba el tamaño antes de leer.
+- `skill status RUN_ID [--output]` muestra el Skill, su versión y hash, la sesión, el estado de la ejecución y de cada paso con su intento, y la aprobación pendiente con su caducidad; nunca el texto de las entradas ni de las salidas. `--output` imprime la salida final si se guardó.
+- `skill resume RUN_ID [--input…] [--retry-step ID]` sigue desde el primer paso no completado. `skill cancel RUN_ID` deja la ejecución `cancelled` y revoca su aprobación.
+- Una sesión tiene como mucho una ejecución abierta. Mientras una espera aprobación, la sesión admite `ask`.
+- Con esos comandos, `run` y `resume` sin terminal interactiva terminan con código 3 (`awaiting_approval`); en una terminal, `resume` muestra la propuesta y pide el código. `scripts/demo_skill_engine.py` recorre lo mismo en cualquier sistema, PowerShell incluido.
+
+### Formato de un Skill
+
+`<raíz>/<nombre>/SKILL.md` (frontmatter con exactamente `name`, igual al nombre de la carpeta, y `description`, de hasta 300 caracteres), `workflow.json` y ficheros `.md` en `templates/` y `references/`. Cualquier otro fichero visible (un script, un `.py`), un enlace simbólico, una unión o un fichero con más de un enlace duro invalidan el Skill entero; lo que empieza por punto se ignora. El nombre usa minúsculas, dígitos y guiones (hasta 64 caracteres) y no puede ser un nombre reservado de Windows.
+
+`workflow.json` es JSON estricto (sin claves duplicadas, `NaN` ni anidamiento de más de 32 niveles) con un esquema cerrado: `schema: 1`, `version`, `inputs`, `steps` y `output`. Tipos de paso:
+
+- `llm`: envía la plantilla `templates/<nombre>.md` a través de la sesión, con el mismo plazo y los mismos estados que `ask`. `"memory": "project"` añade el contexto del proyecto de la sesión (la sesión tiene que tener proyecto). `timeout_s` de 1 a 600.
+- `validate`: comprueba la salida de un paso anterior (`of`) con reglas declaradas: `min_bytes`/`max_bytes`, `required_headings` (Markdown), o `format: json` con campos tipados (`string`, `integer`, `boolean`, `string_list`, con `max_length`, `single_line`, `enum`, `slug`, `date`, `min`, `max`, `max_items`) y sin campos extra. Su salida es el texto saneado y redactado, o el JSON canónico.
+- `approval`: pide una aprobación humana sobre la salida de un `validate` anterior y aplica un efecto de la lista cerrada del harness. Hoy solo existe `none` (consumir la aprobación deja seguir).
+
+Referencias en las plantillas: `{{inputs.NOMBRE}}`, `{{steps.ID.output}}` y `{{steps.ID.fields.CAMPO}}`, a una entrada declarada o a un paso anterior. Cualquier otra cosa entre `{{` y `}}` invalida el Skill. Se sustituyen una sola vez, sin evaluar nada, y cada valor va marcado como datos entre `<<<DATOS <código>` y `DATOS <código>>>>`, con los mismos `‹‹‹`/`›››` que la memoria. El hash del Skill (SHA-256 de sus ficheros con los finales de línea normalizados) es el mismo en macOS y en Windows.
+
+### Estados y códigos de salida
+
+| Estado | Qué significa |
+|---|---|
+| `running` | Un proceso la está ejecutando. |
+| `awaiting_approval` | Espera a una persona. Código de salida **3**. |
+| `completed` | Terminó; la salida va por stdout. Código 0. |
+| `failed` | Un paso falló, una comprobación no pasó o se superó un límite. Código 1. |
+| `uncertain` | Una pregunta pudo llegar al proveedor y no hubo respuesta. Código 1. |
+| `pending` | Se interrumpió entre pasos; se puede reanudar. |
+| `cancelled` | Cancelada o aprobación rechazada. Código 1. |
+
+Errores de uso (una opción mal escrita, `--input-file` demasiado grande): código 2. Interrumpido con Ctrl+C: 130.
+
+### Aprobación
+
+Al llegar a un paso `approval`, el harness calcula la propuesta (Skill con versión y hash, ejecución, paso, alcance, destino y SHA-256 y tamaño del contenido) y su hash. **Solo se aprueba en una terminal interactiva**: el harness muestra la propuesta entera (contenido sin caracteres de control ni bidireccionales, credenciales conocidas redactadas, como máximo 32 KiB) y hay que escribir los **8 primeros caracteres del hash**; `n` rechaza y cancela la ejecución. Tres códigos equivocados o el fin de la entrada la dejan pendiente. Sin terminal (stdin redirigido, un script, un agente), `skill run` y `skill resume` dejan la ejecución en `awaiting_approval` y terminan con código 3 indicando `skill resume RUN_ID`. Ningún texto del modelo, fichero, variable ni argumento puede aprobar.
+
+Una aprobación caduca a los `HARNESS_APPROVAL_TTL_S` segundos (900 por defecto); al reanudar se pide otra. Sirve una sola vez y solo para esa propuesta: si cambia un byte de lo aprobado, del Skill o de la ejecución, se deniega y se revoca. Se registra el usuario local que la concedió; no es una autenticación (ver [`SECURITY.md`](SECURITY.md)).
+
+### Un paso incierto
+
+Si una pregunta vence después de enviarse, o el proceso muere a mitad, el paso queda `uncertain` y **nunca se repite solo**: `skill resume` se niega y dice qué paso es. Decides tú: `skill resume RUN_ID --retry-step ID` vuelve a preguntar (un intento nuevo, que puede duplicar la pregunta en la conversación; como mucho 3 intentos por paso) o `skill cancel RUN_ID`. Al reanudar hay que volver a pasar las entradas, porque nunca se guardan: el harness comprueba que tienen el mismo SHA-256 y que el Skill no cambió en disco (si cambió, se niega nombrando los dos hashes).
+
+### Límites
+
+32 ficheros, 64 KiB por fichero y 512 KiB por Skill; 12 pasos y 8 entradas; 64 KiB de prompt sin contar la memoria; 128 KiB de respuesta; 32 KiB de propuesta; 1800 s por invocación de `run` o `resume`; 3 intentos por paso. Cada parada queda en la auditoría como `skill.limit`.
+
+### Qué se guarda de una ejecución
+
+Nombre, versión y hash del Skill, estados, intentos, fechas y, de las entradas, solo su SHA-256 y su tamaño (`inputs_manifest`): **nunca** su contenido. Como pregunta de la sesión se guarda una marca `[skill <nombre>/<paso> intento <n>]`, nunca el prompt compuesto. La salida de cada paso se guarda solo con un proveedor sintético (el Mock); con cualquier otro, solo su SHA-256 y su tamaño, y una ejecución interrumpida no se puede reanudar. La propuesta no se guarda: se recalcula. La auditoría lleva la ejecución, el paso, el hash y el resultado, sin texto.
+
 ## Configuración
 
 Por variables de entorno (ver `.env.example`):
@@ -84,6 +153,9 @@ Por variables de entorno (ver `.env.example`):
 | `HARNESS_MOCK_DELAY_MS` | `0` | Espera del Mock después de enviar. Sirve para interrumpir una pregunta a mitad. |
 | `HARNESS_VAULT_ROOT` | (vacía) | Ruta **absoluta** del vault. Solo la leen `memory …` y `ask --project`; si falta o no es un directorio, esos comandos terminan con error sin leer nada. |
 | `HARNESS_MEMORY_CONTEXT_MAX_BYTES` | `8192` | Tamaño máximo, en bytes UTF-8, del bloque de contexto (de 1024 a 65536). |
+| `HARNESS_SKILLS_DIR` | `skills/` del repo | Ruta **absoluta** de la raíz de Skills. |
+| `HARNESS_APPROVAL_TTL_S` | `900` | Caducidad de una aprobación, en segundos (de 60 a 3600). |
+| `HARNESS_MOCK_RESPONSES` | (vacía) | Ruta absoluta de un JSON (objeto texto → respuesta, hasta 1 MiB) con respuestas guionizadas del Mock: responde con la primera clave, en orden alfabético, contenida en el prompt. Solo para pruebas y demos. |
 
 ## Estados de una solicitud
 
@@ -111,4 +183,4 @@ Solo una pregunta a la vez por sesión: una segunda pregunta mientras la primera
 - El repositorio es público: lee [`SECURITY.md`](SECURITY.md) y activa el hook una vez por clon con `git config core.hooksPath .githooks`.
 - Sin código condicionado por plataforma fuera de Enterprise Architect: lo que pasa en macOS es lo que corre en Windows.
 - Puerta local antes de un merge: `scripts/verify.sh` sobre el árbol limpio.
-- Demos, iguales en macOS y Windows (PowerShell incluido): `uv run python scripts/demo_session_core.py` (Corte 1) y `uv run python scripts/demo_project_memory.py` (Corte 3). Terminan en `demo: PASS`.
+- Demos, iguales en macOS y Windows (PowerShell incluido): `uv run python scripts/demo_session_core.py` (Corte 1) y `uv run python scripts/demo_project_memory.py` (Corte 3) y `uv run python scripts/demo_skill_engine.py` (Corte 4, motor de Skills). Terminan en `demo: PASS`.

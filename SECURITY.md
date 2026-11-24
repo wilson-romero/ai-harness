@@ -44,6 +44,10 @@ Una línea revisada a propósito lleva el marcador `public-safety: allow`. Cada 
 
 El guard reconoce formatos conocidos; no detecta un secreto con forma desconocida ni un dato sensible escrito en prosa. No sustituye a leer el diff antes de publicar.
 
+## Aprobaciones de Skills
+
+Una aprobación se concede solo en una terminal interactiva, escribiendo los 8 primeros caracteres del hash de la propuesta, y se registra el usuario local del sistema operativo que la concedió. **Esa identidad no es una autenticación.** Protege contra que un modelo, un fichero o un argumento aprueben, contra reutilizar o alterar una aprobación y contra aprobar sin haber visto la propuesta; **no** protege contra un proceso que corre con tu misma cuenta y abre una pseudoterminal: ese proceso puede hacerse pasar por ti. Si alguien o algo controla tu cuenta, las aprobaciones no lo detienen.
+
 ## Si algo se filtra
 
 Un secreto publicado se da por comprometido aunque se borre el commit: primero se **revoca o rota**, después se limpia el historial. Para avisar de un problema de seguridad, usa los *security advisories* privados de GitHub en este repositorio, no un issue público.
