@@ -109,4 +109,4 @@ Solo una pregunta a la vez por sesión: una segunda pregunta mientras la primera
 - El repositorio es público: lee [`SECURITY.md`](SECURITY.md) y activa el hook una vez por clon con `git config core.hooksPath .githooks`.
 - Sin código condicionado por plataforma fuera de Enterprise Architect: lo que pasa en macOS es lo que corre en Windows.
 - Puerta local antes de un merge: `scripts/verify.sh` sobre el árbol limpio.
-- Demo del Corte 1: `scripts/demo-session-core.sh`. Demo del Corte 3: `scripts/demo-project-memory.sh` (trabaja sobre una copia del vault sintético de `tests/fixtures/vault-synthetic/` en un directorio temporal).
+- Demos, iguales en macOS y Windows (PowerShell incluido): `uv run python scripts/demo_session_core.py` (Corte 1) y `uv run python scripts/demo_project_memory.py` (Corte 3). Terminan en `demo: PASS`.
