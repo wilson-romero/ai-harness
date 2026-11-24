@@ -29,7 +29,7 @@ from harness.skills.definition import (
     validate_skill_name,
 )
 from harness.skills.effects import default_effects
-from harness.memory.safe_text import terminal_safe
+from harness.memory.safe_text import safe_line, safe_text, terminal_safe
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -138,11 +138,21 @@ def _read_inputs(args: argparse.Namespace) -> dict[str, str]:
     return inputs
 
 
+def printable(text: str) -> str:
+    """Model- or skill-derived text for the terminal (review 8.7, 2026-11-24).
+
+    The same cleaning and redaction as every vault text (`safe_text`): no control or format
+    character (escape sequences, bidirectional controls, zero-width characters) reaches the
+    terminal, whatever step the skill names as its output.
+    """
+    return safe_text(text).text
+
+
 def _report(outcome: RunOutcome) -> int:
     if outcome.message:
-        print(f"{outcome.run_id}: {outcome.message}", file=sys.stderr)
+        print(f"{outcome.run_id}: {safe_line(outcome.message).text}", file=sys.stderr)
     if outcome.status == "completed":
-        print(outcome.output if outcome.output is not None else "")
+        print(printable(outcome.output) if outcome.output is not None else "")
         return EXIT_OK
     print(f"run {outcome.run_id} is {outcome.status}", file=sys.stderr)
     if outcome.status == "awaiting_approval":
@@ -169,7 +179,7 @@ def _status(engine: SkillEngine, run_id: str, with_output: bool) -> int:
               f"id {approval['approval_id']} expires {approval['expires_at']}")
     if with_output:
         output = engine.final_output(run_id)
-        print(output if output is not None else "(output not stored)")
+        print(printable(output) if output is not None else "(output not stored)")
     return EXIT_OK
 
 

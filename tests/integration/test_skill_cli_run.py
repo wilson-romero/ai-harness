@@ -42,6 +42,31 @@ def test_complete_run_with_the_mock(data_dir, env):
         ("draft", "completed"), ("check", "completed")]
 
 
+def test_terminal_escapes_from_the_model_never_reach_stdout(data_dir, env, tmp_path):
+    """8.7: `run` and `status --output` print model text without control or format characters."""
+    from pathlib import Path
+
+    from pathlib import Path as _Path
+
+    path = _Path(env["HARNESS_SKILLS_DIR"]) / "demo-echo" / "workflow.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["steps"], data["output"] = data["steps"][:2], "draft"  # the raw text of the model
+    path.write_text(json.dumps(data), encoding="utf-8")
+    answer = GOOD_ECHO + "\n\x1b]0;titulo\x07 \x1b[2J borrado ‮olleh ​fin"
+    Path(env["HARNESS_MOCK_RESPONSES"]).write_text(
+        json.dumps({"tarea: demo-echo/draft": answer}), encoding="utf-8")
+    session = _session(data_dir, env)
+    result = run_main(data_dir, "skill", "run", "demo-echo", "--session", session,
+                      "--input", "text=hola", **env)
+    assert result.returncode == 0, result.stderr
+    run_id = query(data_dir, "SELECT run_id FROM skill_runs")[0][0]
+    output = run_main(data_dir, "skill", "status", run_id, "--output", **env)
+    for text in (result.stdout, result.stderr, output.stdout):
+        for char in ("\x1b", "\x07", "‮", "​"):
+            assert char not in text
+    assert "borrado olleh fin" in result.stdout and "borrado olleh fin" in output.stdout
+
+
 def test_traversal_name_in_run(data_dir, env):
     result = run_main(data_dir, "skill", "run", "..\\otro", "--session", "x", **env)
     assert result.returncode == 1 and "invalid skill name" in result.stderr
