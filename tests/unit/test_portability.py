@@ -16,7 +16,8 @@ EXEMPT = ("harness/enterprise_architect/",)
 
 def test_product_code_has_no_platform_branches():
     offenders = []
-    for path in [REPO_ROOT / "main.py", *sorted((REPO_ROOT / "harness").rglob("*.py"))]:
+    probe = REPO_ROOT / "scripts" / "copilot_probe.py"
+    for path in [REPO_ROOT / "main.py", probe, *sorted((REPO_ROOT / "harness").rglob("*.py"))]:
         relative = path.relative_to(REPO_ROOT).as_posix()
         if relative.startswith(EXEMPT):
             continue
