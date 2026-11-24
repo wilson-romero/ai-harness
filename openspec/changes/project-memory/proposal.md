@@ -49,7 +49,7 @@ Ninguna. `openspec list --specs` devuelve «No specs found» y `ls openspec/spec
 ## Impact
 
 - Código nuevo: `harness/memory/` (configuración y perfil, rutas, lectura del vault, frontmatter, búsqueda, contexto, mantenimiento, redacción); subcomando `memory` y opción `--project` de `ask` en `harness/cli.py`; `SessionService.ask` recibe el contexto aparte de la pregunta.
-- Almacenamiento: migración nueva con `memory_binding` y `request_context` (número asignado al integrar: la reimplementación del bloqueo de sesión sobre SQLite puede ocupar la 002).
+- Almacenamiento: migración nueva con `memory_binding` y `request_context` en `harness/storage/migrations/002_memory.sql` (la reimplementación del bloqueo de sesión sobre SQLite se hizo sin migración, así que la 002 quedó libre).
 - Dependencias: ninguna nueva. Biblioteca estándar (`pathlib`, `os`, `re`, `difflib`, `hashlib`, `secrets`) y `pydantic`.
 - Configuración: `HARNESS_VAULT_ROOT`, `HARNESS_PROFILE` (ya en `.env.example`), `HARNESS_MEMORY_CONTEXT_MAX_BYTES`.
 - Fixtures: `tests/fixtures/vault-synthetic/`, sin secretos literales.

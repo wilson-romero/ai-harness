@@ -160,7 +160,7 @@ Restricciones que mandan sobre todo lo que sigue:
 
 ### D11 · Paquete, CLI y migración
 
-- **Qué:** `harness/memory/` con `config.py` (perfil, raíz, ligadura, sync), `paths.py` (validación pura y recorrido), `notes.py` (lectura y frontmatter), `redaction.py`, `search.py`, `context.py`, `maintenance.py`. CLI: `memory search QUERY [--project SLUG] [--limit N]`, `memory context SLUG`, `memory maintain --dry-run`, y `ask ... --project SLUG`. Códigos de salida de D10 de `session-core` (0, 1, 2). Migración nueva con `memory_binding` y `request_context` (FK a `requests`), con el número que toque al integrar.
+- **Qué:** `harness/memory/` con `config.py` (perfil, raíz, ligadura, sync), `paths.py` (validación pura y recorrido), `notes.py` (lectura y frontmatter), `redaction.py`, `search.py`, `context.py`, `maintenance.py`. CLI: `memory search QUERY [--project SLUG] [--limit N]`, `memory context SLUG`, `memory maintain --dry-run`, y `ask ... --project SLUG`. Códigos de salida de D10 de `session-core` (0, 1, 2). Migración `002_memory.sql` con `memory_binding` y `request_context` (FK a `requests`); la 002 estaba libre porque el bloqueo de sesión se reimplementó sobre SQLite sin migración.
 - **Por qué:** subconjunto de `harness/memory/` de §4 del plan maestro sin `capture`, `curator` ni `dream`, que no existen en este corte.
 - **Alternativas rechazadas:** un único módulo `memory.py`: mezclaría la parte pura (probada con `PureWindowsPath`) con la de ficheros.
 - **Impacto:** tareas 1.x y 2.x.
@@ -174,7 +174,7 @@ Restricciones que mandan sobre todo lo que sigue:
 - [Una nota maliciosa convence al modelo real] → mitigación, no garantía (D6). La defensa real llega con políticas y aprobaciones en los cortes 4–5.
 - [Credenciales de formato desconocido] → pasan sin tocar (D8). Escrito.
 - [Lectura con caché fría o vault en disco lento] → no medido; la cifra real de 7.3 decide si se revisa D5.
-- [Colisión de número de migración con la reimplementación del bloqueo] → la migración se renumera al rebasar sobre `develop`; el test de migraciones lo detecta.
+- [Colisión de número de migración] → resuelta: el bloqueo de sesión se reimplementó sin migración y esta usa la `002`; si otra rama añade una `002` antes del merge, `test_migrating_twice_changes_nothing` (que comprueba las versiones `[1, 2]`) lo detecta.
 - [Tests que crean enlaces simbólicos en Windows necesitan modo desarrollador o privilegios] → la parte pura de D4 no los necesita y se prueba con `PureWindowsPath` en la Mac; en una ejecución opcional en Windows sin privilegio, esos tests se omiten con motivo visible.
 - [Un secreto literal se cuela en un fixture del repo público] → los tokens se construyen en tiempo de ejecución (D8) y `check_public_safety.py` lo comprueba; la tarea 7.1 lo ejecuta.
 
