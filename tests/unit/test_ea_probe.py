@@ -177,8 +177,11 @@ class FakeRepository(Thing):
 class FakeBackend:
     def __init__(self, *, load_error: BaseException | None = None,
                  create_errors: dict[str, BaseException] | None = None,
-                 foreign: bool = False) -> None:
+                 foreign: bool = False, attach: bool = False) -> None:
         self.load_error = load_error
+        # attach: the object comes from an EA that was already running (no new process) with
+        # no model open, so its ConnectionString is empty like a fresh instance's.
+        self.attach = attach
         self.create_errors = create_errors or {}
         self.foreign = foreign
         self.repos: list[FakeRepository] = []
@@ -208,15 +211,16 @@ class FakeBackend:
             app = Thing()
             app.Repository = repo
             self.repos.append(repo)
-            self.live += 1
+            self.live += 0 if self.attach else 1
             return app
         self.repos.append(repo)
-        self.live += 1
+        self.live += 0 if self.attach else 1
         return repo
 
 
 def run_main(backend: FakeBackend, data_dir: Path, monkeypatch: pytest.MonkeyPatch,
-             preexisting: int = 0, argv: list[str] | None = None) -> tuple[int, str, list[int]]:
+             preexisting: int = 0, argv: list[str] | None = None,
+             counter: Any = None) -> tuple[int, str, list[int]]:
     monkeypatch.setenv("HARNESS_DATA_DIR", str(data_dir))
     exits: list[int] = []
     lines: list[str] = []
@@ -224,7 +228,7 @@ def run_main(backend: FakeBackend, data_dir: Path, monkeypatch: pytest.MonkeyPat
     code = probe.main(
         argv or ["--step-timeout", "2", "--create-timeout", "2", "--settle-timeout", "1"],
         backend=backend,
-        counter=lambda: preexisting + backend.live,
+        counter=counter or (lambda: preexisting + backend.live),
         hard_exit=exits.append,
     )
     monkeypatch.undo()
@@ -431,6 +435,49 @@ def test_an_object_with_a_model_open_is_released_not_closed(outside, monkeypatch
     assert "own_instance: no" in summary and "attached_to_existing: yes" in summary
     assert not any(call.startswith(("CreateModel", "OpenFile")) for call in backend.calls)
     assert "canary-user" not in summary
+
+
+def test_an_empty_object_without_a_new_process_is_foreign(outside, monkeypatch) -> None:
+    """EA was already running with no model open: COM may hand back that instance, whose
+    ConnectionString is empty too. No new EA process appeared, so it is not the probe's."""
+    backend = FakeBackend(attach=True)
+    code, out, _ = run_main(backend, outside, monkeypatch, preexisting=1)
+    summary = summary_of(out)
+    [repo] = backend.repos
+    assert code == 0
+    assert (repo.closed_files, repo.exited) == (0, 0)
+    assert "own_instance: no" in summary and "attached_to_existing: yes" in summary
+    assert "own_instance_unproven: no_new_process" in summary
+    assert not any(call.startswith(("CreateModel", "OpenFile")) for call in backend.calls)
+
+
+def test_without_a_process_count_the_object_is_treated_as_foreign(outside, monkeypatch) -> None:
+    backend = FakeBackend()
+    code, out, _ = run_main(backend, outside, monkeypatch, counter=lambda: None)
+    summary = summary_of(out)
+    [repo] = backend.repos
+    assert code == 0
+    assert (repo.closed_files, repo.exited) == (0, 0)
+    assert "own_instance: no" in summary
+    assert "own_instance_unproven: count_unavailable" in summary
+    assert not any(call.startswith(("CreateModel", "OpenFile")) for call in backend.calls)
+
+
+def test_a_second_object_without_a_new_process_is_not_exited(outside, monkeypatch) -> None:
+    backend = FakeBackend()
+    original = backend.create
+
+    def create(progid: str) -> Any:
+        backend.attach = bool(backend.repos)  # the second one attaches
+        return original(progid)
+
+    backend.create = create
+    code, out, _ = run_main(backend, outside, monkeypatch)
+    summary = summary_of(out)
+    first, second = backend.repos
+    assert code == 0
+    assert first.exited == 1 and second.exited == 0
+    assert "second_attached_to_existing: yes" in summary
 
 
 def test_preexisting_ea_processes_are_counted_and_left_alone(outside, monkeypatch) -> None:

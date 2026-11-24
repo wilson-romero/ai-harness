@@ -391,10 +391,7 @@ class ProbeRun:
             for name in ("create_repository", "create_app"):
                 self.not_run(name, reason)
         else:
-            self._create()
-        after_create = self.count("ea_processes_after_create") if self.repo is not None else None
-        if before is not None and after_create is not None:
-            p.facts["ea_processes_started_by_create"] = after_create - before
+            self._create(before)
 
         if self.repo is not None and self.own:
             self._version()
@@ -409,7 +406,7 @@ class ProbeRun:
         self._settle(before)
         self._cleanup()
 
-    def _create(self) -> None:
+    def _create(self, before: int | None) -> None:
         timeout = self.settings.create_timeout_s
         step = self.com("create_repository", lambda: self.backend.create("EA.Repository"), timeout)
         if step.status == "ok":
@@ -426,12 +423,29 @@ class ProbeRun:
         if self.repo is None:
             self.not_run("own_instance", "no object was created")
             return
+        after = self.count("ea_processes_after_create")
+        started = None if before is None or after is None else after - before
+        if started is not None:
+            self.probe.facts["ea_processes_started_by_create"] = started
         fresh = self.com("own_instance", lambda: str(self.repo.ConnectionString or "") == "")
-        self.own = fresh.status == "ok" and bool(fresh.value)
-        self.probe.facts["attached_to_existing"] = fresh.status == "ok" and not fresh.value
-        if not self.own and fresh.status == "ok":
-            # Somebody else's EA: let go of it, close nothing.
+        # Own only if it has no model open AND a new EA process appeared. An EA that was
+        # already running with no model open also has an empty ConnectionString; creating a
+        # model in it and calling Exit() would close the person's application. Without a
+        # process count there is no proof, so the object is treated as foreign.
+        new_process = started is not None and started > 0
+        empty = fresh.status == "ok" and bool(fresh.value)
+        self.own = empty and new_process
+        if fresh.status == "ok" and not self.own:
+            fresh.value = False
+            self.probe.facts["attached_to_existing"] = True
+            if empty:
+                self.probe.facts["own_instance_unproven"] = (
+                    "no_new_process" if started is not None else "count_unavailable"
+                )
+            # Somebody else's EA (or not provably ours): let go of it, create, open and close nothing.
             self.worker.run(self._drop_repo, 10)
+        else:
+            self.probe.facts["attached_to_existing"] = False
 
     def _drop_repo(self) -> None:
         self.repo = None
@@ -575,11 +589,14 @@ class ProbeRun:
         step = self.com("second_instance", create_second, self.settings.create_timeout_s)
         count = self.count("ea_processes_with_second")
         before = self.probe.steps.get("ea_processes_after_create")
+        started = None
         if count is not None and before is not None and before.status == "ok":
-            self.probe.facts["ea_processes_started_by_second"] = count - before.value
+            started = count - before.value
+            self.probe.facts["ea_processes_started_by_second"] = started
         if self.second is None:
             return
-        if step.status == "ok" and step.value:
+        # Same rule as the first object: exit it only if it is empty and a new process appeared.
+        if step.status == "ok" and step.value and started is not None and started > 0:
             self.com("close_second", self._exit_second)
         else:
             self.probe.facts["second_attached_to_existing"] = True
@@ -674,7 +691,7 @@ SUMMARY_ORDER = (
     "close_own_instance", "ea_processes_after_close", "temp_dir_removed",
 )
 FACT_ORDER = (
-    "attached_to_existing", "ea_processes_started_by_create", "ea_processes_started_by_second",
+    "attached_to_existing", "own_instance_unproven", "ea_processes_started_by_create", "ea_processes_started_by_second",
     "second_attached_to_existing", "ea_processes_left_behind", "preexisting_ea_processes",
     "preexisting_still_running", "com_thread_finished", "model_kept", "interrupted",
     "total_seconds",

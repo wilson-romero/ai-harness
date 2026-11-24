@@ -11,7 +11,9 @@ Nada de lo que hagas aquí entra en el repo. El detalle se queda en `HARNESS_DAT
 - Comprueba si se puede crear una **segunda** instancia a la vez, y la cierra.
 - Cuenta los procesos `EA.exe` antes y después (con `tasklist`), para saber si al cerrar deja alguno vivo.
 - **No abre ningún modelo tuyo**, no cierra ni termina ningún EA que no haya creado ella, no ejecuta SQL y no se conecta a ningún repositorio de servidor.
-- Si el objeto que le da Windows resulta ser un EA que ya tenía un modelo abierto, lo suelta sin cerrarlo y lo apunta (`attached_to_existing: yes`).
+- Solo trata como suyo un objeto que cumple dos condiciones a la vez: no tiene ningún modelo abierto y, al crearlo, apareció un `EA.exe` nuevo en el recuento.
+- Si el objeto que le da Windows resulta ser un EA que ya estaba en marcha, lo suelta sin crear, abrir ni cerrar nada en él y lo apunta (`attached_to_existing: yes`). Eso vale para un EA con un modelo abierto y también para uno **sin** modelo abierto. Revisada el 2026-11-24, tras una revisión independiente: antes, un EA tuyo sin modelo abierto se habría tomado por propio, y la sonda habría creado un modelo en él y lo habría cerrado con `Exit()`.
+- Si no puede contar los procesos, no tiene prueba de que el objeto sea suyo y lo suelta igual (`own_instance_unproven: count_unavailable`).
 
 ## 0. Antes de empezar
 
@@ -66,6 +68,8 @@ Solo si el paso 1 funcionó. Abre EA a mano con **un modelo vacío o de ejemplo,
 | `create_repository: FAIL class_not_registered` | EA no está registrado para COM en esta cuenta. Prueba a abrir EA una vez a mano y repite. |
 | `create_repository: FAIL server_exec_failure` o `TIMEOUT` | EA no arrancó por COM o se quedó esperando (¿un diálogo?). |
 | `own_instance: yes` | La sonda tuvo su propia instancia, como se quiere. |
+| `own_instance: no` con `own_instance_unproven: no_new_process` | Windows le dio un EA que ya estaba en marcha, sin modelo abierto. La sonda no hizo nada con él. Dímelo: es un dato importante para el Corte 5. |
+| `own_instance_unproven: count_unavailable` | No se pudo contar `EA.exe`, así que la sonda no probó nada. Pégame el resumen igual. |
 | `create_model_qea: FAIL` y `create_model_eapx: yes` | Tu versión crea modelos `.eapx` pero no `.qea` por COM. Es un dato, no un problema. |
 | `read_back: yes` con `elements_by_guid: 2` | La lectura por GUID funciona: el Corte 5 es viable. |
 | `ea_processes_left_behind: 1` o más | Al cerrar quedó algún `EA.exe` vivo. |
