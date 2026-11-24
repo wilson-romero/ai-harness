@@ -16,8 +16,8 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from harness.memory.redaction import redact
-from harness.memory.safe_text import strip_controls, terminal_safe
+from harness.text.redaction import redact
+from harness.text.safe_text import strip_controls, terminal_safe
 
 PROPOSAL_FORMAT = "ai-harness/approval/1"
 HASH_DOMAIN = b"ai-harness/approval/v1\n"

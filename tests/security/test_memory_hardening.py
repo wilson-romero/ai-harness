@@ -16,7 +16,7 @@ from harness.memory import context as context_module
 from harness.memory import notes as notes_module
 from harness.memory.context import build_context
 from harness.memory.paths import walk_vault
-from harness.memory.redaction import redact
+from harness.text.redaction import redact
 from tests.conftest import (
     REPO_ROOT,
     SECRET_SAMPLES,
@@ -148,7 +148,7 @@ def test_redaction_is_linear(name):
 
 
 def test_marker_neutralisation_is_linear():
-    from harness.memory.safe_text import neutralise_delimiters, safe_text
+    from harness.text.safe_text import neutralise_delimiters, safe_text
 
     text = "MEMORIA " * (MIB // 8)
     started = time.perf_counter()

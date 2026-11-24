@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import unicodedata
 
-from harness.memory.redaction import Redacted, redact
+from harness.text.redaction import Redacted, redact
 
 # Line and paragraph separators break lines for some readers, like a newline.
 _LINE_SEPARATORS = frozenset("  ")
