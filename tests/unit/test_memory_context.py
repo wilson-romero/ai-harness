@@ -278,3 +278,52 @@ def test_control_characters_dropped(context, vault):
                project_slug="demo-alpha")
     _, out, _ = context()
     assert "\x1b" not in out and "‮" not in out
+
+
+# -- second pass: the budget left over after the shares (D6, revised 2026-11-24) ---------------
+
+
+def _demo_long_decision(vault):
+    # The same shape as the note of scripts/demo_project_memory.py: newer than the small
+    # decision and far larger than the Decisiones share.
+    filler = "".join(
+        f"Línea de relleno sintética número {i} para superar el recorte.\n" for i in range(1, 61)
+    )
+    write_note(vault, "Decisiones/alpha-demo-larga.md", "# Decisión larga\n\n" + filler,
+               project_slug="demo-alpha", type="decision", updated="2026-11-22")
+
+
+def test_leftover_budget_takes_back_an_omitted_note(context, vault):
+    _demo_long_decision(vault)
+    code, out, err = context()
+    assert code == 0, err
+    paths = _paths(out)
+    assert paths[:3] == [
+        "projects/demo-alpha/_project.md",
+        "Decisiones/alpha-demo-larga.md",
+        "Decisiones/alpha-mensajeria.md",  # back from the leftover, in its place
+    ]
+    assert "8 note(s) included, 1 truncated, 0 omitted" in err
+    # The long note is cut only by the per-note maximum, not by its share.
+    section = out.split("--- nota: Decisiones/alpha-demo-larga.md (decision, 2026-11-22)\n")[1]
+    section = section.split("\n\n--- nota:")[0]
+    assert section.endswith(TRUNCATION_MARK)
+    assert NOTE_MAX_BYTES - 4 <= len(section.encode("utf-8")) <= NOTE_MAX_BYTES
+    assert len(_block(out).encode("utf-8")) <= 8192
+
+
+def test_leftover_budget_lengthens_a_truncated_note(vault):
+    # The project note and a decision are cut to their shares; the sessions leave budget
+    # unused, which then lengthens the cut notes, in section order, up to the limit.
+    write_note(vault, "projects/demo-alpha/_project.md", "p" * 2500, type="project")
+    write_note(vault, "Decisiones/alpha-grande.md", "d" * 2900, project_slug="demo-alpha",
+               updated="2026-11-22")
+    limit = 4096
+    context_obj = build_context(vault.resolve(), "demo-alpha", limit)
+    assert len(context_obj.text.encode("utf-8")) > limit - 16  # nothing left on the table
+    assert len(context_obj.text.encode("utf-8")) <= limit
+    # The omitted small decision comes back first; what is still left goes to the cut notes in
+    # D6 order, so the project note is lengthened before the decision.
+    assert context_obj.omitted == ()
+    text = context_obj.text
+    assert text.count("p") - text.count("d") > 400  # pass 1 gave both about the same share

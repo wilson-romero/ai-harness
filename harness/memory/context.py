@@ -93,34 +93,62 @@ def build_context(
     opening = [NOTICE.format(slug=slug), OPEN_MARKER.format(nonce=nonce)]
     closing = CLOSE_MARKER.format(nonce=nonce)
 
-    # The budget (D6, revised): what is left after the notice and the markers is shared
-    # among the sections that have notes, in their order. Each section gets an equal part of
-    # what remains when its turn comes; what it does not use stays for the next ones. Every
-    # piece costs its bytes plus the newline that joins it to the block.
+    # The budget (D6, revised), in two passes. What is left after the notice and the markers
+    # is first shared among the sections that have notes, in their order: each gets an equal
+    # part of what remains when its turn comes, and what it does not use stays for the next
+    # ones. That pass is the guarantee: no section can take another's share. The second pass
+    # spends whatever is still left, in the same order, first on the notes the first pass
+    # omitted and then on lengthening the notes it cut. Every piece costs its bytes plus the
+    # newline that joins it to the block.
     remaining = max_bytes - _bytes("\n".join([*opening, closing]))
+    slots: list[list[_Slot]] = [[_Slot(note) for note in notes] for _, notes in groups]
+    for position, section_slots in enumerate(slots):
+        share = remaining // (len(slots) - position)
+        used = 0
+        for slot in section_slots:
+            slot.rendered = _render(slot.note, share - used - 1, first=not used)
+            if slot.rendered is None:
+                break  # the order inside a section is never skipped
+            used += slot.cost
+        remaining -= used
+
+    # Second pass (a): omitted notes, in order; inside a section, the first one that does not
+    # fit even cut keeps the ones after it out.
+    for section_slots in slots:
+        for slot in section_slots:
+            if slot.rendered is not None:
+                continue
+            slot.rendered = _render(slot.note, remaining - 1, first=False)
+            if slot.rendered is None:
+                break
+            remaining -= slot.cost
+    # Second pass (b): notes cut to a share, lengthened with what is still left.
+    for section_slots in slots:
+        for slot in section_slots:
+            if slot.rendered is None or not slot.rendered[1] or remaining <= 0:
+                continue
+            before = slot.cost
+            longer = _render(slot.note, before - 1 + remaining, first=True)
+            if longer is not None and _bytes(longer[0]) + 1 > before:
+                slot.rendered = longer
+                remaining -= slot.cost - before
+
     sections: list[str] = []
     included: list[ContextNote] = []
-    omitted: list[tuple[str, str]] = []  # (section, safe path)
+    omitted: list[str] = []
     redactions = 0
-    for position, (section, notes) in enumerate(groups):
-        share = remaining // (len(groups) - position)
-        used = 0
-        for note in notes:
-            if omitted and omitted[-1][0] == section:
-                rendered = None  # the order inside a section is never skipped
-            else:
-                rendered = _render(note, share - used - 1, first=not used)
-            if rendered is None:
-                path = safe_line(note.relative)
+    for (section, _), section_slots in zip(groups, slots, strict=True):
+        for slot in section_slots:
+            if slot.rendered is None:
+                path = safe_line(slot.note.relative)
                 redactions += path.count
-                omitted.append((section, path.text))
+                omitted.append(path.text)
                 continue
-            text, truncated, replaced, path = rendered
+            text, truncated, replaced, path_text = slot.rendered
             sections.append(text)
-            used += _bytes(text) + 1
             redactions += replaced
-            included.append(ContextNote(path, section, note.sha256, note.size, truncated))
-        remaining -= used
+            note = slot.note
+            included.append(ContextNote(path_text, section, note.sha256, note.size, truncated))
 
     block = "\n".join([*opening, *sections, closing])
     return ProjectContext(
@@ -129,11 +157,24 @@ def build_context(
         text=block,
         max_bytes=max_bytes,
         included=tuple(included),
-        omitted=tuple(path for _, path in omitted),
+        omitted=tuple(omitted),
         redactions=redactions,
         skipped_counts=skipped,
         truncated_walk=truncated_walk,
     )
+
+
+class _Slot:
+    """One selected note and, once placed, its rendering (text, truncated, substitutions, path)."""
+
+    def __init__(self, note: Note) -> None:
+        self.note = note
+        self.rendered: tuple[str, bool, int, str] | None = None
+
+    @property
+    def cost(self) -> int:
+        assert self.rendered is not None
+        return _bytes(self.rendered[0]) + 1  # its text and the newline that joins it
 
 
 def _select(

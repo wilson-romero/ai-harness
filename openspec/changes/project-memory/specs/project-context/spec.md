@@ -37,7 +37,7 @@ El bloque de contexto completo SHALL ocupar como máximo el número de bytes UTF
 - **THEN** el sistema rechaza la configuración con un error controlado
 
 ### Requirement: Reparto del presupuesto entre secciones
-El presupuesto del bloque SHALL repartirse entre las secciones con notas, en su orden: cada sección SHALL disponer al menos de una parte igual de lo que quedaba cuando le tocó, y lo que no gaste SHALL pasar a las siguientes. La nota del proyecto y la sesión más reciente SHALL entrar siempre, recortadas si hace falta, salvo que su cabecera y la marca de recorte no quepan en su parte.
+Cada sección con notas SHALL disponer, en su orden, de al menos una parte igual del presupuesto que quedaba cuando le tocó; lo que no gaste SHALL pasar a las siguientes. La nota del proyecto y la sesión más reciente SHALL entrar siempre, recortadas si hace falta, salvo que su cabecera y la marca de recorte no quepan en su parte. El sobrante SHALL gastarse después, en el mismo orden, en notas omitidas y luego en alargar las recortadas, sin sacar notas incluidas ni cambiar el orden del bloque.
 
 #### Scenario: Ninguna sección deja sin sitio a las demás
 - **WHEN** `demo-alpha` tiene seis decisiones grandes y una nota de proyecto grande, y el límite es 1024, 2048 o 8192 bytes
@@ -46,6 +46,10 @@ El presupuesto del bloque SHALL repartirse entre las secciones con notas, en su 
 #### Scenario: Orden dentro de una sección
 - **WHEN** una decisión grande no cabe entera en la parte de `Decisiones/` y la siguen decisiones pequeñas
 - **THEN** la grande se recorta a su hueco y las que la siguen en esa sección se omiten aunque quepan, mientras las sesiones siguen entrando
+
+#### Scenario: El presupuesto sobrante se reparte
+- **WHEN** una decisión larga de `demo-alpha`, más reciente que la decisión real, gasta la parte de `Decisiones/` y el resto de secciones deja bytes sin usar
+- **THEN** con el límite por defecto la decisión real también entra, en su sitio después de la larga, el resumen dice que no se omitió ninguna nota, y una nota recortada a su parte se alarga con lo que sobra sin superar el límite
 
 ### Requirement: Fechas futuras sin prioridad
 Una nota cuya fecha `updated` es posterior a hoy SHALL ordenarse dentro de su sección como si no tuviera fecha.

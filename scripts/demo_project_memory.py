@@ -90,6 +90,8 @@ def demo() -> list[str]:
         check(github_token not in out + err, "the token leaked")
         check("2 credential(s) redacted" in err, "wrong redaction count")
         check(re.search(r"\d+ of 8192 bytes", err), "no byte summary")
+        # The long decision is cut, and the budget it leaves still brings back the small one.
+        check("8 note(s) included, 1 truncated, 0 omitted" in err, "wrong note counts")
 
         step("(c) a question with the project memory, and its history")
         session = harness(
