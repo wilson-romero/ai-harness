@@ -128,3 +128,20 @@ def insert_audit(
             utc_now(),
         ),
     )
+
+
+def insert_request_context(
+    conn: sqlite3.Connection,
+    *,
+    request_id: UUID,
+    note_path: str,
+    sha256: str,
+    size_bytes: int,
+    truncated: bool,
+) -> None:
+    """Record that a note went out with a request. Path and hash only, never the text."""
+    conn.execute(
+        "INSERT INTO request_context (request_id, note_path, sha256, bytes, truncated)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (str(request_id), note_path, sha256, size_bytes, int(truncated)),
+    )

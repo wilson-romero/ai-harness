@@ -24,7 +24,9 @@ from pathlib import Path
 
 ALLOW_MARKER = "public-safety: allow"
 DENYLIST_ENV = "HARNESS_PUBLIC_DENYLIST"
-DEFAULT_DENYLIST = Path.home() / ".config" / "ai-harness" / "public-denylist.txt"
+# Relative to the home directory, which is resolved only when the variable is not set.
+DEFAULT_DENYLIST = Path(".config") / "ai-harness" / "public-denylist.txt"
+NO_HOME = "the home directory could not be determined"
 
 # Files that carry runtime data, credentials, browser state or real models.
 FORBIDDEN_PATHS = [
@@ -134,8 +136,15 @@ def compile_denylist(terms: list[str]) -> list[re.Pattern[str]]:
     return patterns
 
 
-def load_denylist(env: dict[str, str]) -> tuple[list[str], Path, bool]:
-    path = Path(env.get(DENYLIST_ENV) or DEFAULT_DENYLIST)
+def load_denylist(env: dict[str, str]) -> tuple[list[str], Path | None, bool]:
+    """Terms, the file they came from (None when there is no home directory), configured."""
+    if env.get(DENYLIST_ENV):
+        path = Path(env[DENYLIST_ENV])
+    else:
+        try:
+            path = Path.home() / DEFAULT_DENYLIST
+        except RuntimeError:
+            return [], None, False
     if not path.is_file():
         return [], path, False
     terms = [
@@ -184,8 +193,9 @@ def main(argv: list[str] | None = None) -> int:
     for finding in findings:
         print(f"public-safety: {finding}", file=sys.stderr)
     if not configured:
+        where = f"at {denylist_path}" if denylist_path else f"({NO_HOME})"
         print(
-            f"public-safety: WARNING no local denylist at {denylist_path}; "
+            f"public-safety: WARNING no local denylist {where}; "
             "company, client and system names are NOT being checked",
             file=sys.stderr,
         )

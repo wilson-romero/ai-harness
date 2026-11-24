@@ -17,7 +17,16 @@ from harness.core.contracts import (
     Session,
     SessionStatus,
 )
-from harness.core.errors import InvalidIdentifier, InvalidInput, SessionBusy, SessionNotFound
+from harness.core.errors import (
+    InvalidIdentifier,
+    InvalidInput,
+    InvalidProject,
+    ProjectMismatch,
+    SessionBusy,
+    SessionNotFound,
+)
+from harness.memory.context import ProjectContext, compose_prompt
+from harness.memory.paths import validate_project_slug
 from harness.providers.base import LLMProvider
 from harness.providers.registry import ProviderFactory
 from harness.storage import repositories as repo
@@ -126,22 +135,78 @@ class SessionService:
 
     # -- asking -----------------------------------------------------------------------------
 
-    async def ask(self, raw_session_id: str, prompt: str) -> LLMResponse:
+    def check_project_question(self, raw_session_id: str, prompt: str, project: str) -> None:
+        """Refuse a question with project memory before the vault is read (D7).
+
+        The session and the prompt are checked first, as for any question (nothing is
+        recorded if they fail). Then the project: a valid identifier, and exactly the one the
+        session was created with, because a remote conversation remembers what it was sent and
+        two projects must never meet in one session. A refused project leaves a
+        `memory.context denied` audit event, without paths or text.
+        """
         session = self._require_session(raw_session_id)
         if not prompt.strip():
             raise InvalidInput("the prompt must not be empty")
+        try:
+            validate_project_slug(project)
+        except InvalidProject:
+            self._deny(session.session_id)
+            raise
+        self._check_project(session, project)
+
+    def deny_project_question(self, raw_session_id: str) -> None:
+        """Record the refusal of a question with project memory refused after the checks."""
+        self._deny(self._require_session(raw_session_id).session_id)
+
+    def _deny(self, session_id: UUID) -> None:
+        with transaction(self._conn):
+            repo.insert_audit(
+                self._conn,
+                event_type="memory.context",
+                outcome="denied",
+                actor="cli",
+                session_id=session_id,
+            )
+
+    def _check_project(self, session: Session, project: str) -> None:
+        if session.project_id == project:
+            return
+        self._deny(session.session_id)
+        if session.project_id is None:
+            raise ProjectMismatch(
+                f"session {session.session_id} has no project; "
+                "create a session with --project to ask with project memory"
+            )
+        raise ProjectMismatch(
+            f"session {session.session_id} belongs to another project; "
+            "use the project it was created with, or another session"
+        )
+
+    async def ask(
+        self, raw_session_id: str, prompt: str, context: ProjectContext | None = None
+    ) -> LLMResponse:
+        """Ask a question. With `context`, the memory block goes before it but is never stored."""
+        session = self._require_session(raw_session_id)
+        if not prompt.strip():
+            raise InvalidInput("the prompt must not be empty")
+        if context is not None:
+            self._check_project(session, context.project)
         self._provider_factory(self._default_provider)  # a misconfigured provider stops here
         provider = self._provider_factory(session.provider)
         lock = SessionLock(self._data_dir, session.session_id)
         if not lock.acquire():
             raise SessionBusy(f"session {session.session_id} already has a question in progress")
         try:
-            return await self._ask_locked(session.session_id, provider, prompt)
+            return await self._ask_locked(session.session_id, provider, prompt, context)
         finally:
             lock.release()
 
     async def _ask_locked(
-        self, session_id: UUID, provider: LLMProvider, prompt: str
+        self,
+        session_id: UUID,
+        provider: LLMProvider,
+        prompt: str,
+        context: ProjectContext | None = None,
     ) -> LLMResponse:
         session = repo.get_session(self._conn, session_id)
         assert session is not None
@@ -152,8 +217,11 @@ class SessionService:
                 "and stays in the history",
             )
 
+        # The provider receives the memory block and the question; only the question is ever
+        # stored, and only when the provider's content is synthetic (D7).
+        sent_text = compose_prompt(context, prompt) if context is not None else prompt
         request = LLMRequest(
-            request_id=uuid7(), session_id=session_id, prompt=prompt, timeout_s=self._timeout_s
+            request_id=uuid7(), session_id=session_id, prompt=sent_text, timeout_s=self._timeout_s
         )
         store_content = provider.synthetic_content
         with transaction(self._conn):
@@ -165,6 +233,24 @@ class SessionService:
                 role="user",
                 content=prompt if store_content else None,
             )
+            if context is not None:
+                for note in context.included:
+                    repo.insert_request_context(
+                        self._conn,
+                        request_id=request.request_id,
+                        note_path=note.relative,
+                        sha256=note.sha256,
+                        size_bytes=note.size,
+                        truncated=note.truncated,
+                    )
+                repo.insert_audit(
+                    self._conn,
+                    event_type="memory.context",
+                    outcome="ok",
+                    actor="cli",
+                    session_id=session_id,
+                    request_id=request.request_id,
+                )
             self._audit(request, RequestStatus.PENDING)
 
         sent = False
