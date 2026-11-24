@@ -42,13 +42,13 @@ Corte **4 · Skills sin herramientas** de `docs/plan/2026-11-24-ai-harness-corte
 
 ### Modified Capabilities
 
-Ninguna en `openspec/specs/`. `openspec list --specs` devuelve «No specs found», `ls openspec/specs` solo muestra `.gitkeep` y `grep -rni "skill\|approv\|aprob" openspec/specs` no devuelve nada (comprobado el 2026-11-24).
+Ninguna. **Revisado el 2026-11-24:** al redactar, `openspec/specs/` estaba vacío; con `session-core` y `project-memory` archivados en `develop` (`f7c590a`), `openspec list --specs` muestra 8 capacidades (`llm-provider`, `memory-maintenance`, `memory-search`, `memory-vault`, `project-context`, `request-recovery`, `secret-redaction`, `session-management`) y ninguna habla de Skills ni de aprobaciones; este change sigue sin cambiar ningún requisito suyo.
 
-**Dependencias declaradas con changes sin archivar.** `session-core` (capacidades `session-management`, `llm-provider`, `request-recovery`) y `project-memory` (`project-context`) viven en `openspec/changes/` y no en `openspec/specs/`, así que no hay spec contra la que escribir un delta MODIFIED. Lo que este change añade a su conducta se escribe como requisitos ADDED de las capacidades nuevas, sin reescribir ninguno de los suyos:
+**Dependencias con capacidades ya archivadas.** `session-management`, `llm-provider` y `request-recovery` (de `session-core`) y `project-context` y `secret-redaction` (de `project-memory`) están en `openspec/specs/` (revisado el 2026-11-24; antes vivían en `openspec/changes/`). Lo que este change añade a su conducta se escribe como requisitos ADDED de las capacidades nuevas, sin reescribir ninguno de los suyos:
 
 - Las preguntas de un paso `llm` usan la misma conducta de `ask` (`timeout` antes del envío, `uncertain` después, sin reenvío) y el mismo bloqueo por sesión; `skill-execution` añade que del texto enviado se guarda solo una marca del paso, nunca el prompt compuesto.
 - Las respuestas guionizadas del Mock amplían el Mock de `llm-provider`; se escriben en `skill-execution` y, al archivar, se decidirá si se mueven a `llm-provider` con un change propio (el mismo criterio que usó `project-memory`).
-- Orden de archivo: `session-core`, `project-memory`, este change, `architecture-skills-llm`.
+- Orden de archivo: este change y después `architecture-skills-llm` (`session-core` y `project-memory` ya están archivados).
 
 ## Impact
 

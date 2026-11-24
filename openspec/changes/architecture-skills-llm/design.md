@@ -181,7 +181,7 @@ Premisas heredadas, **vueltas a medir** el 2026-11-24:
 ## Risks / Trade-offs
 
 - [`Decisiones/` es zona del curador en `claude-memory-system`] → nombre propio, `source: ai-harness`, nunca se edita ni borra nada ajeno; la carpeta solo se crea en la primera escritura aprobada (revisada el 2026-11-24, D3); el curador podría atribuirse la nota en su log si coincide en el tiempo (medido, D3). Lo confirma Wilson en la tarea 1.1.
-- [Requisito vigente de `project-memory` que dice que el harness no modifica el vault] → no se puede escribir un MODIFIED mientras no esté archivado; tarea 1.2 lo resuelve antes de archivar este change.
+- [Requisito vigente de `memory-vault` que dice que el harness no modifica el vault] → **Revisado el 2026-11-24:** con `project-memory` archivado, `specs/memory-vault/spec.md` lo modifica (MODIFIED con el bloque íntegro); tarea 1.2.
 - [Sobrescritura por un tercero en la ventana entre la comprobación y el renombrado] → aceptado y escrito (D6); el bloqueo cubre al harness.
 - [Corte de luz tras el renombrado sin sincronizar el directorio] → la reconciliación lo detectaría como `absent` y pediría aprobar de nuevo; aceptado y escrito.
 - [Copilot no devuelve JSON estricto o las seis secciones] → `failed` controlado, sin escritura; se mide con el Corte 2 mergeado.

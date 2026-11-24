@@ -34,14 +34,14 @@ Corte **4 · Skills sin herramientas** de `docs/plan/2026-11-24-ai-harness-corte
 
 ### Modified Capabilities
 
-Ninguna en `openspec/specs/`. `openspec list --specs` devuelve «No specs found» y `ls openspec/specs` solo muestra `.gitkeep` (comprobado el 2026-11-24); `grep -rni "decisi\|vault\|skill" openspec/specs` no devuelve nada.
+`memory-vault` (en `openspec/specs/memory-vault/spec.md` desde que `project-memory` se archivó). **Revisado el 2026-11-24:** la primera versión de esta propuesta decía «ninguna», porque `openspec/specs/` estaba vacío; con `session-core` y `project-memory` archivados en `develop` (`f7c590a`), `openspec list --specs` muestra 8 capacidades y el conflicto de abajo se resuelve con un delta MODIFIED en `specs/memory-vault/spec.md`.
 
-**Conflicto declarado con `project-memory` (sin archivar).** Su capacidad `memory-vault` tiene el requisito «El harness no copia, sincroniza ni modifica el vault», cuyo texto dice que el sistema no copia, sube ni sincroniza el vault y que ningún comando **de memoria** escribe en él. Tras este change el harness **sí** crea notas nuevas en `Decisiones/`, aunque nunca desde un comando `memory …`. Como `memory-vault` no está en `openspec/specs/`, no se puede escribir aquí un delta MODIFIED. Se trata así:
+**Conflicto con `memory-vault`, resuelto con un delta MODIFIED.** Su requisito «El harness no copia, sincroniza ni modifica el vault» dice que el sistema no copia, sube ni sincroniza el vault y que ningún comando **de memoria** escribe en él. Tras este change el harness **sí** crea notas nuevas en `Decisiones/` (y la carpeta si falta), aunque nunca desde un comando `memory …`. Se trata así:
 
-- `decision-notes` declara en ADDED la única escritura y sus condiciones; ningún requisito de `project-memory` se reescribe aquí, y sus escenarios siguen siendo ciertos (los comandos `memory …` siguen sin escribir; nada copia ni sincroniza).
-- La tarea 1.2 obliga a resolverlo antes de archivar este change: con `project-memory` ya archivado, añadir `specs/memory-vault/spec.md` con el requisito MODIFIED para que diga «solo crea notas de decisión aprobadas en `Decisiones/`». Si Wilson prefiere otra salida (editar el delta de `project-memory` antes de archivarlo), es una decisión suya y queda anotada en esa tarea.
-- Dependencia de `skill-engine` (sin archivar): este change usa sus capacidades `skill-execution` y `human-approval` sin modificarlas; el efecto nuevo se añade a la lista cerrada que `human-approval` define.
-- Orden de archivo: `session-core`, `project-memory`, `skill-engine`, este change.
+- `decision-notes` declara en ADDED la única escritura y sus condiciones; `specs/memory-vault/spec.md` copia íntegro el bloque del requisito vigente en MODIFIED y cambia su texto para nombrar esa única escritura; sus dos escenarios no cambian y se añade «Ninguna nota existente cambia tras una decisión».
+- La tarea 1.2 recoge el delta y su comprobación tras archivar.
+- Dependencia de `skill-engine` (sin archivar; sus capacidades viven en `openspec/changes/skill-engine/specs/` hasta que se archive): este change usa sus capacidades `skill-execution` y `human-approval` sin modificarlas; el efecto nuevo se añade a la lista cerrada que `human-approval` define. Usa también, ya archivadas en `openspec/specs/`, `project-context` (contexto del proyecto en el paso `llm`), `memory-vault` (confinamiento de lectura), `secret-redaction` y `session-management`, sin modificarlas salvo el delta de `memory-vault`.
+- Orden de archivo: `skill-engine` y después este change (`session-core` y `project-memory` ya están archivados).
 
 ## Impact
 
