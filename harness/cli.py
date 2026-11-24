@@ -7,11 +7,15 @@ import asyncio
 import os
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from harness.config import Settings
 from harness.core.contracts import RequestStatus
-from harness.core.errors import HarnessError
+from harness.core.errors import HarnessError, InvalidInput, NotImplementedInThisBuild
 from harness.core.service import SessionService
+from harness.memory.config import bind_data_dir, load_memory_settings
+from harness.memory.paths import resolve_project, validate_project_slug
+from harness.memory.search import DEFAULT_LIMIT, parse_query, search_vault, validate_limit
 from harness.providers.registry import provider_factory
 from harness.storage.database import open_database
 
@@ -34,9 +38,32 @@ def build_parser() -> argparse.ArgumentParser:
     ask = commands.add_parser("ask", help="ask a question in a session")
     ask.add_argument("session_id")
     ask.add_argument("prompt")
+    ask.add_argument(
+        "--project", default=None, help="send the memory of this project with the question"
+    )
 
     history = commands.add_parser("history", help="show the history of a session")
     history.add_argument("session_id")
+
+    memory = commands.add_parser("memory", help="read the local Markdown memory (read-only)")
+    memory_commands = memory.add_subparsers(dest="memory_command", required=True)
+    search = memory_commands.add_parser("search", help="find notes that contain every term")
+    search.add_argument("query")
+    search.add_argument("--project", default=None, help="only notes of this project")
+    search.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_LIMIT,
+        help=f"results to show (default {DEFAULT_LIMIT})",
+    )
+    context = memory_commands.add_parser(
+        "context", help="print the context block that would be sent for a project"
+    )
+    context.add_argument("project")
+    maintain = memory_commands.add_parser(
+        "maintain", help="report what a maintenance pass would find, without changing anything"
+    )
+    maintain.add_argument("--dry-run", action="store_true", help="report only (required)")
     return parser
 
 
@@ -54,6 +81,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _run(args: argparse.Namespace) -> int:
     settings = Settings.from_env(os.environ)
+    if args.command == "memory":
+        return _memory(args, settings)
+    if args.command == "ask" and args.project is not None:
+        # TODO(project-memory 5.4): replace with the real `ask --project`.
+        raise NotImplementedInThisBuild("ask --project is not implemented in this build")
     conn = open_database(settings.data_dir)
     try:
         service = SessionService(
@@ -110,4 +142,59 @@ def _history(service: SessionService, session_id: str) -> int:
     for entry in entries:
         content = entry.content if entry.content is not None else "(content not stored)"
         print(f"[{entry.request_status}] {entry.role}: {content}")
+    return EXIT_OK
+
+
+# -- memory -------------------------------------------------------------------------------------
+
+
+def _memory(args: argparse.Namespace, settings: Settings) -> int:
+    # Arguments are validated before the configuration, and both before the vault is read.
+    if args.memory_command == "search":
+        terms = parse_query(args.query)
+        validate_limit(args.limit)
+        if args.project is not None:
+            validate_project_slug(args.project)
+    elif args.memory_command == "context":
+        validate_project_slug(args.project)
+    elif not args.dry_run:
+        raise InvalidInput("memory maintain only exists as --dry-run in this build")
+
+    memory = load_memory_settings(os.environ, settings.data_dir)
+    conn = open_database(settings.data_dir)
+    try:
+        bind_data_dir(conn, memory)
+    finally:
+        conn.close()
+
+    if args.memory_command == "search":
+        return _search(memory.vault_root, terms, args.project, args.limit)
+    if args.memory_command == "context":
+        resolve_project(memory.vault_root, args.project)
+        # TODO(project-memory 5.3): replace with the real `memory context`.
+        raise NotImplementedInThisBuild("memory context is not implemented in this build")
+    # TODO(project-memory 6.1): replace with the real `memory maintain --dry-run`.
+    raise NotImplementedInThisBuild("memory maintain is not implemented in this build")
+
+
+def _search(root: Path, terms: tuple[str, ...], project: str | None, limit: int) -> int:
+    result = search_vault(root, terms, project=project, limit=limit)
+    if result.hits:
+        for hit in result.hits:
+            print(f"{hit.relative}\t{hit.updated or '-'}\t{hit.matches}\t{hit.snippet}")
+    else:
+        print("No results.")
+    if result.omitted:
+        print(f"warning: {result.omitted} more result(s) omitted; use --limit", file=sys.stderr)
+    if result.truncated_walk:
+        print("warning: the vault walk stopped at the file limit", file=sys.stderr)
+    skipped = sum(result.skipped_counts.values())
+    detail = ", ".join(f"{reason}: {count}" for reason, count in result.skipped_counts.items())
+    print(
+        f"search: {len(result.hits)} result(s), {result.omitted} omitted, "
+        f"{skipped} entr{'y' if skipped == 1 else 'ies'} skipped"
+        + (f" ({detail})" if detail else "")
+        + f", {result.redactions} credential(s) redacted",
+        file=sys.stderr,
+    )
     return EXIT_OK
