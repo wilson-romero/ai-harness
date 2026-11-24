@@ -22,6 +22,15 @@ class PageState(StrEnum):
     CLOSED = "closed"
 
 
+def is_target_gone(exc: PlaywrightError) -> bool:
+    """The page, context or browser is gone: closed, or the driver behind it died.
+
+    After the driver dies a page still says `is_closed() == False`, but every call raises
+    Playwright's TargetClosedError, which `playwright.async_api` does not export by name.
+    """
+    return type(exc).__name__ == "TargetClosedError"
+
+
 def host_of(url: str) -> str:
     return (urlsplit(url).hostname or "").lower()
 
@@ -31,6 +40,7 @@ async def classify(page: Page, measurement: UiMeasurement, copilot_host: str) ->
     if page.is_closed():
         return PageState.CLOSED
     try:
+        await page.locator("html").count()  # a round trip: fails if the browser or driver is gone
         host = host_of(page.url)
         if host == copilot_host.lower():
             composer = measurement.locators.composer.resolve(page).first
@@ -42,6 +52,6 @@ async def classify(page: Page, measurement: UiMeasurement, copilot_host: str) ->
         indicator = measurement.locators.login_indicator
         if indicator is not None and await indicator.resolve(page).first.is_visible():
             return PageState.LOGIN
-    except PlaywrightError:
-        return PageState.CLOSED if page.is_closed() else PageState.UNKNOWN
+    except PlaywrightError as exc:
+        return PageState.CLOSED if page.is_closed() or is_target_gone(exc) else PageState.UNKNOWN
     return PageState.UNKNOWN

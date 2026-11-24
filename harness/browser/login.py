@@ -33,12 +33,13 @@ async def manual_login(settings: Settings, launcher: EdgeLauncher | None = None)
             await page.goto(url)
         while True:
             pages = _open_pages(context)
-            if not pages:
+            state = await classify(pages[-1], measurement, copilot_host) if pages else None
+            if state is None or state is PageState.CLOSED:
                 raise NotSignedIn(
-                    "the Edge window was closed before Copilot was ready: not signed in. "
-                    "Run `copilot login` again and sign in in that window"
+                    "the Edge window was closed, or the browser stopped, before Copilot was "
+                    "ready: not signed in. Run `copilot login` again and sign in in that window"
                 )
-            if await classify(pages[-1], measurement, copilot_host) is PageState.READY:
+            if state is PageState.READY:
                 return
             await asyncio.sleep(POLL_S)
 

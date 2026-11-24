@@ -17,6 +17,7 @@ from types import ModuleType
 import pytest
 
 from harness.providers.copilot_ui import MeasurementError, load_measurement, measurement_path
+from harness.storage.locks import NamedLock
 from tests.conftest import HARNESS_VARS, REPO_ROOT
 from tests.copilot_app import CANARIES, SyntheticCopilot
 
@@ -302,3 +303,120 @@ def test_versionable_data_directory_is_refused(tmp_path, copilot_app):
     assert "could be committed" in result.stderr
     assert copilot_app.page_hits == 0
     assert sorted(p.name for p in (data / "copilot").iterdir()) == before
+
+
+# The probe run in a child process, so that whatever asyncio or Playwright print while the
+# interpreter shuts down is captured too. `mode` says how the run ends:
+#   driver-dies-then-ctrl-c: the Playwright driver dies and Ctrl+C arrives while the page loads
+#       (what a console Ctrl+C does on Windows: it reaches the driver as well as Python);
+#   ctrl-c-while-loading: only Ctrl+C, while the page loads;
+#   browser-closed: the browser goes away while the probe waits for the person;
+#   driver-dies-while-waiting: the driver dies while the probe waits for the person.
+EXIT_DRIVER = r"""
+import asyncio, gc, importlib.util, sys
+import playwright._impl.transport as transport
+
+probe_path, mode, step = sys.argv[1], sys.argv[2], sys.argv[3]
+spec = importlib.util.spec_from_file_location("probe_exit", probe_path)
+probe = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = probe
+spec.loader.exec_module(probe)
+
+drivers = []
+real_init = transport.PipeTransport.__init__
+def tracking_init(self, *args, **kwargs):
+    real_init(self, *args, **kwargs)
+    drivers.append(self)
+transport.PipeTransport.__init__ = tracking_init
+
+class Interrupted:
+    def __init__(self, page):
+        self._page = page
+    def __getattr__(self, name):
+        return getattr(self._page, name)
+    async def goto(self, *args, **kwargs):
+        if mode == "driver-dies-then-ctrl-c":
+            for driver in drivers:
+                driver._proc.kill()
+                await driver._proc.wait()
+            await asyncio.sleep(0.5)  # the reader sees the pipe close
+        raise KeyboardInterrupt
+
+real_first_page = probe.first_page
+def first_page(context):
+    page = real_first_page(context)
+    return Interrupted(page) if "ctrl-c" in mode else page
+probe.first_page = first_page
+
+async def browser_goes_away(context):
+    session = await context.new_cdp_session(context.pages[0])
+    try:
+        await session.send("Browser.close")
+    except Exception:
+        pass
+    await asyncio.sleep(1.0)
+    return False
+if mode == "browser-closed":
+    probe.wait_for_person = browser_goes_away
+
+real_wait = probe.wait_for_person
+async def driver_dies_while_waiting(context):
+    drivers[0]._proc.kill()
+    await drivers[0]._proc.wait()
+    return await real_wait(context)  # the real wait must notice, not hang
+if mode == "driver-dies-while-waiting":
+    probe.wait_for_person = driver_dies_while_waiting
+
+code = probe.main([step])
+drivers.clear()  # the test's own reference must not keep the driver's futures alive
+gc.collect()
+sys.exit(code)
+"""
+
+
+def run_exit_driver(mode: str, step: str, data: Path, url: str) -> subprocess.CompletedProcess[str]:
+    env = {k: v for k, v in os.environ.items() if k not in HARNESS_VARS}
+    env |= {
+        "HARNESS_DATA_DIR": str(data),
+        "HARNESS_COPILOT_URL": url,
+        "HARNESS_TEST_HEADLESS": "1",
+        "PYTHONPATH": str(REPO_ROOT),
+        "PYTHONUTF8": "1",
+    }
+    return subprocess.run(
+        [sys.executable, "-c", EXIT_DRIVER, str(PROBE_PATH), mode, step],
+        cwd=REPO_ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,  # one stream, so "after the summary" is well defined
+        text=True,
+        encoding="utf-8",
+        timeout=120,
+    )
+
+
+def after_summary(output: str) -> str:
+    return output.rpartition("---- end of summary ----")[2].strip()
+
+
+@pytest.mark.parametrize(
+    "mode, code, p1",
+    [
+        ("driver-dies-then-ctrl-c", 130, "P1 controllable: not measured"),
+        ("ctrl-c-while-loading", 130, "P1 controllable: not measured"),
+        ("browser-closed", 1, "P1 controllable: yes"),
+        ("driver-dies-while-waiting", 1, "P1 controllable: yes"),
+    ],
+)
+def test_login_step_ends_cleanly_however_it_is_interrupted(mode, code, p1, tmp_path, copilot_app):
+    data = tmp_path / "data"
+    run = run_exit_driver(mode, "login", data, copilot_app.url())
+    assert run.returncode == code, run.stdout
+    assert "---- end of summary ----" in run.stdout
+    assert after_summary(run.stdout) == ""  # nothing at all after the summary
+    assert "never retrieved" not in run.stdout and "Traceback" not in run.stdout
+    assert p1 in run.stdout
+    login = json.loads(sorted((data / "copilot").glob("probe-login-*.json"))[-1].read_text())
+    assert login["complete"] is False
+    assert isinstance(login["launch_ms"], int)  # the launch did happen
+    assert NamedLock(data, "browser").acquire()  # and the browser was given back

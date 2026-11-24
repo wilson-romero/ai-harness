@@ -46,6 +46,7 @@ from playwright.async_api import Error as PlaywrightError  # noqa: E402
 
 from harness.browser.edge import EdgeLauncher, edge_version  # noqa: E402
 from harness.browser.page_state import host_of  # noqa: E402
+from harness.browser.runner import run_browser  # noqa: E402
 from harness.config import Settings  # noqa: E402
 from harness.core.errors import HarnessError  # noqa: E402
 from harness.providers.copilot_ui import (  # noqa: E402
@@ -490,7 +491,12 @@ async def wait_for_person(context: BrowserContext) -> bool:
 
     threading.Thread(target=read, daemon=True).start()
     while not pressed.done():
-        if not [p for p in context.pages if not p.is_closed()]:
+        pages = [p for p in context.pages if not p.is_closed()]
+        if not pages:
+            return False
+        try:
+            await pages[-1].locator("html").count()  # fails once the browser or driver is gone
+        except PlaywrightError:
             return False
         await asyncio.sleep(0.25)
     return True
@@ -498,7 +504,7 @@ async def wait_for_person(context: BrowserContext) -> bool:
 
 async def step_login(probe: Probe, result: dict) -> None:
     launcher = probe.launcher()
-    result["controllable"] = False
+    result["controllable"] = None  # not measured until the page answered; Ctrl+C keeps it so
     started = time.monotonic()
     async with launcher.open() as context:
         result["edge_version"] = edge_version(context)
@@ -742,6 +748,10 @@ def assemble(out_dir: Path) -> tuple[UiMeasurement | None, str]:
 # -- summary: the only thing to paste back -------------------------------------------------------
 
 
+def yes_no(value: bool | None) -> str:
+    return "not measured" if value is None else ("yes" if value else "no")
+
+
 def print_summary(step: str, result: dict, ui_status: str | None) -> None:
     lines = [
         "",
@@ -755,7 +765,7 @@ def print_summary(step: str, result: dict, ui_status: str | None) -> None:
     ]
     if step == "login":
         lines.append(
-            f"P1 controllable: {'yes' if result.get('controllable') else 'no'}  "
+            f"P1 controllable: {yes_no(result.get('controllable'))}  "
             f"launch_ms: {result.get('launch_ms')}  first_load_ms: {result.get('first_load_ms')}  "
             f"confirmed_by_person: {result.get('confirmed_by_person')}"
         )
@@ -835,7 +845,7 @@ def main(argv: list[str] | None = None) -> int:
 
     code = EXIT_OK
     try:
-        asyncio.run(STEPS[args.step](probe, result))
+        run_browser(STEPS[args.step](probe, result))
     except KeyboardInterrupt:
         result["interrupted"] = True
         code = EXIT_INTERRUPTED
@@ -854,7 +864,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.step == "login-state":
         finish_login_state(result)
     else:
-        result["complete"] = bool(result.get("controllable") and result.get("confirmed_by_person"))
+        result["complete"] = result.get("controllable") is True and bool(result.get("confirmed_by_person"))
         result["missing"] = [] if result["complete"] else ["login"]
     write_json(probe.out_dir, f"probe-{args.step}-{stamp()}.json", result)
     ui_status = None

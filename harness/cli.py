@@ -213,10 +213,11 @@ def _history(service: SessionService, session_id: str) -> int:
 
 def _copilot_login(settings: Settings) -> int:
     from harness.browser.login import manual_login  # Playwright loads only for this command
+    from harness.browser.runner import run_browser
 
     print("Sign in to Copilot in the Edge window; it closes by itself when Copilot is ready.",
           file=sys.stderr)
-    asyncio.run(manual_login(settings))
+    run_browser(manual_login(settings))
     print("Copilot is ready in the dedicated profile.")
     return EXIT_OK
 

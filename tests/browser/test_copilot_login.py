@@ -131,6 +131,75 @@ def test_foreign_profile_directory_is_refused(cli, login_env, tmp_path, copilot_
     assert not (profile / PROFILE_MARKER).exists()
 
 
+# `copilot login` in a child process, so that output printed while Python shuts down is seen.
+LOGIN_EXIT_DRIVER = r"""
+import asyncio, gc, sys
+import playwright._impl.transport as transport
+import harness.browser.login as login
+from harness.cli import main
+
+mode = sys.argv[1]
+drivers = []
+real_init = transport.PipeTransport.__init__
+def tracking_init(self, *args, **kwargs):
+    real_init(self, *args, **kwargs)
+    drivers.append(self)
+transport.PipeTransport.__init__ = tracking_init
+
+real_classify = login.classify
+async def classify(page, measurement, host):
+    state = await real_classify(page, measurement, host)
+    if mode in ("driver-dies", "driver-dies-then-ctrl-c") and drivers[0]._proc.returncode is None:
+        drivers[0]._proc.kill()
+        await drivers[0]._proc.wait()
+        await asyncio.sleep(0.5)
+    if mode in ("ctrl-c", "driver-dies-then-ctrl-c"):
+        raise KeyboardInterrupt
+    return state
+login.classify = classify
+
+code = main(["copilot", "login"])
+drivers.clear()
+gc.collect()
+print("exit", code, flush=True)
+sys.exit(code)
+"""
+
+
+@pytest.mark.parametrize(
+    "mode, code", [("ctrl-c", 130), ("driver-dies", 1), ("driver-dies-then-ctrl-c", 130)]
+)
+def test_login_ends_cleanly_however_it_is_interrupted(mode, code, login_env, data_dir):
+    import os
+    import subprocess
+    import sys
+
+    from tests.conftest import HARNESS_VARS
+
+    env = {k: v for k, v in os.environ.items() if k not in HARNESS_VARS}
+    env |= login_env | {
+        "HARNESS_DATA_DIR": str(data_dir),
+        "HARNESS_TEST_HEADLESS": "1",
+        "PYTHONPATH": str(REPO_ROOT),
+        "PYTHONUTF8": "1",
+    }
+    run = subprocess.run(
+        [sys.executable, "-c", LOGIN_EXIT_DRIVER, mode],
+        cwd=REPO_ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        timeout=120,
+    )
+    lines = run.stdout.strip().splitlines()
+    assert run.returncode == code, run.stdout
+    assert lines[-1] == f"exit {code}"  # nothing printed after the command's own last line
+    assert "never retrieved" not in run.stdout and "Traceback" not in run.stdout, run.stdout
+    assert NamedLock(data_dir, "browser").acquire()
+
+
 def test_login_needs_the_probe_measurement(cli, login_env, data_dir, copilot_app, launches):
     measurement_path(data_dir).unlink()
     code, _, err = cli("copilot", "login", **login_env)
