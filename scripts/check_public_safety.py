@@ -94,7 +94,7 @@ def check_text(path: str, text: str, denylist: list[str]) -> list[Finding]:
     findings: list[Finding] = []
     if path.replace("\\", "/").rsplit("/", 1)[-1] in SKIP_CONTENT:
         return findings
-    lowered_terms = [term.lower() for term in denylist]
+    denylist_patterns = compile_denylist(denylist)
     for number, line in enumerate(text.splitlines(), start=1):
         if ALLOW_MARKER in line:
             continue
@@ -111,12 +111,27 @@ def check_text(path: str, text: str, denylist: list[str]) -> list[Finding]:
                 ):
                     continue
                 findings.append(Finding(path, number, rule))
-        lowered = line.lower()
-        for index, term in enumerate(lowered_terms, start=1):
-            if term in lowered:
+        for index, pattern in enumerate(denylist_patterns, start=1):
+            if pattern.search(line):
                 # The term itself is not printed: this output may be pasted elsewhere.
                 findings.append(Finding(path, number, f"local denylist term #{index}"))
     return findings
+
+
+CASE_SENSITIVE_PREFIX = "cs:"
+_WORD = "0-9A-Za-z\u00c0-\u024f_"
+
+
+def compile_denylist(terms: list[str]) -> list[re.Pattern[str]]:
+    """Whole-word patterns. A term written as `cs:Name` also has to match the exact case,
+    which lets a name that is also an ordinary word be listed without flagging the word."""
+    patterns = []
+    for term in terms:
+        exact_case = term.startswith(CASE_SENSITIVE_PREFIX)
+        text = term[len(CASE_SENSITIVE_PREFIX):].strip() if exact_case else term
+        flags = 0 if exact_case else re.IGNORECASE
+        patterns.append(re.compile(f"(?<![{_WORD}]){re.escape(text)}(?![{_WORD}])", flags))
+    return patterns
 
 
 def load_denylist(env: dict[str, str]) -> tuple[list[str], Path, bool]:
