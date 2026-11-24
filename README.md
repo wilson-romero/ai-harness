@@ -64,5 +64,6 @@ Solo una pregunta a la vez por sesión: una segunda pregunta mientras la primera
 - Git flow: ramas `feature/<change>` desde `develop`.
 - El repositorio es público: lee [`SECURITY.md`](SECURITY.md) y activa el hook una vez por clon con `git config core.hooksPath .githooks`.
 - Sin código condicionado por plataforma fuera de Enterprise Architect: lo que pasa en macOS es lo que corre en Windows.
+- Copilot Web (en curso, Corte 2): perfil dedicado de Edge, login manual y sonda en [`docs/runbook/copilot.md`](docs/runbook/copilot.md).
 - Puerta local antes de un merge: `scripts/verify.sh` sobre el árbol limpio.
 - Demo del Corte 1: `scripts/demo-session-core.sh`.
