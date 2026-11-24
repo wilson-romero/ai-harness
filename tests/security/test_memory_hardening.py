@@ -282,7 +282,7 @@ def test_data_dir_inside_the_vault_refused_by_memory_commands(cli, vault, comman
 
 def test_data_dir_inside_the_vault_refused_by_ask(cli, vault, recorder):
     inside = vault / "harness-data"
-    # `session create` does not use the memory and is not checked (see tasks 8.6): the
+    # `session create` does not use the memory and is not checked (see task 8.7): the
     # database already lives in the vault when `ask --project` comes.
     session_id = cli("session", "create", "S", "--project", "demo-alpha",
                      HARNESS_DATA_DIR=str(inside))[1].strip()
