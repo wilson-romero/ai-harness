@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Local architecture copilot: Copilot Web, MCP, Skills, memory and Enterprise Architect"
 requires-python = ">=3.14,<3.15"
 dependencies = [
+    "playwright>=1.65.2",
     "pydantic>=2.14.4",
 ]
 
@@ -21,5 +22,6 @@ markers = [
     "windows: needs Windows",
     "ea: needs Enterprise Architect installed and licensed",
     "copilot: needs an authorised Copilot Web session",
+    "edge: launches the installed Microsoft Edge against local synthetic pages",
 ]
 addopts = "-ra --strict-markers"

@@ -1,0 +1,127 @@
+<!doctype html>
+<!--
+  Synthetic chat page for automated tests. It imitates nothing real: invented ids, invented
+  labels, invented canary strings. Behaviour is chosen with query parameters:
+    early=done_control  the done control appears halfway through the reply
+    pause_ms=N          the reply stops changing for N ms halfway through
+    never_finish=1      the reply stops halfway and never ends
+    forget=1            an existing conversation cannot be reopened
+    chunk_ms=N          delay between reply chunks (default 40)
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Synthetic chat ZZ-CANARY-PAGE-TITLE-6120</title>
+<style>
+  body { font-family: sans-serif; display: flex; gap: 1rem; }
+  nav { width: 12rem; }
+  .turn { border: 1px solid #ccc; margin: .25rem 0; padding: .25rem; white-space: pre-wrap; }
+  #synthetic-composer { width: 30rem; height: 4rem; }
+</style>
+</head>
+<body>
+<nav id="synthetic-history">
+  <div id="synthetic-account">ZZ-CANARY-ACCOUNT-3391</div>
+  <a href="#" class="title">ZZ-CANARY-TITLE-7781 quarterly plan</a>
+  <a href="#" class="title">ZZ-CANARY-TITLE-7782 vendor review</a>
+</nav>
+<main>
+  <button id="synthetic-new-chat" type="button">New synthetic chat</button>
+  <section id="synthetic-thread"></section>
+  <textarea id="synthetic-composer" aria-label="Synthetic message box"></textarea>
+  <button id="synthetic-send" type="button">Send synthetic message</button>
+  <button id="synthetic-stop" type="button" hidden>Stop synthetic reply</button>
+</main>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const chunkMs = Number(params.get("chunk_ms") || 40);
+  const pauseMs = Number(params.get("pause_ms") || 0);
+  const early = params.get("early") || "";
+  const neverFinish = params.get("never_finish") === "1";
+  const forget = params.get("forget") === "1";
+  const thread = document.getElementById("synthetic-thread");
+  const composer = document.getElementById("synthetic-composer");
+  const send = document.getElementById("synthetic-send");
+  const stop = document.getElementById("synthetic-stop");
+  let conversation = null;
+
+  function addTurn(role, text) {
+    const turn = document.createElement("div");
+    turn.className = "turn " + role;
+    turn.textContent = text;
+    thread.appendChild(turn);
+    return turn;
+  }
+  function addDone(turn) {
+    if (turn.querySelector(".synthetic-copy")) return;
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "synthetic-copy";
+    copy.textContent = "Copy";
+    turn.appendChild(copy);
+  }
+  function showConversation(id) {
+    conversation = id;
+    history.replaceState(null, "", "/c/" + id + location.search);
+  }
+  function newChat() {
+    conversation = null;
+    thread.replaceChildren();
+    history.replaceState(null, "", "/app" + location.search);
+  }
+  async function load() {
+    const match = location.pathname.match(/^\/c\/([^/]+)$/);
+    if (!match) return;
+    const response = forget ? null : await fetch("/api/conversation/" + match[1]);
+    if (!response || !response.ok) { newChat(); return; }
+    const data = await response.json();
+    conversation = match[1];
+    for (const turn of data.turns) {
+      const element = addTurn(turn.role, turn.text);
+      if (turn.role === "assistant") addDone(element);
+    }
+  }
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  async function submit() {
+    const prompt = composer.value;
+    if (!prompt) return;
+    composer.value = "";
+    addTurn("user", prompt);
+    send.hidden = true;
+    stop.hidden = false;
+    const response = await fetch("/api/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversation, prompt }),
+    });
+    const data = await response.json();
+    showConversation(data.conversation);
+    const turn = addTurn("assistant", "");
+    turn.setAttribute("aria-busy", "true");
+    const reply = data.reply;
+    const half = Math.floor(reply.length / 2);
+    for (let i = 0; i < reply.length; i += 5) {
+      if (i >= half && i - 5 < half) {
+        if (early === "done_control") addDone(turn);
+        if (neverFinish) return;
+        if (pauseMs) await sleep(pauseMs);
+      }
+      turn.firstChild ? (turn.firstChild.textContent = reply.slice(0, i + 5))
+                      : turn.prepend(document.createTextNode(reply.slice(0, i + 5)));
+      await sleep(chunkMs);
+    }
+    turn.setAttribute("aria-busy", "false");
+    addDone(turn);
+    stop.hidden = true;
+    send.hidden = false;
+  }
+
+  send.addEventListener("click", submit);
+  document.getElementById("synthetic-new-chat").addEventListener("click", newChat);
+  load();
+})();
+</script>
+</body>
+</html>
