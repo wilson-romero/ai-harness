@@ -7,7 +7,7 @@ Define qué es un Skill en disco, cuándo el harness lo acepta como válido y cu
 ## ADDED Requirements
 
 ### Requirement: Estructura de un Skill
-Un Skill SHALL ser una carpeta directa de la raíz de Skills cuyo nombre coincide exactamente con el campo `name` del frontmatter de su `SKILL.md`, y que contiene `SKILL.md` y `workflow.json`. El nombre SHALL usar solo minúsculas, dígitos y guiones, empezar por letra o dígito y tener como mucho 64 caracteres.
+Un Skill SHALL ser una carpeta directa de la raíz de Skills cuyo nombre coincide exactamente con el campo `name` del frontmatter de su `SKILL.md`, y que contiene `SKILL.md` y `workflow.json`. El nombre SHALL usar solo minúsculas, dígitos y guiones, empezar por letra o dígito, tener como mucho 64 caracteres y no ser un nombre reservado de Windows.
 
 #### Scenario: Skill válido listado
 - **WHEN** la raíz de Skills contiene un Skill sintético bien formado y el usuario ejecuta `skill list`
