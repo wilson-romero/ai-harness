@@ -161,7 +161,8 @@ class TtyTerminal:
         return getpass.getuser()
 
 
-def render_for_terminal(proposal: Proposal, approval_hash: str, expires_at: str) -> str:
+def render_for_terminal(proposal: Proposal, approval_hash: str, expires_at: str,
+                        redactions: int = 0) -> str:
     """Header, then the full content between two rules. The content is shown as hashed."""
     rule = "-" * 72
     header = [
@@ -172,6 +173,7 @@ def render_for_terminal(proposal: Proposal, approval_hash: str, expires_at: str)
         f"  scope:    {proposal.scope}",
         f"  target:   {proposal.target if proposal.target is not None else '-'}",
         f"  bytes:    {proposal.content_bytes}",
+        *([f"  redacted: {redactions} credential(s) redacted"] if redactions else []),
         f"  hash:     {approval_hash}",
         f"  expires:  {expires_at} (UTC)",
     ]

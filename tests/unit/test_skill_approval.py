@@ -336,6 +336,11 @@ class ShiftingEffect:
         target = "Decisiones/a.md" if self.prepared < 3 else "Decisiones/otro.md"
         return Prepared(content=validated, target=target, effect_ref=None)
 
+    def exclusive(self, context):  # part of the protocol since architecture-skills-llm D11
+        import contextlib
+
+        return contextlib.nullcontext()
+
     def apply(self, context, *args):
         received = args[-1]  # the verified proposal (or, before 8.3, a second `Prepared`)
         content = args[0] if isinstance(args[0], str) else received.content

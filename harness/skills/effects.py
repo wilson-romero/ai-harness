@@ -6,13 +6,33 @@ point to a module or a path. Tests inject their own effects through the engine's
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Mapping
-from dataclasses import dataclass
-from typing import Literal, Protocol
+from contextlib import AbstractContextManager
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal, Protocol
 
+from harness.core.errors import HarnessError
 from harness.skills.approvals import Proposal
 
 Reconciled = Literal["applied", "absent", "conflict"]
+
+
+class EffectRefused(HarnessError):
+    """A controlled refusal of `prepare` or `apply` (architecture-skills-llm D11).
+
+    From `prepare`: the step and the run fail with `code` before any approval is asked. From
+    `apply`: the step fails with `code`; the approval was consumed and is not usable again.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class EffectBusy(HarnessError):
+    """The effect's exclusive section is taken: nothing was consumed or applied."""
 
 
 @dataclass(frozen=True)
@@ -22,14 +42,23 @@ class Prepared:
     content: str  # the text to approve, before normalisation
     target: str | None
     effect_ref: str | None
+    redactions: int = 0  # credentials masked in `content`, shown in the approval header
 
 
 @dataclass(frozen=True)
 class EffectContext:
+    """Where an effect runs. Everything comes from SQLite and is the same on every resume."""
+
     session_id: str
     run_id: str
     step: str
     skill_name: str
+    project_slug: str | None = None
+    run_created_at: str = ""  # skill_runs.created_at, UTC ISO
+    skill_version: str = ""
+    skill_sha256: str = ""
+    inputs: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)  # name -> sha256, bytes
+    memory_notes: tuple[tuple[str, str], ...] = ()  # (path, sha256) from request_context
 
 
 class Effect(Protocol):
@@ -44,6 +73,11 @@ class Effect(Protocol):
     scope: str
 
     def prepare(self, context: EffectContext, validated: str) -> Prepared: ...
+
+    def exclusive(self, context: EffectContext) -> AbstractContextManager[None]:
+        """Held from before the approval is consumed until `apply` returns; may raise
+        `EffectBusy`, in which case nothing is consumed."""
+        ...
 
     def apply(self, context: EffectContext, proposal: Proposal) -> None: ...
 
@@ -60,6 +94,9 @@ class NoEffect:
     def prepare(self, context: EffectContext, validated: str) -> Prepared:
         return Prepared(content=validated, target=None, effect_ref=None)
 
+    def exclusive(self, context: EffectContext) -> AbstractContextManager[None]:
+        return contextlib.nullcontext()
+
     def apply(self, context: EffectContext, proposal: Proposal) -> None:
         return None
 
@@ -72,5 +109,13 @@ class NoEffect:
         return "applied"
 
 
-def default_effects() -> Mapping[str, Effect]:
-    return {"none": NoEffect()}
+def default_effects(data_dir: Path | None = None) -> Mapping[str, Effect]:
+    """The registry. `data_dir` is needed only by effects that run (for their lock).
+
+    The decision effect is imported here, not at the top of the module: the CLI imports this
+    module for every command, and a `memory …` command must never load the vault writer
+    (architecture-skills-llm D9, checked by tests/security/test_memory_no_writes.py).
+    """
+    from harness.skills.decision_effect import DecisionEffect
+
+    return {"none": NoEffect(), DecisionEffect.scope: DecisionEffect(data_dir)}

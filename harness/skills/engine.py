@@ -10,6 +10,7 @@ that marks the step as applying.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import sqlite3
@@ -47,7 +48,13 @@ from harness.skills.definition import (
     load_skill,
     validate_skill_name,
 )
-from harness.skills.effects import Effect, EffectContext, default_effects
+from harness.skills.effects import (
+    Effect,
+    EffectBusy,
+    EffectContext,
+    EffectRefused,
+    default_effects,
+)
 from harness.skills.references import new_nonce, reference_key, render
 from harness.storage import repositories as repo
 from harness.storage.database import transaction
@@ -72,6 +79,7 @@ class RunOutcome:
     status: str
     output: str | None = None
     message: str | None = None
+    applied: tuple[str, ...] = ()  # targets an effect wrote in this invocation
 
 
 @dataclass
@@ -85,6 +93,7 @@ class _Run:
     inputs: Mapping[str, str]
     outputs: dict[str, str] = field(default_factory=dict)  # this invocation's step outputs
     started: float = 0.0
+    applied: list[str] = field(default_factory=list)  # targets applied in this invocation
 
 
 @dataclass(frozen=True)
@@ -96,6 +105,8 @@ class _Proposed:
     effect_ref: str | None
     source: str
     error: str | None = None
+    message: str | None = None  # why the effect refused, for the person
+    redactions: int = 0
 
 
 def utc_iso(moment: datetime) -> str:
@@ -416,7 +427,7 @@ class SkillEngine:
                  state.run_id),
             )
             self._audit("skill.run", "completed", state.session, state.run_id, None)
-        return RunOutcome(state.run_id, "completed", output=output)
+        return RunOutcome(state.run_id, "completed", output=output, applied=tuple(state.applied))
 
     async def _llm(self, state: _Run, step: LlmStep, row: sqlite3.Row) -> RunOutcome | None:
         attempt = row["attempt"]
@@ -492,7 +503,10 @@ class SkillEngine:
         """
         effect = self._effects[step.effect]
         source = self._output(state, step.of)
-        prepared = effect.prepare(self._effect_context(state, step), source)
+        try:
+            prepared = effect.prepare(self._effect_context(state, step), source)
+        except EffectRefused as refused:
+            return _Proposed(None, None, source, refused.code, str(refused))
         if prepared.target is not None and not valid_target(prepared.target):
             # A target is never cleaned for display: shown, hashed and applied are one string,
             # so one that cannot be shown as it is is refused (review 8.4).
@@ -511,7 +525,7 @@ class SkillEngine:
             target=prepared.target,
             content=content,
         )
-        return _Proposed(proposal, prepared.effect_ref, source)
+        return _Proposed(proposal, prepared.effect_ref, source, redactions=prepared.redactions)
 
     async def _approval(
         self, state: _Run, step: ApprovalStep, row: sqlite3.Row
@@ -525,6 +539,15 @@ class SkillEngine:
             return RunOutcome(state.run_id, "failed",
                               message=f"step {step.id!r}: the effect's target contains invisible "
                               "or non-normalised characters; nothing was asked or applied")
+        if proposal is None and proposed.error != "limit:proposal_bytes":
+            # The effect refused before anything was asked (a duplicate, an unsafe target).
+            code = proposed.error or "effect_refused"
+            with transaction(self._conn):
+                self._set_step(row, "failed", error_code=code, finished=True)
+                self._finish_run_locked(state.run_id, state.session, "failed", code)
+            return RunOutcome(state.run_id, "failed",
+                              message=f"step {step.id!r}: {proposed.message or code}; nothing "
+                              "was asked or applied")
         if proposal is None:
             return self._stop(state, step.id, row, "limit:proposal_bytes", limit="proposal_bytes")
         proposal_hash = proposal.sha256
@@ -568,7 +591,8 @@ class SkillEngine:
                 return waiting
             decision = decide(
                 self._terminal,
-                render_for_terminal(proposal, proposal_hash, live["expires_at"]),
+                render_for_terminal(proposal, proposal_hash, live["expires_at"],
+                                    proposed.redactions),
                 proposal_hash,
             )
             decided = utc_iso(self._clock())
@@ -629,6 +653,25 @@ class SkillEngine:
             return self._revoke(state, step, row, approval)
         effect = self._effects[step.effect]
         effect_context = self._effect_context(state, step)
+        with contextlib.ExitStack() as held:
+            try:
+                # Taken before the approval is consumed: if the effect cannot have its turn,
+                # the approval stays `granted` and nothing is applied (architecture-skills-llm).
+                held.enter_context(effect.exclusive(effect_context))
+            except EffectBusy:
+                if own and row["status"] not in ("completed", "failed"):
+                    self._set_awaiting(state, row)
+                raise
+            return self._consume_and_apply(state, step, approval_id, proposed, approval, own,
+                                           row, effect, effect_context)
+
+    def _consume_and_apply(
+        self, state: _Run, step: ApprovalStep, approval_id: str, proposed: _Proposed,
+        approval: sqlite3.Row, own: bool, row: sqlite3.Row, effect: Effect,
+        effect_context: EffectContext,
+    ) -> RunOutcome | None:
+        proposal = proposed.proposal
+        assert proposal is not None
         now = utc_iso(self._clock())
         with transaction(self._conn):
             consumed = self._conn.execute(
@@ -668,12 +711,23 @@ class SkillEngine:
             )
         try:
             effect.apply(effect_context, proposal)
+        except EffectRefused as refused:  # a controlled refusal: nothing was applied
+            with transaction(self._conn):
+                self._set_step(row, "failed", error_code=refused.code, finished=True)
+                self._finish_run_locked(state.run_id, state.session, "failed", refused.code)
+            return RunOutcome(state.run_id, "failed",
+                              message=f"the effect refused: {refused}; nothing was applied")
         except Exception as exc:  # the effect failed: never retried by itself
             with transaction(self._conn):
                 self._set_step(row, "failed", error_code=f"effect_{type(exc).__name__}",
                                finished=True)
                 self._finish_run_locked(state.run_id, state.session, "failed", "effect_failed")
             return RunOutcome(state.run_id, "failed", message=f"the effect failed: {exc}")
+        with transaction(self._conn):
+            self._audit("effect.applied", "applied", state.session, state.run_id,
+                        f"step={step.id};ref={proposed.effect_ref}")
+        if proposal.target is not None:
+            state.applied.append(proposal.target)
         self._complete(state, step.id, row, proposal.content)
         return None
 
@@ -702,6 +756,8 @@ class SkillEngine:
                     proposed.proposal.content.encode("utf-8")
                 ).hexdigest() == expected:
                     stored = proposed.proposal.content
+                    if proposed.proposal.target is not None:
+                        state.applied.append(proposed.proposal.target)
             with transaction(self._conn):
                 self._conn.execute(
                     "UPDATE skill_steps SET status = 'completed', output_text = ?, "
@@ -776,8 +832,22 @@ class SkillEngine:
                 f"hash={approval['proposal_hash']}")
 
     def _effect_context(self, state: _Run, step: ApprovalStep) -> EffectContext:
-        return EffectContext(str(state.session.session_id), state.run_id, step.id,
-                             state.skill.name)
+        run = self._require_run(state.run_id)
+        notes = self._conn.execute(
+            "SELECT DISTINCT rc.note_path, rc.sha256 FROM request_context rc JOIN skill_steps s "
+            "ON s.request_id = rc.request_id WHERE s.run_id = ? AND s.status = 'completed' "
+            "ORDER BY rc.note_path, rc.sha256",
+            (state.run_id,),
+        ).fetchall()
+        return EffectContext(
+            str(state.session.session_id), state.run_id, step.id, state.skill.name,
+            project_slug=state.session.project_id,
+            run_created_at=run["created_at"],
+            skill_version=run["skill_version"],
+            skill_sha256=run["skill_sha256"],
+            inputs=json.loads(run["inputs_manifest"]),
+            memory_notes=tuple((note["note_path"], note["sha256"]) for note in notes),
+        )
 
     # -- values and outputs ---------------------------------------------------------------------
 

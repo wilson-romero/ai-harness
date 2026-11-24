@@ -85,6 +85,7 @@ class LlmStep(_Model):
 class FieldSpec(_Model):
     type: Literal["string", "integer", "boolean", "string_list"]
     required: bool = True
+    min_length: int | None = Field(default=None, ge=1, le=VALIDATE_MAX_BYTES)
     max_length: int | None = Field(default=None, ge=1, le=VALIDATE_MAX_BYTES)
     single_line: bool = False
     enum: list[str] | None = Field(default=None, min_length=1, max_length=50)

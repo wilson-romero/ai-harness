@@ -68,13 +68,13 @@ def run_skill_command(args: argparse.Namespace) -> int:
     inputs = _read_inputs(args) if args.skill_command in ("run", "resume") else {}
     skill_settings = load_skill_settings(os.environ)
     root = skills_root(skill_settings.skills_dir)
-    effects = default_effects()
     if args.skill_command == "list":
-        return _list(root, effects)
+        return _list(root, default_effects())
     if args.skill_command == "show":
-        return _show(root, args.name, effects)
+        return _show(root, args.name, default_effects())
 
     settings = Settings.from_env(os.environ)
+    effects = default_effects(settings.data_dir)
     conn = open_database(settings.data_dir)
     try:
         sessions = SessionService(
@@ -153,6 +153,8 @@ def _report(outcome: RunOutcome) -> int:
         print(f"{outcome.run_id}: {safe_line(outcome.message).text}", file=sys.stderr)
     if outcome.status == "completed":
         print(printable(outcome.output) if outcome.output is not None else "")
+        for target in outcome.applied:  # harness-derived and checked by `valid_target`
+            print(f"applied: {safe_line(target).text}")
         return EXIT_OK
     print(f"run {outcome.run_id} is {outcome.status}", file=sys.stderr)
     if outcome.status == "awaiting_approval":
