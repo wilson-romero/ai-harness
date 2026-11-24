@@ -11,7 +11,7 @@ Da al usuario un informe reproducible de lo que un mantenimiento del vault encon
 
 #### Scenario: Sin --dry-run
 - **WHEN** el usuario ejecuta `memory maintain`
-- **THEN** el sistema informa de que en este corte solo existe `--dry-run` y termina con código distinto de 0
+- **THEN** el sistema informa de que en este corte solo existe `--dry-run` y termina con el código 2 de uso incorrecto
 
 ### Requirement: Hallazgos del informe
 El informe SHALL listar, por categoría y con su recuento: ficheros de conflicto de sincronización que se pondrían en cuarentena, enlaces `[[...]]` rotos con su corrección inequívoca si existe, entradas colgantes y notas sin entrada en los índices `MEMORY*.md` de `Memoria-CC/`, candidatos a duplicado por nombre, notas sin frontmatter válido, notas con credenciales de formato conocido y entradas ignoradas por la lectura confinada.
@@ -19,6 +19,10 @@ El informe SHALL listar, por categoría y con su recuento: ficheros de conflicto
 #### Scenario: Vault sintético con defectos plantados
 - **WHEN** el vault sintético contiene un fichero `.sync-conflict-`, un enlace roto con un único candidato, una nota fuera del índice, una nota sin frontmatter y un enlace simbólico hacia fuera
 - **THEN** cada defecto aparece en su categoría con recuento 1
+
+#### Scenario: Fecha futura en el frontmatter
+- **WHEN** una nota declara `updated` posterior a la fecha de hoy
+- **THEN** el informe la lista en `invalid_frontmatter` con el motivo de que la fecha está en el futuro
 
 #### Scenario: Vault limpio
 - **WHEN** el vault no tiene ninguno de esos defectos
