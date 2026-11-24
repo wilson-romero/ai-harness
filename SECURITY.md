@@ -55,7 +55,21 @@ Se garantiza:
 - No se aprueba con stdin redirigido, con el fin de la entrada, con Enter, con una opción de la CLI ni con una variable de entorno; ningún texto de un modelo, nota o fichero aprueba.
 - Una aprobación está ligada a una propuesta, caduca (una respuesta después de la caducidad no la concede) y se usa una vez. Un efecto interrumpido se reconcilia antes de seguir y nunca se aplica dos veces.
 
-**No** se garantiza que haya una persona delante. Un proceso que corre con tu misma cuenta y maneja una pseudoterminal puede leer la propuesta y escribir el código: puede hacerse pasar por ti. Si alguien o algo controla tu cuenta, las aprobaciones no lo detienen. Un canal más fuerte (un diálogo del sistema operativo, un segundo dispositivo) es una decisión abierta antes del efecto que escribe en el vault.
+**No** se garantiza que haya una persona delante. Un proceso que corre con tu misma cuenta y maneja una pseudoterminal puede leer la propuesta y escribir el código: puede hacerse pasar por ti. Si alguien o algo controla tu cuenta, las aprobaciones no lo detienen. Decidido el 2026-11-24: se acepta este límite para el MVP, también para el efecto que escribe en el vault; un canal más fuerte (un diálogo del sistema operativo, un segundo dispositivo) se abriría con un change propio.
+
+## La única escritura en el vault
+
+El harness lee el vault y no lo copia, sube ni sincroniza. Escribe en él **una sola cosa**: una nota de decisión nueva del Skill `architecture-memory`, con estas condiciones, todas comprobadas por tests:
+
+- Solo como efecto de una aprobación concedida en una terminal, vigente, no usada y cuyo hash coincide con la nota que se muestra; los bytes escritos son exactamente los mostrados.
+- Solo en `Decisiones/` directamente bajo la raíz real del vault (`HARNESS_VAULT_ROOT` resuelta). Si esa carpeta es un enlace, una unión, no es una carpeta o sale de la raíz, se rechaza antes de pedir la aprobación. Si falta, se crea solo en la primera escritura aprobada. Un directorio de datos dentro del vault se rechaza, igual que para leer.
+- El nombre y el proyecto los calcula el harness (fecha, slug del título, identificador); ningún texto del modelo, de la fuente ni de la memoria elige carpeta, nombre ni proyecto, y ningún valor del frontmatter viene del modelo. El texto del modelo pasa por el saneado y la redacción de credenciales antes de mostrarse.
+- Nunca sobrescribe, edita, mueve ni borra una nota: el temporal oculto se crea con creación exclusiva y se publica con un enlace duro, que falla si el nombre existe. Solo borra su propio temporal.
+- Un proceso que muere a mitad nunca deja dos notas, ni una nota sin una aprobación consumida, ni un temporal que la memoria lea: `skill resume` reconcilia por identificador y SHA-256 sin escribir.
+- Con un proveedor real, SQLite guarda de la nota solo su identificador, su SHA-256 y su tamaño.
+- `harness/memory/decisions.py` es el único módulo de `harness/memory/` que puede escribir, y solo con una lista cerrada de primitivas; un test lo comprueba, y otro comprueba que ningún comando `memory …` lo carga.
+
+Los límites (sistemas de ficheros sin enlaces duros, otros programas que escriben en el vault a la vez, cortes de luz) están en el README, en [Skills de arquitectura](README.md#skills-de-arquitectura).
 
 ## Si algo se filtra
 

@@ -156,3 +156,12 @@ def test_listed_valid_with_its_two_steps(data_dir):
     shown = run_main(data_dir, "skill", "show", "hls-review")
     assert "step 1: review llm template=templates/review.md memory=project" in shown.stdout
     assert "step 2: check validate of=review format=markdown" in shown.stdout
+
+
+def test_the_demo_responses_file_matches_the_fixtures():
+    """`respuestas-demo.json` (used by the README commands) is the two scripted answers."""
+    data = json.loads((INPUTS / "respuestas-demo.json").read_text(encoding="utf-8"))
+    assert data == {
+        KEY: _fixture("hls-review-ok.md"),
+        "tarea: architecture-memory/extract": _fixture("decision-ok.json"),
+    }
