@@ -83,7 +83,8 @@ Solo los bloques entre `---- copilot probe summary (paste only this) ----` y `--
 
 | Mensaje | Qué hacer |
 |---|---|
-| `the page looks signed out` | Repite el paso 1 y elige mantener la sesión iniciada. |
+| `the page looks signed out` | Repite el paso 1 y elige mantener la sesión iniciada. Si además dice `opens Copilot's guest page`, pon la dirección que propone. |
+| `measure` termina con `missing: max_prompt_chars` | `uv run python scripts/copilot_probe.py sizes` mide solo los tamaños (hasta 4 envíos), sin repetir los 12 envíos. |
 | `discovery could not find: …` | Anexo, solo para lo que nombra. |
 | `the harness browser is in use by another command` | Otro comando del harness tiene el navegador abierto. Espera. |
 | `the dedicated Edge profile is already open in another Edge window` | Cierra la ventana de Edge que usa el perfil dedicado (codegen u otra) y repite. El harness no cierra ventanas que no abrió. |

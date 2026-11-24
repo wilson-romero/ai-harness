@@ -7,7 +7,8 @@
     when the server answers (an optimistic copy), and the prompt's marker is in it;
   - turns sit in rows of a virtualised feed (`role=feed`, numbered row attributes), the
     reply deep inside its own wrapper, with a toolbar that appears when it is done;
-  - the editor is a contenteditable span holding a paragraph; Enter sends; the only button
+  - the editor is a contenteditable span holding a paragraph, with two zero-width
+    characters kept after the text; Enter sends; the only button
     next to it is never enabled by typing;
   - "new chat" is a navigation link to /feed with no attribute of its own, and the brand
     link goes to /feed too;
@@ -118,7 +119,7 @@
     bar.appendChild(copy);
     article.appendChild(bar);
   }
-  function editorText() { return editor.innerText.replace(/\n+$/, ""); }
+  function editorText() { return editor.innerText.replace(/[\u200B\u200C]/g, "").replace(/\n+$/, ""); }
   async function load() {
     const match = location.pathname.match(/^\/feed\/thread\/([^/]+)$/);
     if (!match) return;
@@ -172,6 +173,12 @@
     busy = false;
   }
 
+  // Like a rich editor that keeps cursor anchors: two zero-width characters after the text.
+  const ANCHORS = "​‌";
+  editor.addEventListener("input", () => {
+    if (!editor.textContent || editor.textContent.endsWith(ANCHORS)) return;
+    editor.appendChild(document.createTextNode(ANCHORS));
+  });
   editor.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();

@@ -253,8 +253,25 @@ async def open_new_conversation(page: Page, locators: Locators) -> bool:
 
 LENGTH_JS = (
     "el => (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' ? el.value : el.textContent)"
-    ".length"
-)
+    ".replace(/[\\u200B-\\u200D\\u2060\\uFEFF]/g, '').length"
+)  # zero-width characters do not count: a rich editor may keep some as cursor anchors (seen
+#    on the real page: U+200B and U+200C after the text)
+
+
+DIFF_JS = r"""
+(el, expected) => {
+  const got = el.tagName === "TEXTAREA" || el.tagName === "INPUT" ? el.value : el.textContent;
+  const out = [];
+  let i = 0, j = 0;
+  while ((i < got.length || j < expected.length) && out.length < 6) {
+    if (got[i] === expected[j]) { i += 1; j += 1; continue; }
+    if (got[i + 1] === expected[j]) { out.push(["extra", i, got.codePointAt(i)]); i += 1; continue; }
+    if (got[i] === expected[j + 1]) { out.push(["missing", j, expected.codePointAt(j)]); j += 1; continue; }
+    out.push(["changed", i, got.codePointAt(i) ?? -1]); i += 1; j += 1;
+  }
+  return out;
+}
+"""
 
 
 async def read_length(composer: Locator) -> int:
@@ -811,6 +828,9 @@ async def measure_sizes(probe: Probe, locators: Locators, result: dict) -> int:
             entry = {"chars": chars, "editor_chars": in_editor, "accepted": False}
             result["sizes"].append(entry)
             if in_editor != chars:
+                # where the editor's copy of our own synthetic prompt differs: positions and
+                # code points only, never text
+                entry["differences"] = await composer.evaluate(DIFF_JS, size_prompt(chars))
                 await composer.fill("")
                 break
             samples = await sample_send(page, locators, "", SIZE_MARKER, filled=True)

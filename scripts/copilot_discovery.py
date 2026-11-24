@@ -200,7 +200,8 @@ INSTALL_JS = r"""
   P.editorLength = (s) => {
     const el = get(s);
     if (!el) return -1;
-    return ("value" in el && el.tagName !== "DIV" ? el.value : el.textContent).length;
+    const text = "value" in el && el.tagName !== "DIV" ? el.value : el.textContent;
+    return text.replace(/[​-‍⁠﻿]/g, "").length;  // cursor anchors do not count
   };
 
   // -- buttons near the editor and their state, to see which one a typed prompt enables --
