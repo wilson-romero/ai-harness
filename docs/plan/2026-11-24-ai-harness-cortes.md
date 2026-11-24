@@ -8,7 +8,8 @@ El **MVP de punta a punta**: Wilson da un requerimiento, el harness recupera el 
 
 ## Decisiones de partida
 
-- Todo funciona en macOS y en Windows salvo Enterprise Architect, que usa COM y vive en un servidor MCP separado, solo Windows.
+- Todo funciona en macOS y en Windows salvo Enterprise Architect, que usa COM y vive en un servidor MCP separado, solo Windows. Fuera de EA no hay código condicionado por plataforma: lo que pasa los tests en la Mac es lo que corre en Windows, y una ejecución en Windows es una confirmación opcional, no la puerta de un corte (Wilson, 2026-11-24).
+- El repositorio es público: nada real ni identificable entra en él (`SECURITY.md`); lo medido sobre sistemas reales vive en `HARNESS_DATA_DIR`.
 - Wilson tiene Windows + Edge + Copilot corporativo y permiso para automatizar Copilot Web (declarado el 2026-11-24). De EA tiene una versión demo: que permita Automation se mide con una sonda al abrir el Corte 5.
 - El primer valor real es Copilot en varias conversaciones (Corte 2). Es también el riesgo técnico mayor y por eso va antes que MCP y Skills.
 - Cada pieza de infraestructura nace en el corte que la usa: aprobaciones con la primera escritura (Corte 4), cliente MCP y políticas con EA (Corte 5). Los Skills se ejecutan en secuencia lineal, sin DAG.

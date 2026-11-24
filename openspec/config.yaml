@@ -14,8 +14,11 @@ context: |
   version de Python requiere aprobacion de Wilson.
 
   Plataforma: todo funciona en macOS y en Windows salvo Enterprise Architect, que usa COM
-  (pywin32) y vive en un servidor MCP separado, solo Windows. Un change que no sea de EA y solo
-  funcione en una de las dos plataformas esta incompleto.
+  (pywin32) y vive en un servidor MCP separado, solo Windows. Lo que se prueba en una
+  plataforma tiene que ser el mismo codigo que corre en la otra: fuera del paquete de EA no hay
+  ramas por plataforma (`sys.platform`, `os.name`, `fcntl`, `msvcrt`); se usan `pathlib`, SQLite
+  y las API portables de cada biblioteca. `tests/unit/test_portability.py` lo comprueba. Una
+  ejecucion en Windows es una confirmacion opcional, no la puerta de un corte.
 
   La verdad vigente vive en `openspec/specs/`. Lo que esta en curso, en `openspec/changes/`; lo
   cerrado, en `openspec/changes/archive/`. El plan de entregas por cortes vive en `docs/plan/` y
@@ -70,5 +73,5 @@ rules:
   tasks:
     - "Cada tarea dice como se ve hecho."
     - "Las tareas de verificacion nombran su oraculo (un grep, un SELECT, un fixture, una cifra medida). Marcar [x] exige recibo."
-    - "Incluir los pasos que se olvidan, entre ellos el runbook o doc que describe la conducta nueva, la prueba en la segunda plataforma y el control negativo que demuestra que la comprobacion sabe decir NO."
-    - "La ultima tarea es la demo del corte: que reproduce Wilson, con que SHA, en que plataforma y que evidencia (log o video) deja; su estado es PASS, FAIL, NOT RUN o BLOCKED."
+    - "Incluir los pasos que se olvidan, entre ellos el runbook o doc que describe la conducta nueva, la comprobacion de que no entra codigo condicionado por plataforma y el control negativo que demuestra que la comprobacion sabe decir NO."
+    - "La ultima tarea es la demo del corte: que reproduce Wilson, con que SHA y que evidencia (log o video) deja; su estado es PASS, FAIL, NOT RUN o BLOCKED."
