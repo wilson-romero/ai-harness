@@ -51,15 +51,19 @@ La nota SHALL escribirse en un temporal oculto dentro de `Decisiones/` que despu
 - **THEN** `memory search` y `memory context` no lo leen
 
 ### Requirement: Escritura confinada a Decisiones
-El destino SHALL resolverse dentro de la raíz real del vault, en `Decisiones/` directamente; `Decisiones/` SHALL ser un directorio real, no un enlace ni una unión. Si falta o es un enlace, la escritura SHALL denegarse sin crear nada.
+El destino SHALL resolverse dentro de la raíz real del vault, en `Decisiones/` directamente; `Decisiones/` SHALL ser un directorio real, no un enlace ni una unión; si es un enlace, una unión o no es un directorio, la escritura SHALL denegarse sin crear nada. Si `Decisiones/` no existe, el harness SHALL crearla dentro de la raíz real del vault solo en el momento de la primera escritura aprobada, y ningún comando de solo lectura SHALL crearla.
 
 #### Scenario: Decisiones es un enlace hacia fuera
 - **WHEN** `Decisiones/` del vault es un enlace simbólico a una carpeta fuera del vault
 - **THEN** la ejecución queda `failed` antes de pedir aprobación y la carpeta de fuera queda intacta
 
-#### Scenario: Falta Decisiones
-- **WHEN** el vault no tiene la carpeta `Decisiones/`
-- **THEN** la ejecución queda `failed` explicando que hay que crearla, y el vault queda intacto
+#### Scenario: Decisiones creada en la primera escritura aprobada
+- **WHEN** el vault no tiene la carpeta `Decisiones/` y se aprueba y se escribe una decisión
+- **THEN** la huella del vault después es la de antes más exactamente la carpeta `Decisiones/` y la nota dentro de ella
+
+#### Scenario: Decisiones no se crea sin escritura aprobada
+- **WHEN** el vault no tiene la carpeta `Decisiones/` y se ejecutan los comandos `memory …`, `ask --project`, y una ejecución de `architecture-memory` que se rechaza o queda esperando aprobación
+- **THEN** la carpeta sigue sin existir y la huella del vault es idéntica
 
 ### Requirement: Solo los bytes aprobados
 Los bytes escritos SHALL ser exactamente los del contenido de la propuesta aprobada. Si la nota recalculada justo antes de escribir difiere en un byte de la aprobada, SHALL NOT escribirse nada.

@@ -74,14 +74,14 @@ Premisas heredadas, **vueltas a medir** el 2026-11-24:
 
 ### D3 · Dónde se escribe: `Decisiones/`, directamente
 
-- **Qué:** las notas van a `<vault>/Decisiones/<nombre>.md`, sin subcarpeta. Si `Decisiones/` no existe, o es un enlace o una unión, la ejecución falla antes de pedir aprobación; el harness no la crea. No se toca `_INDEX.md` ni ninguna otra nota.
-- **Por qué:** el contexto de un proyecto (D6 de `project-memory`) ya lee `Decisiones/` y prioriza sus notas tras la nota de proyecto; escribir ahí hace que la decisión vuelva sola en la siguiente pregunta, que es el objetivo del Norte. El nombre propio (D4) y `source: ai-harness` (D5) distinguen las notas del harness de las del curador. No crear la carpeta evita que el harness invente la estructura de un vault ajeno.
+- **Qué:** las notas van a `<vault>/Decisiones/<nombre>.md`, sin subcarpeta. Si `Decisiones/` es un enlace, una unión o cualquier cosa que no sea un directorio real, la ejecución falla antes de pedir aprobación. No se toca `_INDEX.md` ni ninguna otra nota. **Revisada el 2026-11-24:** Wilson decidió que el harness **sí** crea `Decisiones/` si no existe (respuesta «créala»), lo que invierte la versión anterior («el harness no la crea»). Qué implica: (1) la carpeta se crea solo en `apply`, en el momento de la primera escritura aprobada, con el bloqueo del vault tomado y después de consumir la aprobación (D6), nunca en `prepare`, en una consulta ni en ningún comando de solo lectura (`memory …`, `skill list|show|status`, `ask --project`); (2) se crea con un único `os.mkdir` (sin `parents`) dentro de la raíz real y confinada del vault, y después se comprueba con `lstat` que es un directorio real y que `resolve()` es exactamente `raíz/Decisiones`; si otro proceso puso un enlace en su lugar, la escritura se deniega; (3) sin `Decisiones/`, `prepare` no encuentra duplicados (D8) y `reconcile` devuelve `absent`; (4) una carpeta creada por el harness no se borra nunca, ni si la escritura falla después.
+- **Por qué:** el contexto de un proyecto (D6 de `project-memory`) ya lee `Decisiones/` y prioriza sus notas tras la nota de proyecto; escribir ahí hace que la decisión vuelva sola en la siguiente pregunta, que es el objetivo del Norte. El nombre propio (D4) y `source: ai-harness` (D5) distinguen las notas del harness de las del curador. Crear la carpeta solo cuando hay una escritura aprobada evita que un vault sin decisiones gane estructura vacía por usar el harness.
 - **Alternativas rechazadas:**
   - Carpeta propia `Harness/Decisiones/`: no la lee el contexto del proyecto, ni la sincronización de conocimiento de `claude-memory-system`; habría que cambiar la selección de `project-memory` para leerla.
   - `Decisiones/harness/`: el contexto sí la leería (acepta cualquier profundidad bajo una carpeta curada), pero crea una subcarpeta que el curador no conoce y que habría que crear.
-  - Crear `Decisiones/` si falta: escribe estructura en un vault sin que la persona lo haya decidido.
+  - No crear `Decisiones/` si falta y fallar pidiendo crearla: era la opción de la primera versión de este diseño; **revisada el 2026-11-24**, Wilson la descartó y prefiere que el harness la cree en la primera escritura aprobada.
 - **Riesgo de propiedad (medido):** el curador de `claude-memory-system` atribuye a su propia ejecución cualquier `.md` de `Decisiones/` cuyo `mtime` sea posterior a su inicio. Si el harness escribe una decisión mientras el curador corre en la misma máquina, el log del curador la contará como suya. No rompe datos; se escribe en el README.
-- **Impacto:** spec `decision-notes` (Escritura confinada a Decisiones); tarea 4.3. Queda cerrada en este diseño, pero cambia la propiedad de una carpeta de otra herramienta: Wilson la confirma en la tarea 1.1 antes de implementar.
+- **Impacto:** spec `decision-notes` (Escritura confinada a Decisiones); tarea 4.3. Queda cerrada en este diseño; Wilson confirmó el destino y la creación de la carpeta el 2026-11-24 (tarea 1.1).
 
 ### D4 · Identificador y nombre de fichero
 
@@ -138,9 +138,9 @@ Premisas heredadas, **vueltas a medir** el 2026-11-24:
 
 - **Qué:** `apply` del efecto, en este orden:
   1. Toma `NamedLock(data_dir, "vault-decisions")` esperando como mucho 5 s; si no, error controlado sin consumir la aprobación.
-  2. Recalcula la nota (D5) y la propuesta; comprueba confinamiento (`Decisiones/` es directorio real bajo la raíz real; `destino.parent.resolve() == raíz/Decisiones`), que el destino no existe (`os.path.lexists`) y que ninguna nota de `Decisiones/` tiene ese `decision_id` (D8).
+  2. Recalcula la nota (D5) y la propuesta; comprueba confinamiento (`Decisiones/`, si existe, es directorio real bajo la raíz real; `destino.parent.resolve() == raíz/Decisiones`), que el destino no existe (`os.path.lexists`) y que ninguna nota de `Decisiones/` tiene ese `decision_id` (D8).
   3. Consume la aprobación y pone el paso en `applying` en una transacción (D12 de `skill-engine`), guardando `effect_ref = decision_id`.
-  4. Escribe los bytes en `Decisiones/.harness-<step_id>.tmp` abierto con modo `xb`, `flush`, `os.fsync`, cierra.
+  4. **Revisada el 2026-11-24:** si `Decisiones/` no existe, la crea con un único `os.mkdir` y vuelve a comprobar con `lstat` y `resolve()` que es un directorio real en `raíz/Decisiones` (D3); si no, deniega sin escribir. Después escribe los bytes en `Decisiones/.harness-<step_id>.tmp` abierto con modo `xb`, `flush`, `os.fsync`, cierra.
   5. Vuelve a comprobar que el destino no existe y hace `os.replace(temporal, destino)`. Si existe o el renombrado falla: borra su temporal, paso `failed` (`conflict` o `write_failed`).
   6. Marca el paso `completed` con `output_sha256` y, solo con proveedor sintético, la ruta relativa en `output_text`.
 - **Por qué:** cada paso deja el vault con la nota entera o sin ella (renombrado en el mismo directorio), nunca sobrescribe una nota de nadie, y el consumo de la aprobación queda registrado antes de tocar el disco, así que un fallo después nunca deja una aprobación reutilizable. El temporal empieza por punto: el lector de memoria (D5 de `project-memory`) lo ignora, igual que los `.tmp.XXXXXX` de `atomic_write` de `claude-memory-system`. El nombre del temporal usa el `step_id`, no contenido, para poder borrarlo al reconciliar.
@@ -180,7 +180,7 @@ Premisas heredadas, **vueltas a medir** el 2026-11-24:
 
 ## Risks / Trade-offs
 
-- [`Decisiones/` es zona del curador en `claude-memory-system`] → nombre propio, `source: ai-harness`, nunca se edita ni borra nada ajeno, nunca se crea la carpeta; el curador podría atribuirse la nota en su log si coincide en el tiempo (medido, D3). Lo confirma Wilson en la tarea 1.1.
+- [`Decisiones/` es zona del curador en `claude-memory-system`] → nombre propio, `source: ai-harness`, nunca se edita ni borra nada ajeno; la carpeta solo se crea en la primera escritura aprobada (revisada el 2026-11-24, D3); el curador podría atribuirse la nota en su log si coincide en el tiempo (medido, D3). Lo confirma Wilson en la tarea 1.1.
 - [Requisito vigente de `project-memory` que dice que el harness no modifica el vault] → no se puede escribir un MODIFIED mientras no esté archivado; tarea 1.2 lo resuelve antes de archivar este change.
 - [Sobrescritura por un tercero en la ventana entre la comprobación y el renombrado] → aceptado y escrito (D6); el bloqueo cubre al harness.
 - [Corte de luz tras el renombrado sin sincronizar el directorio] → la reconciliación lo detectaría como `absent` y pediría aprobar de nuevo; aceptado y escrito.

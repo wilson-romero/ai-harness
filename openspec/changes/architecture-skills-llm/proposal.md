@@ -18,7 +18,7 @@ Corte **4 · Skills sin herramientas** de `docs/plan/2026-11-24-ai-harness-corte
 **No entra**, aunque un lector lo asumiría:
 
 - `architecture-diagram`, `architecture-impact`, Enterprise Architect, MCP y pasos `tool` (cortes 5–7).
-- Editar, sustituir, fusionar o borrar una nota existente del vault, incluida una decisión anterior: solo se crea una nota nueva. Crear la carpeta `Decisiones/` si no existe.
+- Editar, sustituir, fusionar o borrar una nota existente del vault, incluida una decisión anterior: solo se crea una nota nueva. (Revisado el 2026-11-24: crear `Decisiones/` si no existe **sí** entra, solo en la primera escritura aprobada; decisión de Wilson, D3.)
 - Escribir en cualquier otra carpeta del vault (`Memoria/`, `Lecciones/`, `projects/`…), actualizar índices (`_INDEX.md`, `MEMORY.md`) o avisar al curador.
 - Guardar la revisión de `hls-review` en un fichero o en el vault.
 - Herramienta MCP `memory_save_decision` (Corte 5; reutilizará este efecto).
