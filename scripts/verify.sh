@@ -13,6 +13,9 @@ SHA="$(git rev-parse HEAD)"
 
 step() { printf '\n== %s\n' "$1"; }
 
+step "public repository guard: secrets, runtime data, private details"
+uv run python scripts/check_public_safety.py
+
 step "python: version and lockfile"
 uv run python --version
 uv lock --check

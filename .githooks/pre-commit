@@ -1,0 +1,5 @@
+#!/bin/sh
+# Block a commit that carries secrets, runtime data or private details into this public repo.
+# Enable once per clone: git config core.hooksPath .githooks
+if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+exec "$PY" scripts/check_public_safety.py --staged

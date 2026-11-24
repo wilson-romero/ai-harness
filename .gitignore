@@ -24,6 +24,15 @@ logs/
 edge-profile/
 vault/
 
+# Agent worktrees and local tool state
+.claude/
+
+# Browser automation output
+*.har
+trace.zip
+test-results/
+storage_state*.json
+
 # OS and editors
 .DS_Store
 Thumbs.db
