@@ -8,18 +8,40 @@ method that writes, moves or deletes a file is called. What it does not prove: w
 outside `harness/memory/` does (the CLI and the service write SQLite in the data directory) or
 what a module from the allowlist could do through an object passed in from outside. The second
 oracle, the fingerprint of the vault around every command, covers behaviour end to end.
+
+One module is exempted, by name and only for a closed list of primitives (architecture-skills-llm
+D9): `harness/memory/decisions.py`, the writer of decision notes. Any other primitive in that
+file, or any write primitive in any other file of the package, still fails. A second test keeps
+the exemption list to that one file, and a third runs a `memory` command in a fresh process and
+checks that the writer was never imported.
 """
 
 from __future__ import annotations
 
 import ast
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from tests.conftest import REPO_ROOT, fingerprint
+from tests.conftest import REPO_ROOT, fingerprint, subprocess_env
 
 MEMORY_PACKAGE = REPO_ROOT / "harness" / "memory"
+WRITER = "harness/memory/decisions.py"
+# What the decision writer may do beyond the allowlist: exclusive creation of its temporary
+# file, write and fsync it, publish it with a hard link, remove its own temporary file and
+# create `Decisiones/`. Reasons as `check_source` words them, without line numbers.
+WRITER_PRIMITIVES = frozenset({
+    "os.open() with flag os.O_WRONLY",
+    "os.O_WRONLY", "os.O_CREAT", "os.O_EXCL",
+    "os.write", ".write()",
+    "os.fsync",
+    "os.link", ".link()",
+    "os.unlink", ".unlink()",
+    "os.mkdir", ".mkdir()",
+})
+EXEMPTIONS = {WRITER: WRITER_PRIMITIVES}
 
 ALLOWED_MODULES = {
     "__future__",
@@ -178,12 +200,80 @@ def check_source(source: str) -> list[str]:
     return problems
 
 
-def test_memory_package_has_no_copy_upload_or_write_path():
+def _reason(problem: str) -> str:
+    return problem.split(": ", 1)[1]
+
+
+def offenders_in(package: Path, exemptions: dict[str, frozenset[str]]) -> list[str]:
     offenders = []
-    for path in sorted(MEMORY_PACKAGE.rglob("*.py")):
+    for path in sorted(package.rglob("*.py")):
         relative = path.relative_to(REPO_ROOT).as_posix()
-        offenders += [f"{relative}:{p}" for p in check_source(path.read_text(encoding="utf-8"))]
-    assert offenders == []
+        allowed = exemptions.get(relative, frozenset())
+        offenders += [f"{relative}:{p}" for p in check_source(path.read_text(encoding="utf-8"))
+                      if _reason(p) not in allowed]
+    return offenders
+
+
+def test_memory_package_has_no_copy_upload_or_write_path():
+    assert offenders_in(MEMORY_PACKAGE, EXEMPTIONS) == []
+
+
+def test_the_exemption_list_is_the_decision_writer_and_only_it():
+    assert set(EXEMPTIONS) == {"harness/memory/decisions.py"}
+    assert (REPO_ROOT / WRITER).is_file()
+    # The writer really uses what it is allowed, so the list is not wider than needed.
+    used = {_reason(p) for p in check_source((REPO_ROOT / WRITER).read_text(encoding="utf-8"))}
+    assert used == WRITER_PRIMITIVES
+
+
+@pytest.mark.parametrize(
+    "sample",
+    [
+        "import os\nos.replace(tmp, path)",
+        "tmp.replace(path)",
+        "import os\nos.rename(tmp, path)",
+        "import shutil\nshutil.copyfile(a, b)",
+        "note.write_text(text)",
+        "import os\nfd = os.open(p, os.O_WRONLY | os.O_TRUNC)",
+        "with open(path, 'w') as handle:\n    pass",
+        "import os\nos.rmdir(p)",
+    ],
+)
+def test_the_writer_exemption_still_says_no_to_other_primitives(sample):
+    assert {_reason(p) for p in check_source(sample)} - WRITER_PRIMITIVES, sample
+
+
+def test_no_other_memory_module_imports_the_writer():
+    for path in sorted(MEMORY_PACKAGE.rglob("*.py")):
+        if path.relative_to(REPO_ROOT).as_posix() == WRITER:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                names = {node.module or ""} | {f"{node.module}.{a.name}" for a in node.names}
+            elif isinstance(node, ast.Import):
+                names = {a.name for a in node.names}
+            else:
+                continue
+            assert "harness.memory.decisions" not in names, path
+
+
+def test_memory_commands_never_load_the_writer(vault, data_dir):
+    """In a fresh process, every `memory` command runs without importing the writer."""
+    script = (
+        "import sys\n"
+        "from harness.cli import main\n"
+        "codes = [main(['memory', 'search', 'orquestador']),\n"
+        "         main(['memory', 'context', 'demo-alpha']),\n"
+        "         main(['memory', 'maintain', '--dry-run'])]\n"
+        "print('codes', codes, 'loaded', 'harness.memory.decisions' in sys.modules)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=REPO_ROOT, capture_output=True, text=True,
+        env=subprocess_env(data_dir, HARNESS_VAULT_ROOT=str(vault)), timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().splitlines()[-1] == "codes [0, 0, 0] loaded False"
 
 
 # One sample per primitive. The first ten are the ones the earlier grep did not catch.
