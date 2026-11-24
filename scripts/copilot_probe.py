@@ -4,8 +4,11 @@
 Usage (see docs/runbook/copilot.md):
 
     uv run python scripts/copilot_probe.py login        # open the dedicated profile, sign in
-    uv run python scripts/copilot_probe.py measure      # 12 timed sends, reopen, prompt sizes
+    uv run python scripts/copilot_probe.py measure      # finds the controls if needed, then
+                                                        # 12 timed sends, reopen, prompt sizes
     uv run python scripts/copilot_probe.py login-state  # what an expired login looks like
+    uv run python scripts/copilot_probe.py discover     # only find the controls (2 sends)
+    uv run python scripts/copilot_probe.py structure    # sanitised page structure, no sends
 
 The probe sends only the fixed prompts below and accepts no prompt of its own from arguments,
 environment or standard input. It writes its measurements only under
@@ -38,8 +41,9 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+for _path in (ROOT, ROOT / "scripts"):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
 from playwright.async_api import BrowserContext, Locator, Page  # noqa: E402
 from playwright.async_api import Error as PlaywrightError  # noqa: E402
@@ -47,8 +51,11 @@ from playwright.async_api import Error as PlaywrightError  # noqa: E402
 from harness.browser.edge import EdgeLauncher, edge_version  # noqa: E402
 from harness.browser.page_state import host_of  # noqa: E402
 from harness.browser.runner import run_browser  # noqa: E402
+from harness.browser.structure import structure_dump  # noqa: E402
 from harness.config import Settings  # noqa: E402
 from harness.core.errors import HarnessError  # noqa: E402
+from copilot_discovery import ASK, Timing, discover, js  # noqa: E402
+
 from harness.providers.copilot_ui import (  # noqa: E402
     CANDIDATES_FILE,
     MEASUREMENT_DIR,
@@ -60,8 +67,11 @@ from harness.providers.copilot_ui import (  # noqa: E402
     LoginShape,
     MeasurementError,
     UiMeasurement,
-    parse_locators,
 )
+from pydantic import ValidationError  # noqa: E402
+
+DISCOVERED_FILE = "discovered.json"
+REQUIRED_LOCATORS = ("composer", "new_conversation", "user_turn", "assistant_turn")
 
 # -- what the probe sends: fixed, synthetic, nothing else ---------------------------------------
 
@@ -117,6 +127,16 @@ def setup_output() -> None:
         reconfigure = getattr(stream, "reconfigure", None)  # absent on captured streams
         if reconfigure is not None:
             reconfigure(encoding="utf-8", errors="replace")
+
+
+def sanitise_error(text: str) -> str:
+    """The first line of a browser error without URLs, quoted strings or long tokens: those
+    can carry page text, a tenant or a conversation id. What is left names the failed call."""
+    first = text.splitlines()[0] if text else ""
+    first = re.sub(r"[a-z][a-z0-9+.-]*://\S+", "<url>", first, flags=re.I)
+    first = re.sub(r"\"[^\"]*\"|'[^']*'|`[^`]*`", "<quoted>", first)
+    first = re.sub(r"\S{40,}", "<long>", first)
+    return first[:160]
 
 
 def say(text: str) -> None:
@@ -202,6 +222,8 @@ async def wait_ready(page: Page, locators: Locators, copilot_host: str, timeout_
             if host_of(page.url) == copilot_host and await composer.is_visible() and (
                 await composer.is_enabled()
             ):
+                if await js(page, "signedOutHints"):
+                    raise ProbeFailure(ASK["signed_in"])  # a guest prompt box is not the chat
                 return
         except PlaywrightError:
             if page.is_closed():
@@ -258,13 +280,14 @@ async def sample_send(
     """
     assistant = locators.assistant_turn.resolve(page)
     composer = locators.composer.resolve(page).first
-    send = locators.send.resolve(page).first
+    send = locators.send.resolve(page).first if locators.send else None
     stop = locators.stop.resolve(page).first if locators.stop else None
+    region = locators.busy_region.resolve(page) if locators.busy_region else None
     before = await assistant.count()
     if not filled:
         await composer.fill(prompt)
     started = time.monotonic()
-    await send.click()
+    await submit(composer, send, locators)
     samples: list[Sample] = []
     while True:
         t_ms = (time.monotonic() - started) * 1000
@@ -275,7 +298,7 @@ async def sample_send(
             text = await turn.inner_text()  # read first: a signal seen after it is not early
             digest = text_hash(text)
             content_digest = text_hash(content_up_to(text, marker))
-            busy = await turn.get_attribute("aria-busy")
+            busy = await turn.get_attribute("aria-busy") if region is None else None
             if locators.response_done_control:
                 done = await locators.response_done_control.resolve(turn).count() > 0
         samples.append(
@@ -287,14 +310,28 @@ async def sample_send(
                 has_text=bool(text.strip()),
                 has_marker=marker in text,
                 stop_visible=await stop.is_visible() if stop else None,
-                send_ready=await send.is_visible() and await composer.is_editable(),
+                send_ready=(send is None or await send.is_visible()) and await composer.is_editable(),
                 done=done,
-                busy=busy,
+                busy=busy if region is None else await region_busy(region),
             )
         )
         if settled(samples, locators) or t_ms > SEND_DEADLINE_S * 1000:
             return samples
         await asyncio.sleep(SAMPLE_INTERVAL_S)
+
+
+async def submit(composer: Locator, send: Locator | None, locators: Locators) -> None:
+    if locators.send_with == "enter":
+        await composer.press("Enter")
+    else:
+        assert send is not None  # the schema requires it for button sends
+        await send.click()
+
+
+async def region_busy(region: Locator) -> str | None:
+    if await region.count() == 0:
+        return None
+    return await region.last.get_attribute("aria-busy")
 
 
 def content_up_to(text: str, marker: str) -> str:
@@ -471,13 +508,53 @@ class Probe:
             return EdgeLauncher.from_settings(self.settings)
         return EdgeLauncher(self.settings.data_dir, profile, headless=self.settings.browser_headless)
 
-    def candidates(self) -> Locators:
+    def overrides(self) -> dict:
+        """Locators written by hand in candidates.json: all of them, or only the ones that
+        discovery could not find. They win over discovered ones."""
         path = self.out_dir / CANDIDATES_FILE
         if not path.is_file():
-            raise ProbeFailure(
-                f"no {CANDIDATES_FILE} in {self.out_dir}; write it from codegen first (runbook)"
-            )
-        return parse_locators(path.read_text(encoding="utf-8"))
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ProbeFailure(f"{CANDIDATES_FILE} is not valid JSON (line {exc.lineno})") from None
+        if not isinstance(data, dict):
+            raise ProbeFailure(f"{CANDIDATES_FILE} must hold a JSON object")
+        return data
+
+    def discovered(self) -> dict:
+        path = self.out_dir / DISCOVERED_FILE
+        if not path.is_file():
+            return {}
+        return json.loads(path.read_text(encoding="utf-8")).get("locators", {})
+
+    def locators(self) -> tuple[Locators | None, list[str]]:
+        """Discovered locators with the hand-written ones on top, and what is still missing."""
+        return merge_locators(self.discovered(), self.overrides())
+
+
+def merge_locators(discovered: dict, overrides: dict) -> tuple[Locators | None, list[str]]:
+    data = discovered | overrides
+    missing = [name for name in REQUIRED_LOCATORS if name not in data]
+    if data.get("send_with", "button") == "button" and "send" not in data:
+        missing.append("send")
+    if missing:
+        return None, missing
+    try:
+        return Locators.model_validate(data), []
+    except ValidationError as exc:
+        names = sorted({str(e["loc"][0]) for e in exc.errors() if e["loc"]})
+        raise ProbeFailure(
+            f"{CANDIDATES_FILE}: invalid locator(s): {', '.join(names) or 'unknown'}"
+        ) from None
+
+
+def ask_for(missing: list[str], out_dir: Path) -> str:
+    """One line per missing control: what to record and where to put it."""
+    lines = [f"discovery could not find: {', '.join(missing)}. For each, record it with codegen "
+             f"and put only that entry in {out_dir / CANDIDATES_FILE} (runbook, appendix):"]
+    lines += [f"  {name}: {ASK.get(name, name)}" for name in missing]
+    return "\n".join(lines)
 
 
 async def wait_for_person(context: BrowserContext) -> bool:
@@ -522,10 +599,55 @@ async def step_login(probe: Probe, result: dict) -> None:
         result["confirmed_by_person"] = await wait_for_person(context)
 
 
+async def step_discover(probe: Probe, result: dict) -> None:
+    """Find the controls by behaviour with two fixed sends. Writes discovered.json."""
+    started = time.monotonic()
+    async with probe.launcher().open() as context:
+        result.setdefault("edge_version", edge_version(context))
+        page = first_page(context)
+        await page.goto(probe.url)
+        timeout = probe.settings.copilot_ready_timeout_s
+        if not await settle_page(page, probe.copilot_host, timeout):
+            result["discovery"] = {"stopped": "not on the Copilot host (sign-in page?)"}
+            raise ProbeFailure("the Copilot page did not open (signed out?): run `probe login`")
+        result["startup_ms"] = [round((time.monotonic() - started) * 1000)]
+        timing = Timing(
+            stable_ms=max(STABLE_WINDOWS_MS), settle_ms=SETTLE_MS, deadline_s=SEND_DEADLINE_S
+        )
+        found = await discover(
+            page, (PROMPTS[0], PROMPTS[1]), (marker_of(0), marker_of(1)), timing, locate_reference
+        )
+    result["discovery"] = found.facts | {"missing": found.missing}
+    if "signed_in" in found.missing:
+        raise ProbeFailure(ASK["signed_in"])  # nothing typed, nothing saved
+    write_json(probe.out_dir, DISCOVERED_FILE, {
+        "measured_at": now_iso(),
+        "locators": found.locators,
+        "facts": found.facts,
+        "missing": found.missing,
+    })
+
+
+async def measure_locators(probe: Probe, result: dict) -> Locators:
+    """The locators to measure with: hand-written and earlier discovered ones if they are
+    complete. Discovery (two sends) runs first only when it never ran: after a discovery that
+    left gaps, the probe asks for those items instead of sending again (`discover` reruns it)."""
+    locators, missing = probe.locators()
+    if locators is None and not (probe.out_dir / DISCOVERED_FILE).is_file():
+        say("finding the Copilot controls (two fixed sends)")
+        await step_discover(probe, result)
+        locators, missing = probe.locators()
+    if locators is None:
+        result["missing_locators"] = missing
+        raise ProbeFailure(ask_for(missing, probe.out_dir))
+    return locators
+
+
 async def step_measure(probe: Probe, result: dict) -> None:
-    locators = probe.candidates()
+    locators = await measure_locators(probe, result)
     timeout = probe.settings.copilot_ready_timeout_s
     result["locators"] = locators.model_dump(mode="json", exclude_none=True)
+    result["startup_ms"] = []  # discovery's own start-up is not part of the measurement
     result["sends_planned"] = CONVERSATIONS * len(PROMPTS)
     result["turns_sent_per_conversation"] = len(PROMPTS)
     sends, startups, before, after = result["sends"], result["startup_ms"], [], []
@@ -602,7 +724,9 @@ async def settled_count(locator: Locator, expected: int) -> int:
 
 
 async def step_login_state(probe: Probe, result: dict) -> None:
-    locators = probe.candidates()
+    locators, missing = probe.locators()
+    if locators is None:
+        raise ProbeFailure(f"no locators for: {', '.join(missing)}; run `probe measure` first")
     hosts: list[str] = []
     with tempfile.TemporaryDirectory(prefix="ai-harness-login-state-") as tmp:
         async with probe.launcher(Path(tmp) / "profile").open() as context:
@@ -651,6 +775,65 @@ async def classify_empty_profile(
                 return "closed"
         await asyncio.sleep(0.25)
     return "unknown"
+
+
+COUNT_JS = r"""
+() => {
+  const visible = (el) => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
+    return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none"; };
+  const all = (sel) => [...document.querySelectorAll(sel)].filter(visible).length;
+  let shadows = 0;
+  for (const el of document.querySelectorAll("*")) if (el.shadowRoot) shadows += 1;
+  return {
+    editables: all('textarea, [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"], [role="textbox"]'),
+    buttons: all('button, [role="button"]'),
+    dialogs: all('dialog[open], [role="dialog"], [role="alertdialog"]'),
+    iframes: all("iframe"),
+    shadow_roots: shadows,
+  };
+}
+"""
+
+
+async def settle_page(page: Page, copilot_host: str, timeout_s: float) -> bool:
+    """Wait until the page is on the Copilot host and its element count stops changing."""
+    deadline = time.monotonic() + timeout_s
+    last, same_since = -1, time.monotonic()
+    while time.monotonic() < deadline:
+        try:
+            count = await page.locator("*").count()
+        except PlaywrightError:
+            count = -1
+        if count != last:
+            last, same_since = count, time.monotonic()
+        elif host_of(page.url) == copilot_host and time.monotonic() - same_since >= 2.0:
+            return True
+        await asyncio.sleep(0.25)
+    return host_of(page.url) == copilot_host
+
+
+async def step_structure(probe: Probe, result: dict) -> None:
+    """Sanitised structure of the Copilot page as it opens. Sends nothing."""
+    started = time.monotonic()
+    async with probe.launcher().open() as context:
+        result["edge_version"] = edge_version(context)
+        page = first_page(context)
+        await page.goto(probe.url)
+        on_copilot = await settle_page(page, probe.copilot_host, probe.settings.copilot_ready_timeout_s)
+        result["startup_ms"] = round((time.monotonic() - started) * 1000)
+        result["on_copilot_host"] = on_copilot
+        if not on_copilot:
+            result["stopped"] = "not on the Copilot host (sign-in page?)"
+            return
+        result["counts"] = await page.evaluate(COUNT_JS)
+        result["signed_out_hints"] = await js(page, "signedOutHints")
+        result["path_segments"] = len([p for p in _segments(page.url) if p])
+        lines = await structure_dump(page)
+    name = f"structure-{stamp()}.txt"
+    probe.out_dir.mkdir(parents=True, exist_ok=True)
+    (probe.out_dir / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    result["structure_file"] = name
+    result["structure_lines"] = len(lines)
 
 
 # -- results ------------------------------------------------------------------------------------
@@ -748,6 +931,31 @@ def assemble(out_dir: Path) -> tuple[UiMeasurement | None, str]:
 # -- summary: the only thing to paste back -------------------------------------------------------
 
 
+def discovery_lines(d: dict) -> list[str]:
+    """Discovery facts: methods, booleans, counts and kinds of locator, never a selector."""
+    if "stopped" in d:
+        return [f"discovery: stopped ({d['stopped']})"]
+    ref = d.get("conversation_ref")
+    shape = f"{ref['kind']} {ref.get('index', ref.get('param'))}" if ref else "none"
+    kinds = d.get("locator_kinds") or {}
+    return [
+        f"discovery: sends {d.get('sends')}  send_with: {d.get('send_with')}  "
+        f"send button: {yes_no(d.get('send_button_found'))}  "
+        f"editor: {d.get('editor_kind')}{' with paragraph' if d.get('editor_has_paragraph') else ''}"
+        f" (visible editors {d.get('editors_visible')})",
+        f"  user echo: {yes_no(d.get('user_echo_found'))}  user turn level: "
+        f"{d.get('user_turn_level')}  assistant turn level: {d.get('assistant_turn_level')}  "
+        f"echo_ms: {d.get('echo_ms')}  answer_seen_ms: {d.get('answer_seen_ms')}",
+        f"  end candidates: stop {yes_no(d.get('stop_found'))}, done control "
+        f"{yes_no(d.get('done_control_found'))}, aria-busy {yes_no(d.get('busy_found'))}  "
+        f"controls appeared: {d.get('controls_appeared')}",
+        f"  new conversation: candidates {d.get('new_chat_candidates')}, verified "
+        f"{yes_no(d.get('new_chat_verified'))}  conversation ref: {shape}",
+        "  locator kinds: " + (", ".join(f"{k} {v}" for k, v in kinds.items()) or "none"),
+        f"  missing: {', '.join(d.get('missing') or []) or 'nothing'}",
+    ]
+
+
 def yes_no(value: bool | None) -> str:
     return "not measured" if value is None else ("yes" if value else "no")
 
@@ -769,6 +977,10 @@ def print_summary(step: str, result: dict, ui_status: str | None) -> None:
             f"launch_ms: {result.get('launch_ms')}  first_load_ms: {result.get('first_load_ms')}  "
             f"confirmed_by_person: {result.get('confirmed_by_person')}"
         )
+    if result.get("discovery"):
+        lines += discovery_lines(result["discovery"])
+    if result.get("missing_locators"):
+        lines.append(f"locators missing: {', '.join(result['missing_locators'])}")
     if step == "measure":
         lines.append(f"sends measured: {len(result['sends'])}/{result.get('sends_planned')}")
         for name, s in (result.get("signals") or {}).items():
@@ -796,6 +1008,14 @@ def print_summary(step: str, result: dict, ui_status: str | None) -> None:
         lines.append(f"P5 empty profile ends as: {result.get('state')}  "
                      f"login hosts seen: {len(result.get('login_hosts') or [])}  "
                      f"indicator seen: {result.get('indicator_seen')}")
+    if step == "structure":
+        lines.append(f"signed-out hints: {result.get('signed_out_hints')}  "
+                     f"on Copilot host: {yes_no(result.get('on_copilot_host'))}  "
+                     f"startup_ms: {result.get('startup_ms')}  "
+                     f"path segments: {result.get('path_segments')}  "
+                     f"structure lines: {result.get('structure_lines')}")
+        counts = result.get("counts") or {}
+        lines.append("visible: " + ", ".join(f"{k} {v}" for k, v in counts.items()))
     if ui_status is not None:
         lines.append(f"ui.json: {ui_status}")
     lines.append("---- end of summary ----")
@@ -808,6 +1028,8 @@ STEPS: dict[str, Callable] = {
     "login": step_login,
     "measure": step_measure,
     "login-state": step_login_state,
+    "structure": step_structure,
+    "discover": step_discover,
 }
 
 
@@ -820,6 +1042,8 @@ def build_parser() -> argparse.ArgumentParser:
     steps.add_parser("login", help="open the dedicated profile and sign in by hand")
     steps.add_parser("measure", help="timed sends, reopening and prompt sizes")
     steps.add_parser("login-state", help="what an expired login looks like (empty profile)")
+    steps.add_parser("structure", help="sanitised page structure, no text; sends nothing")
+    steps.add_parser("discover", help="find the controls by behaviour (two fixed sends)")
     return parser
 
 
@@ -855,14 +1079,22 @@ def main(argv: list[str] | None = None) -> int:
         code = EXIT_ERROR
     except PlaywrightError as exc:
         result["error"] = type(exc).__name__
-        first = str(exc).splitlines()[0] if str(exc) else ""
-        say(f"probe: browser error (do not paste, it may name your tenant): {first}")
+        say(f"probe: browser error: {sanitise_error(str(exc))}")
         code = EXIT_ERROR
 
     if args.step == "measure":
         finish_measure(result)
     elif args.step == "login-state":
         finish_login_state(result)
+    elif args.step == "discover":
+        missing = (result.get("discovery") or {}).get("missing")
+        result["missing"] = list(missing) if missing is not None else ["discovery"]
+        result["complete"] = not result["missing"]
+        if result["missing"] and missing is not None and code == EXIT_OK:
+            say(ask_for(result["missing"], probe.out_dir))
+    elif args.step == "structure":
+        result["complete"] = bool(result.get("structure_file"))
+        result["missing"] = [] if result["complete"] else ["structure"]
     else:
         result["complete"] = result.get("controllable") is True and bool(result.get("confirmed_by_person"))
         result["missing"] = [] if result["complete"] else ["login"]

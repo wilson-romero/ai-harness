@@ -88,6 +88,7 @@
     const prompt = composer.value;
     if (!prompt) return;
     composer.value = "";
+    send.disabled = true;
     addTurn("user", prompt);
     send.hidden = true;
     stop.hidden = false;
@@ -118,6 +119,9 @@
     send.hidden = false;
   }
 
+  // Like many chat pages, sending is possible only once something is typed.
+  send.disabled = true;
+  composer.addEventListener("input", () => { send.disabled = !composer.value; });
   send.addEventListener("click", submit);
   document.getElementById("synthetic-new-chat").addEventListener("click", newChat);
   load();

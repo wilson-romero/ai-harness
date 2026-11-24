@@ -420,3 +420,31 @@ def test_login_step_ends_cleanly_however_it_is_interrupted(mode, code, p1, tmp_p
     assert login["complete"] is False
     assert isinstance(login["launch_ms"], int)  # the launch did happen
     assert NamedLock(data, "browser").acquire()  # and the browser was given back
+
+
+def test_structure_step_writes_a_text_free_dump(quick, copilot_app, monkeypatch):
+    probe, data = quick
+    monkeypatch.setenv("HARNESS_COPILOT_URL", copilot_app.url(tenant=TENANT_CANARY))
+    out = io.StringIO()
+    with redirect_stdout(out):
+        assert probe.main(["structure"]) == 0
+    dumps = list((data / "copilot").glob("structure-*.txt"))
+    assert len(dumps) == 1
+    for text in (dumps[0].read_text(encoding="utf-8"), out.getvalue()):
+        for canary in (*CANARIES, TENANT_CANARY):
+            assert canary not in text
+    assert "on Copilot host: yes" in out.getvalue()
+    assert copilot_app.prompt_count == 0  # it sends nothing
+
+
+def test_structure_step_stops_on_a_sign_in_page(quick, copilot_app, monkeypatch):
+    probe, data = quick
+    copilot_app.require_login = True  # nobody signs in
+    monkeypatch.setenv("HARNESS_COPILOT_URL", copilot_app.url())
+    monkeypatch.setenv("HARNESS_COPILOT_READY_TIMEOUT_S", "3")
+    out = io.StringIO()
+    with redirect_stdout(out):
+        assert probe.main(["structure"]) == 1
+    assert "on Copilot host: no" in out.getvalue()
+    assert not list((data / "copilot").glob("structure-*.txt"))
+    assert copilot_app.login_events == []

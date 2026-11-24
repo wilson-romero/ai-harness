@@ -1,0 +1,158 @@
+<!doctype html>
+<!--
+  Second synthetic chat shape, for locator discovery. Invented structure and canaries; it
+  imitates no real page. Unlike app.html it has no ids on the chat parts, uses `data-qa`
+  attributes, a contenteditable editor holding a paragraph, sends with Enter (there is no send
+  button), marks the whole log busy instead of the reply, and opens a conversation at
+  /chat/conversation/<id>. Query parameters:
+    stop=1     a stop button shows while a reply streams (default: none)
+    echo=0     the sent message is not shown in the thread (negative control)
+    chunk_ms=N delay between reply chunks (default 40)
+    forget=1   an existing conversation cannot be reopened
+-->
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Chat sintetico ZZ-CANARY-PAGE-TITLE-6121</title>
+<style>
+  body { font-family: sans-serif; display: flex; gap: 1rem; margin: 0; }
+  aside { width: 14rem; padding: .5rem; }
+  .pane { flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+  .msg { margin: .25rem 0; padding: .25rem; border-radius: 4px; }
+  .msg[data-author="human"] { background: #eef; }
+  .editor-shell { border: 1px solid #999; padding: .25rem; min-height: 3rem; width: 32rem; }
+  .editor-shell [contenteditable] { outline: none; min-height: 2rem; }
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="profile-chip">ZZ-CANARY-ACCOUNT-3392</div>
+  <button type="button" class="sidebar-action" data-icon="compose" aria-label="Nuevo chat">+</button>
+  <button type="button" class="sidebar-action" data-icon="search" aria-label="Buscar">?</button>
+  <ul class="recent">
+    <li><a href="#" class="recent-link">ZZ-CANARY-TITLE-7783 plan anual</a></li>
+    <li><a href="#" class="recent-link">ZZ-CANARY-TITLE-7784 revisión</a></li>
+  </ul>
+</aside>
+<div class="pane">
+  <div class="log" role="log" aria-live="polite" data-qa="conversation-log"></div>
+  <div class="composer-row">
+    <div class="editor-shell" data-qa="prompt-shell">
+      <div contenteditable="true" role="textbox" aria-multiline="true" data-qa="prompt-editor"
+           aria-label="Escribe un mensaje"><p><br></p></div>
+    </div>
+    <span class="stop-slot"></span>
+  </div>
+</div>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const chunkMs = Number(params.get("chunk_ms") || 40);
+  const withStop = params.get("stop") === "1";
+  const echo = params.get("echo") !== "0";
+  const forget = params.get("forget") === "1";
+  const log = document.querySelector('[data-qa="conversation-log"]');
+  const editor = document.querySelector('[data-qa="prompt-editor"]');
+  const stopSlot = document.querySelector(".stop-slot");
+  let conversation = null;
+  let busy = false;
+
+  function message(author, text) {
+    const wrap = document.createElement("div");
+    wrap.className = "msg";
+    wrap.dataset.author = author;
+    const body = document.createElement("div");
+    body.className = "msg-body";
+    const p = document.createElement("p");
+    p.textContent = text;
+    body.appendChild(p);
+    wrap.appendChild(body);
+    log.appendChild(wrap);
+    return { wrap, p };
+  }
+  function addActions(wrap) {
+    if (wrap.querySelector(".msg-actions")) return;
+    const bar = document.createElement("div");
+    bar.className = "msg-actions";
+    const like = document.createElement("button");
+    like.type = "button";
+    like.dataset.qa = "reaction-like";
+    like.setAttribute("aria-label", "Me gusta");
+    like.textContent = "+1";
+    bar.appendChild(like);
+    wrap.appendChild(bar);
+  }
+  function editorText() { return editor.innerText.replace(/\n+$/, ""); }
+  function clearEditor() { editor.innerHTML = "<p><br></p>"; }
+  function open(id) {
+    conversation = id;
+    history.replaceState(null, "", "/chat/conversation/" + id + location.search);
+  }
+  function newChat() {
+    conversation = null;
+    log.replaceChildren();
+    history.replaceState(null, "", "/app" + location.search);
+  }
+  async function load() {
+    const match = location.pathname.match(/^\/chat\/conversation\/([^/]+)$/);
+    if (!match) return;
+    const response = forget ? null : await fetch("/api/conversation/" + match[1]);
+    if (!response || !response.ok) { newChat(); return; }
+    const data = await response.json();
+    conversation = match[1];
+    for (const turn of data.turns) {
+      const { wrap } = message(turn.role === "user" ? "human" : "bot", turn.text);
+      if (turn.role !== "user") addActions(wrap);
+    }
+  }
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  async function submit() {
+    const prompt = editorText();
+    if (!prompt || busy) return;
+    busy = true;
+    clearEditor();
+    editor.setAttribute("contenteditable", "false");
+    if (echo) message("human", prompt);
+    let stop = null;
+    if (withStop) {
+      stop = document.createElement("button");
+      stop.type = "button";
+      stop.dataset.qa = "halt-reply";
+      stop.setAttribute("aria-label", "Detener");
+      stop.textContent = "x";
+      stopSlot.appendChild(stop);
+    }
+    log.setAttribute("aria-busy", "true");
+    const response = await fetch("/api/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversation, prompt }),
+    });
+    const data = await response.json();
+    open(data.conversation);
+    const { wrap, p } = message("bot", "");
+    const reply = data.reply;
+    for (let i = 0; i < reply.length; i += 5) {
+      p.textContent = reply.slice(0, i + 5);
+      await sleep(chunkMs);
+    }
+    log.setAttribute("aria-busy", "false");
+    addActions(wrap);
+    if (stop) stop.remove();
+    editor.setAttribute("contenteditable", "true");
+    busy = false;
+  }
+
+  editor.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      submit();
+    }
+  });
+  document.querySelector('[data-icon="compose"]').addEventListener("click", newChat);
+  load();
+})();
+</script>
+</body>
+</html>

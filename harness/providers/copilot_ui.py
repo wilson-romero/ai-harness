@@ -83,16 +83,31 @@ class LocatorSpec(_Strict):
 
 
 class Locators(_Strict):
-    """The controls the provider uses. This is also the shape of `candidates.json`."""
+    """The controls the provider uses. This is also the shape of `candidates.json`.
+
+    `send_with` says how a prompt is sent: pressing Enter in the composer, or clicking `send`.
+    With Enter the send button is optional; when known it still tells when sending is possible
+    again. `response_done_control` is looked up inside the assistant turn; `busy_region` is the
+    element whose `aria-busy` marks a reply in progress (the last match), when it is not the
+    assistant turn itself.
+    """
 
     composer: LocatorSpec
-    send: LocatorSpec
+    send_with: Literal["button", "enter"] = "button"
+    send: LocatorSpec | None = None
     new_conversation: LocatorSpec
     user_turn: LocatorSpec
     assistant_turn: LocatorSpec
     stop: LocatorSpec | None = None
     response_done_control: LocatorSpec | None = None
+    busy_region: LocatorSpec | None = None
     login_indicator: LocatorSpec | None = None
+
+    @model_validator(mode="after")
+    def _button_needs_a_locator(self) -> Self:
+        if self.send_with == "button" and self.send is None:
+            raise ValueError("send_with `button` needs a `send` locator")
+        return self
 
 
 class ConversationRef(_Strict):

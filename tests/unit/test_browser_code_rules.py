@@ -34,7 +34,13 @@ def _offenders(pattern: re.Pattern[str], *roots: str) -> list[str]:
 
 
 def test_no_recording_options_anywhere_near_the_browser():
-    roots = ["harness", "scripts/copilot_probe.py", "tests/browser", "tests/copilot_app.py"]
+    roots = [
+        "harness",
+        "scripts/copilot_probe.py",
+        "scripts/copilot_discovery.py",
+        "tests/browser",
+        "tests/copilot_app.py",
+    ]
     assert _offenders(RECORDING, *[r for r in roots if (REPO_ROOT / r).exists()]) == []
 
 

@@ -24,6 +24,10 @@ CANARY_REPLY = "ZZ-CANARY-REPLY-9034"
 CANARIES = (
     CANARY_REPLY,
     "ZZ-CANARY-ACCOUNT-3391",
+    "ZZ-CANARY-ACCOUNT-3392",
+    "ZZ-CANARY-TITLE-7783",
+    "ZZ-CANARY-TITLE-7784",
+    "ZZ-CANARY-PAGE-TITLE-6121",
     "ZZ-CANARY-TITLE-7781",
     "ZZ-CANARY-TITLE-7782",
     "ZZ-CANARY-PAGE-TITLE-6120",
@@ -146,16 +150,20 @@ def _handler(app: SyntheticCopilot) -> type[BaseHTTPRequestHandler]:
         def do_GET(self) -> None:  # noqa: N802
             parts = urlsplit(self.path)
             path = parts.path
-            if path == "/app" or re.fullmatch(r"/c/[^/]+", path):
+            if path == "/app" or re.fullmatch(r"/c/[^/]+|/chat/conversation/[^/]+", path):
                 with app._lock:
                     app.page_hits += 1
                 signed_in = SESSION_COOKIE in (self.headers.get("Cookie") or "")
                 if app.require_login and not signed_in:
                     self._send(302, b"", "text/plain", {"Location": app.login_url(app.base + self.path)})
                     return
-                self._page("app.html")
+                variant = parse_qs(parts.query).get("ui", [""])[0]
+                name = f"app-{variant}.html" if re.fullmatch(r"[a-z]+", variant) else "app.html"
+                self._page(name if (FIXTURES / name).is_file() else "app.html")
             elif path == "/login":
                 self._page("login.html")
+            elif path == "/structure":
+                self._page("structure.html")
             elif path == "/auth/complete":
                 target = parse_qs(parts.query).get("return", [app.url()])[0]
                 cookie = f"{SESSION_COOKIE}; Max-Age=86400; Path=/"

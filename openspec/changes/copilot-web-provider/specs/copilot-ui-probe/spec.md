@@ -67,3 +67,39 @@ La sonda SHALL marcar la medición como incompleta cuando falte cualquiera de su
 #### Scenario: Wilson interrumpe la sonda a mitad
 - **WHEN** la sonda se interrumpe antes de medir la señal de fin de respuesta
 - **THEN** el fichero de medición queda marcado como incompleto y `ask` con el proveedor de Copilot lo rechaza nombrando la parte que falta
+
+### Requirement: Localizadores descubiertos por comportamiento
+Cuando no tenga localizadores completos, la sonda SHALL encontrarlos por lo que la página hace con dos de sus prompts fijos (editor, forma de envío, turnos, señales de fin y conversación nueva comprobada porque vacía el hilo y cambia la URL). SHALL derivar cada localizador de atributos estables del elemento o sus ancestros y SHALL NOT derivarlo del texto ni de un valor con dígitos o que aparezca también en el texto de la página.
+
+#### Scenario: Dos formas de página distintas
+- **WHEN** la sonda descubre los controles en una página sintética que envía con botón y en otra que envía con Enter desde un párrafo editable, con convenciones de atributos distintas
+- **THEN** en las dos encuentra todos los controles obligatorios con dos envíos y el resumen no contiene ningún selector, canario ni dirección
+
+### Requirement: Lo no identificado se pide, no se adivina
+Lo que el descubrimiento no identifique con certeza SHALL nombrarlo y pedirlo por separado con una instrucción de una línea, y un localizador escrito a mano SHALL prevalecer sobre el descubierto.
+
+#### Scenario: Mensaje enviado ausente de la página
+- **WHEN** la página sintética no muestra el mensaje enviado
+- **THEN** la sonda nombra solo el turno del usuario como no encontrado, da una instrucción de una línea para él y `measure` no envía nada más
+
+#### Scenario: Página que ofrece iniciar sesión
+- **WHEN** la página abierta ofrece iniciar sesión aunque muestre un cuadro de texto
+- **THEN** ni el descubrimiento ni una medición con localizadores escritos a mano escriben en ella, y la sonda pide iniciar sesión
+
+#### Scenario: Un localizador a mano completa el hueco
+- **WHEN** el descubrimiento dejó un hueco y Wilson escribe solo ese localizador en el fichero de candidatos
+- **THEN** `measure` usa el resto de lo descubierto sin volver a descubrir
+
+### Requirement: Estructura de la página sin texto
+La sonda SHALL poder volcar la estructura de la página (etiquetas, roles y atributos) en el directorio de datos sin ningún texto: los valores legibles por personas y los nodos de texto SHALL quedar sustituidos por su longitud y una categoría, y SHALL NOT enviar nada.
+
+#### Scenario: Canarios ausentes del volcado
+- **WHEN** la página sintética lleva cadenas canario en su texto, `aria-label`, `title`, `href` e `id`
+- **THEN** ninguna aparece en el volcado
+
+### Requirement: Salida limpia por cualquier camino
+La sonda y `copilot login` SHALL cerrar el navegador y su driver, y no imprimir nada después de su última línea, tanto si terminan bien como si se interrumpen con Ctrl+C, si se cierra el navegador o si muere el driver. Una interrupción antes de medir P1 SHALL registrarla como no medida, no como falsa.
+
+#### Scenario: Ctrl+C con el driver muerto
+- **WHEN** el driver muere y llega Ctrl+C mientras carga la página del paso `login`
+- **THEN** el resumen dice `P1 controllable: not measured`, es lo último impreso y el bloqueo del navegador queda libre

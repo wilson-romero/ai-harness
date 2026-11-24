@@ -83,6 +83,17 @@ def test_locator_needs_exactly_one_kind():
         parse_locators(json.dumps(locators))
 
 
+def test_sending_with_enter_needs_no_send_button():
+    locators = synthetic()["locators"]
+    del locators["send"]
+    parsed = parse_locators(json.dumps(locators | {"send_with": "enter"}))
+    assert parsed.send_with == "enter" and parsed.send is None
+    with pytest.raises(MeasurementError, match="needs a `send` locator"):
+        parse_locators(json.dumps(locators))  # the default method is a button: it is required
+    with pytest.raises(MeasurementError):
+        parse_locators(json.dumps(locators | {"send_with": "shortcut"}))
+
+
 def test_identity_measured_as_not_recoverable_is_a_value_not_a_gap(tmp_path):
     write_measurement(tmp_path, synthetic() | {"identity_recoverable": False})
     assert load_measurement(tmp_path).identity_recoverable is False
