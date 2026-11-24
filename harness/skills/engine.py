@@ -23,7 +23,7 @@ from uuid import UUID, uuid7
 
 from harness.core.contracts import RequestStatus, Session
 from harness.core.errors import HarnessError, InvalidIdentifier, InvalidInput, SessionBusy
-from harness.core.service import SessionService
+from harness.core.service import SessionService, is_valid_unicode
 from harness.memory.context import ProjectContext
 from harness.providers.base import LLMProvider
 from harness.skills.approvals import (
@@ -122,6 +122,13 @@ def inputs_manifest(inputs: Mapping[str, str]) -> str:
         for name, value in inputs.items()
     }
     return json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+
+
+def _check_unicode(inputs: Mapping[str, str]) -> None:
+    """Invalid bytes in argv arrive as lone surrogates: refused before anything (review 8.6)."""
+    for name, value in inputs.items():
+        if not (is_valid_unicode(name) and is_valid_unicode(value)):
+            raise InvalidInput(f"input {name!r} is not valid Unicode text")
 
 
 def step_marker(skill: str, step: str, attempt: int) -> str:
@@ -829,6 +836,7 @@ class SkillEngine:
         for name, spec in declared.items():
             if spec.required and name not in inputs:
                 raise InvalidInput(f"input {name!r} is required")
+        _check_unicode(inputs)
         total = 0
         for name, value in inputs.items():
             size = len(value.encode("utf-8"))
@@ -868,6 +876,7 @@ class SkillEngine:
         self, row: sqlite3.Row, skill: Skill, latest: dict[str, sqlite3.Row],
         inputs: Mapping[str, str],
     ) -> None:
+        _check_unicode(inputs)
         manifest = json.loads(row["inputs_manifest"])
         for name, value in inputs.items():
             if name not in manifest:

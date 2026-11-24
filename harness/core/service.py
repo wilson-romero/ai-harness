@@ -34,6 +34,16 @@ from harness.storage.database import transaction
 from harness.storage.locks import SessionLock
 
 
+def is_valid_unicode(text: str) -> bool:
+    """False when the text holds a lone surrogate (for example, invalid bytes in argv), which
+    cannot be encoded as UTF-8, stored in SQLite or sent (skill-engine review 8.6)."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def parse_session_id(raw: str) -> UUID:
     """Accept only a full, canonical UUID: no prefixes, braces or URN forms."""
     try:
@@ -97,6 +107,8 @@ class SessionService:
     def create_session(self, name: str, project_id: str | None = None) -> Session:
         if not name.strip():
             raise InvalidInput("the session name must not be empty")
+        if not is_valid_unicode(name):
+            raise InvalidInput("the session name is not valid Unicode text")
         self._provider_factory(self._default_provider)  # must exist before anything is stored
         now = datetime.now(UTC)
         session = Session(
@@ -189,6 +201,8 @@ class SessionService:
         session = self._require_session(raw_session_id)
         if not prompt.strip():
             raise InvalidInput("the prompt must not be empty")
+        if not is_valid_unicode(prompt):
+            raise InvalidInput("the prompt is not valid Unicode text (it has a lone surrogate)")
         if context is not None:
             self._check_project(session, context.project)
         self._provider_factory(self._default_provider)  # a misconfigured provider stops here
@@ -365,6 +379,13 @@ class SessionService:
                 RequestStatus.FAILED,
                 error_code=type(exc).__name__,
                 detail=f"the provider reported an error: {exc}",
+            )
+        if not is_valid_unicode(text):
+            # The answer arrived but cannot be stored or shown: a controlled failure (8.6).
+            return finish(
+                RequestStatus.FAILED,
+                error_code="invalid_text",
+                detail="the provider's answer is not valid Unicode text; it was not kept",
             )
         return finish(RequestStatus.COMPLETED, text=text)
 

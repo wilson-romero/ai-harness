@@ -117,6 +117,7 @@ def test_second_run_refused(conn, data_dir):
         ({}, "input 'text' is required"),
         ({"text": "x" * 65_537}, "larger than 65536 bytes"),
         ({"text": "€" * 21_846}, "larger than 65536 bytes"),
+        ({"text": "hola \udcff"}, "not valid Unicode"),  # 8.6: invalid bytes in argv
     ],
 )
 def test_inputs_checked_before_the_run(conn, data_dir, inputs, message):
@@ -125,6 +126,22 @@ def test_inputs_checked_before_the_run(conn, data_dir, inputs, message):
     with pytest.raises(InvalidInput, match=message):
         asyncio.run(engine.run("demo-echo", str(session.session_id), inputs))
     assert _rows(conn, "SELECT count(*) FROM skill_runs") == [(0,)] and provider.calls == 0
+
+
+def test_a_model_answer_that_is_not_valid_unicode_fails_the_step(conn, data_dir, tmp_path):
+    """8.6: a lone surrogate is a controlled failure, never a traceback or a run left pending."""
+    root = copy_skills(tmp_path)
+    _no_approval(root)
+    provider = ScriptedProvider({"tarea: demo-echo/draft": GOOD_ECHO + "\ud800"})
+    engine, sessions, _ = build(conn, data_dir, root=root, provider=provider)
+    session = sessions.create_session("Demo")
+    outcome = _run(engine, "demo-echo", session, text="x")
+    assert outcome.status == "failed" and provider.calls == 1
+    assert _rows(conn, "SELECT step_key, status, error_code FROM skill_steps ORDER BY position"
+                 ) == [("draft", "failed", "request_failed"), ("check", "pending", None)]
+    assert _rows(conn, "SELECT status, error_code FROM skill_runs") == [
+        ("failed", "request_failed")]
+    assert _rows(conn, "SELECT status, error_code FROM requests") == [("failed", "invalid_text")]
 
 
 def test_input_canary_stays_out_of_sqlite(conn, data_dir):
