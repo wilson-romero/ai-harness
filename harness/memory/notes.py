@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
 
-from harness.memory.paths import PROJECTS_DIR, VaultFile
+from harness.memory.paths import PROJECTS_DIR, VaultFile, read_vault_file
 
 FieldValue = str | tuple[str, ...]
 
@@ -44,7 +44,13 @@ class Note:
 
     @property
     def updated(self) -> str | None:
-        return date_prefix(self.frontmatter.fields.get("updated"))
+        """`updated` as `YYYY-MM-DD`, or None if missing, not a date or in the future.
+
+        A date in the future is not trusted: it would put the note ahead of every other
+        note of its group for as long as the date lasts (SEC-03).
+        """
+        value = date_prefix(self.frontmatter.fields.get("updated"))
+        return None if value is None or value > today() else value
 
     @property
     def tags(self) -> tuple[str, ...]:
@@ -57,8 +63,14 @@ def decode(raw: bytes) -> str:
     return text.removeprefix("﻿").replace("\r\n", "\n")
 
 
+def today() -> str:
+    """The local date as `YYYY-MM-DD`; a function so that tests can fix it."""
+    return date.today().isoformat()
+
+
 def load_note(file: VaultFile) -> Note:
-    raw = file.path.read_bytes()
+    """Read a walked note. Raises `SkippedRead` if it is not the file the walk saw."""
+    raw = read_vault_file(file)
     text = decode(raw)
     frontmatter, body = parse_frontmatter(text)
     return Note(
@@ -160,6 +172,8 @@ def frontmatter_problem(frontmatter: Frontmatter) -> str | None:
         value = frontmatter.fields.get(key)
         if not isinstance(value, str) or not _DATE_RE.fullmatch(value) or not date_prefix(value):
             return f"{key} is not YYYY-MM-DD"
+        if value > today():
+            return f"{key} is in the future"
     return None
 
 

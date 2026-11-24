@@ -66,5 +66,9 @@ def test_containment_posix_is_exact():
 
 
 def test_containment_is_not_fooled_by_unresolved_parent_parts():
-    # Pure paths keep `..`: containment must be checked on resolved paths, which the walk does.
-    assert PureWindowsPath(r"C:\Vault\..\x").parts[-2] == ".."
+    # Pure paths keep `..`, and pathlib alone says `C:\Vault\..\x` is relative to `C:\Vault`.
+    assert PureWindowsPath(r"C:\Vault\..\x").is_relative_to(PureWindowsPath(r"C:\Vault"))
+    assert not is_within(PureWindowsPath(r"C:\Vault\..\x"), PureWindowsPath(r"C:\Vault"))
+    assert not is_within(PurePosixPath("/srv/vault/../x"), PurePosixPath("/srv/vault"))
+    assert not is_within(PurePosixPath("/srv/vault/a"), PurePosixPath("/srv/vault/.."))
+    assert is_within(PurePosixPath("/srv/vault/a..b/x"), PurePosixPath("/srv/vault"))

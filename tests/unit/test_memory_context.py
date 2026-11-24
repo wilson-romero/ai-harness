@@ -118,18 +118,24 @@ def test_limit_respected(context, vault, limit):
 
 
 def test_priority_order_is_never_skipped(context, vault):
-    # A large decision does not fit in 1024 bytes; the small sessions after it would, and
-    # still they are omitted: notes are not picked to fill the gap.
+    # Revised with D6 on 2026-11-24: the budget is shared among sections, so a large decision
+    # no longer starves the sessions. Inside a section the order still holds: the first
+    # decision is cut to its share and the ones after it are omitted, never picked to fill
+    # the gap.
     write_note(vault, "Decisiones/alpha-grande.md", "x" * 2000, project_slug="demo-alpha",
-               updated="2026-11-30")
+               updated="2026-11-21")
+    write_note(vault, "Decisiones/alpha-pequena.md", "pequeña", project_slug="demo-alpha",
+               updated="2026-11-01")
     code, out, err = context(HARNESS_MEMORY_CONTEXT_MAX_BYTES="1024")
     assert code == 0
-    assert _paths(out) == ["projects/demo-alpha/_project.md"]
+    paths = _paths(out)
+    assert paths[:2] == ["projects/demo-alpha/_project.md", "Decisiones/alpha-grande.md"]
+    assert "projects/demo-alpha/sessions/2026-11-21-121500.md" in paths
     omitted = [line.removeprefix("omitted: ") for line in err.splitlines()
                if line.startswith("omitted: ")]
-    assert omitted[0] == "Decisiones/alpha-grande.md"
-    assert "projects/demo-alpha/sessions/2026-11-19-101500.md" in omitted
-    assert "7 omitted" in err
+    # Inside Decisiones/, the notes after the cut one are omitted, small or not.
+    assert omitted[:2] == ["Decisiones/alpha-mensajeria.md", "Decisiones/alpha-pequena.md"]
+    assert len(_block(out).encode("utf-8")) <= 1024
 
 
 def test_note_truncated(context, vault):
@@ -137,7 +143,9 @@ def test_note_truncated(context, vault):
     cut = NOTE_MAX_BYTES - len(("\n" + TRUNCATION_MARK).encode("utf-8"))
     body = "a" * (cut - 1) + "€" * 100
     write_note(vault, "Decisiones/alpha-larga.md", body, project_slug="demo-alpha")
-    code, out, err = context()
+    # A limit large enough for the section's share to hold the whole note: this is the cut
+    # at NOTE_MAX_BYTES, not the cut to the share.
+    code, out, err = context(HARNESS_MEMORY_CONTEXT_MAX_BYTES="65536")
     assert code == 0
     section = out.split("--- nota: Decisiones/alpha-larga.md (nota, 2026-11-01)\n")[1]
     section = section.split("\n\n--- nota:")[0]
@@ -188,7 +196,10 @@ def test_forged_marker_in_a_note_even_knowing_the_nonce(vault):
     assert block.index(f"<<<MEMORIA {FIXED_NONCE}") < instruction < block.index(closing)
 
 
-def test_forged_marker_in_a_note(cli, vault, recorder):
+def test_forged_marker_in_a_note(cli, vault, recorder, monkeypatch):
+    # The note knows the nonce (as if it had leaked): only the neutralisation keeps it from
+    # closing the block. With a random nonce this test would pass without it.
+    monkeypatch.setattr("harness.memory.context.new_nonce", lambda: FIXED_NONCE)
     write_note(vault, "Decisiones/alpha-falsa.md", FORGED, project_slug="demo-alpha")
     session_id = cli("session", "create", "S", "--project", "demo-alpha")[1].strip()
     code, _, err = cli("ask", session_id, "pregunta", "--project", "demo-alpha",

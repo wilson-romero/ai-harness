@@ -1,12 +1,14 @@
 """SEC-04: reading never leaves the vault's real root, and excluded entries are not read (D4)."""
 
 import os
+import sys
+from pathlib import Path
 
 import pytest
 
 from harness.memory.config import load_memory_settings
 from harness.memory.paths import SKIP_HARD_LINK, SKIP_LINK, walk_vault
-from tests.conftest import make_symlink, write_note
+from tests.conftest import make_symlink, query, write_note
 
 OUTSIDE_CANARY = "CANARIO-FUERA-8842"
 
@@ -32,14 +34,68 @@ def test_symlink_to_outside_file_ignored(cli, vault, outside):
     assert f"{SKIP_LINK}: 1" in err
 
 
-def test_symlinked_directory_to_outside_ignored(cli, vault, outside):
-    make_symlink(vault / "Lecciones" / "externas", outside)
-    code, out, err = cli("memory", "search", OUTSIDE_CANARY, **_env(vault))
+# Every file or directory the process opens or lists while a command runs, through the
+# interpreter's audit events: an oracle that does not depend on how the harness reads.
+_ACCESSED: list[str] | None = None
+
+
+def _audit(event, args):
+    if _ACCESSED is not None and event in ("open", "os.listdir", "os.scandir") and args:
+        target = args[0]
+        if isinstance(target, (str, bytes, os.PathLike)):
+            _ACCESSED.append(os.fsdecode(target))
+
+
+sys.addaudithook(_audit)
+
+
+@pytest.fixture
+def accessed():
+    global _ACCESSED
+    _ACCESSED = []
+    yield _ACCESSED
+    _ACCESSED = None
+
+
+def _under(paths, folder):
+    folders = {str(folder), str(Path(folder).resolve())}
+    return [p for p in paths if any(p == f or p.startswith(f + os.sep) for f in folders)]
+
+
+def test_symlinked_directory_to_outside_ignored(cli, vault, outside, data_dir, recorder, accessed):
+    # A curated folder linked to the outside, holding a note that declares the project and
+    # has no frontmatter problem: without the confinement every command would use it.
+    write_note(outside, "decision-de-fuera.md", f"orquestador {OUTSIDE_CANARY}",
+               project_slug="demo-alpha")
+    make_symlink(vault / "Decisiones" / "externas", outside)
+    env = _env(vault)
+    accessed.clear()  # what the test itself wrote does not count
+
+    code, out, err = cli("memory", "search", OUTSIDE_CANARY, **env)
     assert code == 0 and out.strip() == "No results."
     assert f"{SKIP_LINK}: 1" in err
     walked = walk_vault(vault.resolve())
-    assert all(not f.relative.startswith("Lecciones/externas") for f in walked.files)
-    assert ("Lecciones/externas", SKIP_LINK) in walked.skipped
+    assert all(not f.relative.startswith("Decisiones/externas") for f in walked.files)
+    assert ("Decisiones/externas", SKIP_LINK) in walked.skipped
+
+    code, out, err = cli("memory", "context", "demo-alpha", **env)
+    assert code == 0 and OUTSIDE_CANARY not in out and "Decisiones/externas" not in out
+
+    code, out, _ = cli("memory", "maintain", "--dry-run", **env)
+    assert code == 0 and OUTSIDE_CANARY not in out
+    assert [line.strip() for line in out.splitlines() if "externas" in line] == [
+        "Decisiones/externas (link)"
+    ]
+
+    session_id = cli("session", "create", "S", "--project", "demo-alpha")[1].strip()
+    code, _, err = cli("ask", session_id, "pregunta", "--project", "demo-alpha", **env)
+    assert code == 0, err
+    (sent,) = recorder.prompts
+    assert OUTSIDE_CANARY not in sent
+    stored = [row[0] for row in query(data_dir, "SELECT note_path FROM request_context")]
+    assert not [p for p in stored if "externas" in p]
+    # And nothing under the linked folder was even opened, by any of the four commands.
+    assert _under(accessed, outside) == []
 
 
 def test_symlink_inside_the_vault_is_not_followed_either(vault):
@@ -122,11 +178,29 @@ def test_project_folder_that_is_a_link_does_not_count(cli, vault, tmp_path):
     assert code != 0 and "does not exist" in err
 
 
-def test_traversal_in_project_rejected_by_the_cli(cli, vault, data_dir):
+def test_traversal_in_project_rejected_by_the_cli(cli, vault, data_dir, tmp_path, accessed):
+    # What `projects/../../etc` would reach from this vault, with a project inside it.
+    target = Path(os.path.normpath(vault / "projects" / ".." / ".." / "etc"))
+    assert target == tmp_path / "etc"
+    write_note(target, "_project.md", "CANARIO-TRAVERSAL-5150")
+    write_note(target, "sessions/2026-11-21-121500.md", "CANARIO-TRAVERSAL-5150")
+    accessed.clear()  # what the test itself wrote does not count
+
     code, out, err = cli("memory", "context", "../../etc", HARNESS_VAULT_ROOT=str(vault))
     assert code != 0 and out == ""
     assert "invalid project identifier" in err
+    assert "CANARIO-TRAVERSAL" not in out + err
     assert not (data_dir / "harness.sqlite3").exists()  # refused before anything was opened
+    # Not one file or directory of the vault or of what lies beyond it was opened or listed.
+    assert _under(accessed, tmp_path) == []
+
+    session_id = cli("session", "create", "S", "--project", "demo-alpha")[1].strip()
+    accessed.clear()
+    code, out, err = cli("ask", session_id, "pregunta", "--project", "../../etc",
+                         HARNESS_VAULT_ROOT=str(vault))
+    assert code != 0 and "invalid project identifier" in err
+    assert "CANARIO-TRAVERSAL" not in out + err
+    assert _under(accessed, vault) == [] and _under(accessed, target) == []
 
 
 @pytest.mark.parametrize("raw", ["..\\otro", "C:\\vault", "\\\\servidor\\recurso", "CON"])

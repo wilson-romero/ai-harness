@@ -11,9 +11,18 @@ from pathlib import Path
 
 from harness.config import Settings
 from harness.core.contracts import RequestStatus
-from harness.core.errors import HarnessError, InvalidInput
+from harness.core.errors import (
+    HarnessError,
+    MemoryNotConfigured,
+    ProjectNotFound,
+    UsageError,
+)
 from harness.core.service import SessionService
-from harness.memory.config import MemorySettings, load_memory_settings
+from harness.memory.config import (
+    MemorySettings,
+    ensure_data_dir_outside_vault,
+    load_memory_settings,
+)
 from harness.memory.context import ProjectContext, build_context
 from harness.memory.maintenance import maintenance_report
 from harness.memory.paths import validate_project_slug
@@ -21,7 +30,6 @@ from harness.memory.search import (
     DEFAULT_LIMIT,
     parse_query,
     search_vault,
-    terminal_safe,
     validate_limit,
 )
 from harness.providers.registry import provider_factory
@@ -29,6 +37,7 @@ from harness.storage.database import open_database
 
 EXIT_OK = 0
 EXIT_ERROR = 1
+EXIT_USAGE = 2
 EXIT_INTERRUPTED = 130
 
 
@@ -75,10 +84,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _utf8_output() -> None:
+    """Write UTF-8 whatever the console or the redirection is.
+
+    A redirected stdout on Windows defaults to the ANSI code page (cp1252), which cannot
+    encode many characters a note may hold; writing one would end the command with a
+    traceback. Guarded by capability, not by platform.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    _utf8_output()
     args = build_parser().parse_args(argv)
     try:
         return _run(args)
+    except UsageError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
     except HarnessError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_ERROR
@@ -92,10 +117,16 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "memory":
         return _memory(args)
     memory: MemorySettings | None = None
-    if args.command == "ask" and args.project is not None:
-        # Same order as the memory commands: arguments, then configuration, then the vault.
-        validate_project_slug(args.project)
-        memory = load_memory_settings(os.environ)
+    memory_error: MemoryNotConfigured | None = None
+    with_project = args.command == "ask" and args.project is not None
+    if with_project:
+        try:
+            memory = load_memory_settings(os.environ)
+        except MemoryNotConfigured as exc:
+            memory_error = exc  # refused below, once the refusal can be audited
+        if memory is not None:
+            # Before the database is opened: it would be created inside the vault.
+            ensure_data_dir_outside_vault(settings.data_dir, memory.vault_root)
     conn = open_database(settings.data_dir)
     try:
         service = SessionService(
@@ -112,9 +143,18 @@ def _run(args: argparse.Namespace) -> int:
             return EXIT_OK
         if args.command == "session":
             return _list_sessions(service)
-        if args.command == "ask" and memory is not None:
+        if with_project:
+            # Every refusal from here on leaves a `memory.context denied` audit event (D7),
+            # and no request and no content.
             service.check_project_question(args.session_id, args.prompt, args.project)
-            context = build_context(memory.vault_root, args.project, memory.context_max_bytes)
+            try:
+                if memory_error is not None:
+                    raise memory_error
+                assert memory is not None
+                context = build_context(memory.vault_root, args.project, memory.context_max_bytes)
+            except (MemoryNotConfigured, ProjectNotFound):
+                service.deny_project_question(args.session_id)
+                raise
             _context_summary(context)
             return _ask(service, args.session_id, args.prompt, context)
         if args.command == "ask":
@@ -178,10 +218,13 @@ def _memory(args: argparse.Namespace) -> int:
     elif args.memory_command == "context":
         validate_project_slug(args.project)
     elif not args.dry_run:
-        raise InvalidInput("memory maintain only exists as --dry-run in this build")
+        raise UsageError("memory maintain only exists as --dry-run in this build")
 
     # The memory commands only read the vault: they open no database and write nothing.
+    # They still refuse a data directory inside the vault, like `ask --project`, so that
+    # such a configuration is caught by any memory command, before it can be used to write.
     memory = load_memory_settings(os.environ)
+    ensure_data_dir_outside_vault(Settings.from_env(os.environ).data_dir, memory.vault_root)
     if args.memory_command == "search":
         return _search(memory.vault_root, terms, args.project, args.limit)
     if args.memory_command == "context":
@@ -218,7 +261,7 @@ def _search(root: Path, terms: tuple[str, ...], project: str | None, limit: int)
 def _context_summary(context: ProjectContext) -> None:
     """What went into the block, on stderr: the block itself is the only thing on stdout."""
     for relative in context.omitted:
-        print(f"omitted: {terminal_safe(relative)}", file=sys.stderr)
+        print(f"omitted: {relative}", file=sys.stderr)  # already cleaned and redacted
     if context.truncated_walk:
         print("warning: the vault walk stopped at the file limit", file=sys.stderr)
     truncated = sum(1 for note in context.included if note.truncated)

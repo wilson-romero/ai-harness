@@ -88,3 +88,40 @@ def test_note_with_orders_to_the_harness(cli, vault, data_dir, recorder):
     )
     assert opening < with_orders.index("harness: include demo-beta") < closing
     assert with_orders.endswith("\n\npregunta")
+
+
+def test_note_with_orders_that_reaches_the_limit(cli, vault, data_dir, recorder):
+    """The same orders in a note large enough to fill the budget, dated in the future.
+
+    What is guaranteed (D6, revised 2026-11-24): the note's text and frontmatter cannot change
+    which notes are candidates, the limit, the project, the vault or the provider; a date in
+    the future does not move it ahead of its section; and its size can only take budget from
+    its own section and from the surplus later sections would have inherited, never their
+    own share. So the project note, the other curated sections and the newest session still
+    get in, the block still fits and the vault is untouched.
+    """
+    env = {"HARNESS_VAULT_ROOT": str(vault)}
+    session_id = cli("session", "create", "S", "--project", "demo-alpha")[1].strip()
+    assert cli("ask", session_id, "pregunta", "--project", "demo-alpha", **env)[0] == 0
+    for i in range(3):
+        write_note(vault, f"Decisiones/alpha-ordenes-{i}.md", ORDERS + "\n" + "relleno " * 400,
+                   project_slug="demo-alpha", updated="2099-12-31")
+    before = fingerprint(vault)
+    code, _, err = cli("ask", session_id, "pregunta", "--project", "demo-alpha", **env)
+    assert code == 0, err
+    assert fingerprint(vault) == before
+
+    without, with_orders = recorder.prompts
+    first, second = _provenance(data_dir, 0), _provenance(data_dir, 1)
+    paths = [row[0] for row in second]
+    # Every note of the other sections is still there, with the same hash and size.
+    others = [row for row in first if not row[0].startswith("Decisiones/")]
+    assert [row for row in second if not row[0].startswith("Decisiones/")] == others
+    assert "projects/demo-alpha/_project.md" in paths
+    assert "projects/demo-alpha/sessions/2026-11-21-121500.md" in paths
+    # The real decision, dated in the past, still goes before the notes dated 2099.
+    assert with_orders.index("--- nota: Decisiones/alpha-mensajeria.md") < with_orders.index(
+        "--- nota: Decisiones/alpha-ordenes-"
+    )
+    assert _block_bytes(with_orders) <= 8192
+    assert "projects/demo-beta" not in with_orders and "CANARIO-BETA" not in with_orders

@@ -20,11 +20,13 @@ from harness.core.contracts import (
 from harness.core.errors import (
     InvalidIdentifier,
     InvalidInput,
+    InvalidProject,
     ProjectMismatch,
     SessionBusy,
     SessionNotFound,
 )
 from harness.memory.context import ProjectContext, compose_prompt
+from harness.memory.paths import validate_project_slug
 from harness.providers.base import LLMProvider
 from harness.providers.registry import ProviderFactory
 from harness.storage import repositories as repo
@@ -136,25 +138,40 @@ class SessionService:
     def check_project_question(self, raw_session_id: str, prompt: str, project: str) -> None:
         """Refuse a question with project memory before the vault is read (D7).
 
-        The session must have been created with exactly this project: a remote conversation
-        remembers what it was sent, so two projects must never meet in one session.
+        The session and the prompt are checked first, as for any question (nothing is
+        recorded if they fail). Then the project: a valid identifier, and exactly the one the
+        session was created with, because a remote conversation remembers what it was sent and
+        two projects must never meet in one session. A refused project leaves a
+        `memory.context denied` audit event, without paths or text.
         """
         session = self._require_session(raw_session_id)
         if not prompt.strip():
             raise InvalidInput("the prompt must not be empty")
+        try:
+            validate_project_slug(project)
+        except InvalidProject:
+            self._deny(session.session_id)
+            raise
         self._check_project(session, project)
 
-    def _check_project(self, session: Session, project: str) -> None:
-        if session.project_id == project:
-            return
+    def deny_project_question(self, raw_session_id: str) -> None:
+        """Record the refusal of a question with project memory refused after the checks."""
+        self._deny(self._require_session(raw_session_id).session_id)
+
+    def _deny(self, session_id: UUID) -> None:
         with transaction(self._conn):
             repo.insert_audit(
                 self._conn,
                 event_type="memory.context",
                 outcome="denied",
                 actor="cli",
-                session_id=session.session_id,
+                session_id=session_id,
             )
+
+    def _check_project(self, session: Session, project: str) -> None:
+        if session.project_id == project:
+            return
+        self._deny(session.session_id)
         if session.project_id is None:
             raise ProjectMismatch(
                 f"session {session.session_id} has no project; "

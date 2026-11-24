@@ -21,6 +21,13 @@ def _session(cli, project="demo-alpha"):
     return cli(*args)[1].strip()
 
 
+def _denied(data_dir):
+    """The memory audit events, and that no request or message was recorded."""
+    assert query(data_dir, "SELECT count(*) FROM requests") == [(0,)]
+    assert query(data_dir, "SELECT count(*) FROM messages") == [(0,)]
+    return query(data_dir, "SELECT outcome FROM audit_events WHERE event_type = 'memory.context'")
+
+
 def _text_values(data_dir):
     """Every text value of every column of every table."""
     values = []
@@ -68,7 +75,7 @@ def test_session_without_project(cli, env, data_dir, recorder):
     code, out, err = cli("ask", session_id, "pregunta", "--project", "demo-alpha", **env)
     assert code == 1 and out == ""
     assert "has no project" in err
-    assert query(data_dir, "SELECT count(*) FROM requests") == [(0,)]
+    assert _denied(data_dir) == [("denied",)]
     assert recorder.prompts == []
 
 
@@ -76,14 +83,31 @@ def test_vault_not_configured_registers_nothing(cli, data_dir):
     session_id = _session(cli)
     code, _, err = cli("ask", session_id, "pregunta", "--project", "demo-alpha")
     assert code == 1 and "HARNESS_VAULT_ROOT is not set" in err
-    assert query(data_dir, "SELECT count(*) FROM requests") == [(0,)]
+    assert _denied(data_dir) == [("denied",)]  # no request, no content: only the event
 
 
 def test_invalid_project_registers_nothing(cli, env, data_dir):
     session_id = _session(cli)
     code, _, err = cli("ask", session_id, "pregunta", "--project", "../../etc", **env)
     assert code == 1 and "invalid project identifier" in err
-    assert query(data_dir, "SELECT count(*) FROM requests") == [(0,)]
+    assert _denied(data_dir) == [("denied",)]
+
+
+def test_missing_project_is_denied(cli, data_dir, vault):
+    (vault / "projects" / "demo-gamma").mkdir()
+    session_id = _session(cli, project="demo-gamma")
+    (vault / "projects" / "demo-gamma").rmdir()
+    code, _, err = cli("ask", session_id, "pregunta", "--project", "demo-gamma",
+                       HARNESS_VAULT_ROOT=str(vault))
+    assert code == 1 and "does not exist" in err
+    assert _denied(data_dir) == [("denied",)]
+
+
+def test_refusals_before_the_project_record_nothing(cli, env, data_dir):
+    # A missing session or an empty prompt is refused as for any question: no memory event.
+    session_id = _session(cli)
+    assert cli("ask", session_id, "  ", "--project", "demo-alpha", **env)[0] == 1
+    assert _denied(data_dir) == []
 
 
 def test_canary_of_a_note_stays_out_of_sqlite(cli, env, vault, data_dir):

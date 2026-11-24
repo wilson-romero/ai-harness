@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -41,6 +42,7 @@ SKIP_NOT_MARKDOWN = "not-markdown"
 SKIP_TOO_LARGE = "too-large"
 SKIP_OUTSIDE_ROOT = "outside-root"
 SKIP_UNREADABLE = "unreadable"
+SKIP_CHANGED = "changed"  # replaced between the walk and the read
 SKIP_REASONS = (
     SKIP_HIDDEN,
     SKIP_ARCHIVE,
@@ -51,6 +53,7 @@ SKIP_REASONS = (
     SKIP_TOO_LARGE,
     SKIP_OUTSIDE_ROOT,
     SKIP_UNREADABLE,
+    SKIP_CHANGED,
 )
 
 
@@ -76,7 +79,14 @@ def _is_valid_slug(raw: str) -> bool:
 
 
 def is_within(path: PurePath, root: PurePath) -> bool:
-    """Containment with the path flavour's own rules (case-insensitive for Windows paths)."""
+    """Containment with the path flavour's own rules (case-insensitive for Windows paths).
+
+    Pure paths keep `..` (`C:\\Vault\\..\\x` is "relative to" `C:\\Vault` for pathlib), so a
+    path with a `..` part is never inside: callers pass resolved paths, and an unresolved one
+    is refused rather than trusted.
+    """
+    if ".." in path.parts or ".." in root.parts:
+        return False
     return path.is_relative_to(root)
 
 
@@ -102,6 +112,58 @@ class VaultFile:
     path: Path  # absolute path inside the real root
     relative: str  # POSIX-style path relative to the root
     size: int
+    device: int  # st_dev and st_ino of the lstat taken during the walk: the file's identity
+    inode: int
+
+
+class SkippedRead(Exception):
+    """A walked file that was not read after all; `reason` is one of SKIP_REASONS."""
+
+    def __init__(self, relative: str, reason: str) -> None:
+        super().__init__(f"{relative}: {reason}")
+        self.relative = relative
+        self.reason = reason
+
+
+def read_vault_file(file: VaultFile) -> bytes:
+    """The bytes of a walked file, only if it is still the same regular file (SEC-04).
+
+    The walk saw a regular file with this identity; between that and this read another
+    process may have put a link, a directory, a pipe or another file in its place, or the
+    file may have grown. Opening follows links, so what was opened is checked on the open
+    descriptor (`fstat`), which cannot change any more: same device and inode, a regular
+    file, and no more than FILE_MAX_BYTES read. Otherwise the file counts as skipped.
+    """
+    # O_NONBLOCK keeps a pipe swapped in from blocking the open; O_BINARY stops newline
+    # translation where it exists. Both are read-only flags, looked up by capability.
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(file.path, flags)
+    except OSError:
+        raise SkippedRead(file.relative, SKIP_UNREADABLE) from None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != (
+            file.device,
+            file.inode,
+        ):
+            raise SkippedRead(file.relative, SKIP_CHANGED)
+        chunks: list[bytes] = []
+        remaining = FILE_MAX_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except OSError:
+        raise SkippedRead(file.relative, SKIP_UNREADABLE) from None
+    finally:
+        os.close(fd)
+    raw = b"".join(chunks)
+    if len(raw) > FILE_MAX_BYTES:
+        raise SkippedRead(file.relative, SKIP_TOO_LARGE)
+    return raw
 
 
 @dataclass(frozen=True)
@@ -130,7 +192,14 @@ def walk_vault(root: Path, max_files: int = WALK_MAX_FILES) -> WalkResult:
     def rel(path: Path) -> str:
         return path.relative_to(root).as_posix()
 
-    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+    def unreadable(error: OSError) -> None:
+        # A directory that cannot be listed is reported, not silently left out.
+        where = Path(error.filename) if error.filename else root
+        skipped.append((rel(where) if where != root else ".", SKIP_UNREADABLE))
+
+    for dirpath, dirnames, filenames in os.walk(
+        root, topdown=True, onerror=unreadable, followlinks=False
+    ):
         current = Path(dirpath)
         keep: list[str] = []
         for name in sorted(dirnames):
@@ -150,7 +219,12 @@ def walk_vault(root: Path, max_files: int = WALK_MAX_FILES) -> WalkResult:
             if len(files) >= max_files:
                 truncated = True
                 break
-            files.append(VaultFile(entry, rel(entry), entry.lstat().st_size))
+            try:
+                info = entry.lstat()
+            except OSError:
+                skipped.append((rel(entry), SKIP_UNREADABLE))
+                continue
+            files.append(VaultFile(entry, rel(entry), info.st_size, info.st_dev, info.st_ino))
         if truncated:
             break
     counts = Counter(reason for _, reason in skipped)
