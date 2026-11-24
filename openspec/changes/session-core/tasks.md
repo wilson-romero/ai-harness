@@ -59,15 +59,15 @@ Cada `[x]` lleva su recibo debajo (comando y salida relevante, o SHA). Los orác
 
 - [x] 6.1 Escribir `README.md`: instalación con uv, variables de `.env.example` que este corte usa, los cuatro comandos de la CLI, qué significa `uncertain` y la advertencia de disco local para `HARNESS_DATA_DIR`. Hecho: los comandos del README, copiados tal cual, funcionan sobre un directorio de datos vacío.
   - Recibo (2026-11-24, macOS arm64, Python 3.14.8): Comandos del README ejecutados sobre un directorio vacío: crean sesión, responden y muestran historial.
-- [x] 6.2 Añadir `scripts/demo-session-core.sh` que reproduce la demo de 7.2 sobre un `HARNESS_DATA_DIR` temporal. Hecho: termina con 0 y deja el log en stdout.
-  - Recibo (2026-11-24, macOS arm64, Python 3.14.8): `scripts/demo-session-core.sh` → `demo: PASS` en macOS.
+- [x] 6.2 Añadir `scripts/demo_session_core.py` que reproduce la demo de 7.2 sobre un `HARNESS_DATA_DIR` temporal. Hecho: termina con 0 y deja el log en stdout.
+  - Recibo (2026-11-24, macOS arm64, Python 3.14.8): `scripts/demo_session_core.py` → `demo: PASS` en macOS.
 
 ## 7. Integración y demo
 
 - [x] 7.1 `scripts/verify.sh` sobre el árbol limpio. Oráculo: línea `verify: PASS on <SHA>`. Control negativo: romper un escenario a propósito en una copia de trabajo y confirmar que `verify.sh` termina distinto de 0.
   - Recibo (2026-11-24, macOS arm64, Python 3.14.8): ver el SHA de `verify: PASS` en la descripción del PR #2 (se vuelve a ejecutar tras cada commit). Control negativo en un worktree desechable con `uncertain` cambiado por `timeout`: 3 FAILED y sin línea `verify: PASS`.
-- [ ] 7.2 Demo del Corte 1. Wilson reproduce con el SHA del PR: (a) crear tres sesiones; (b) una pregunta en cada una; (c) cerrar la terminal, abrir otra y ver `history` de las tres sin mezcla; (d) `ask` con `HARNESS_MOCK_DELAY_MS=60000`, matar el proceso, y ver la solicitud y la sesión en `uncertain`; (e) `history` con un identificador mal formado. Evidencia: log de `scripts/demo-session-core.sh`. Estado: PASS, FAIL, NOT RUN o BLOCKED. Una ejecución en Windows es una confirmación opcional.
-  - macOS: **PASS** ejecutado por el agente (`scripts/demo-session-core.sh` → `demo: PASS`, 2026-11-24); falta que Wilson lo reproduzca.
+- [ ] 7.2 Demo del Corte 1. Wilson reproduce con el SHA del PR: (a) crear tres sesiones; (b) una pregunta en cada una; (c) cerrar la terminal, abrir otra y ver `history` de las tres sin mezcla; (d) `ask` con `HARNESS_MOCK_DELAY_MS=60000`, matar el proceso, y ver la solicitud y la sesión en `uncertain`; (e) `history` con un identificador mal formado. Evidencia: log de `scripts/demo_session_core.py`. Estado: PASS, FAIL, NOT RUN o BLOCKED. Una ejecución en Windows es una confirmación opcional.
+  - macOS: **PASS** ejecutado por el agente (`scripts/demo_session_core.py` → `demo: PASS`, 2026-11-24); falta que Wilson lo reproduzca.
 
 ## Workflow follow-up
 
