@@ -597,6 +597,25 @@ async def step_login(probe: Probe, result: dict) -> None:
         say("Edge is open with the dedicated profile. Sign in by hand (password, MFA).")
         say("When you see Copilot ready to chat, come back here and press Enter.")
         result["confirmed_by_person"] = await wait_for_person(context)
+        if result["confirmed_by_person"]:
+            await describe_ready_page(context, probe, result)
+
+
+async def describe_ready_page(context: BrowserContext, probe: Probe, result: dict) -> None:
+    """Where the person saw Copilot ready: same host as the configured URL or not, how deep
+    the path is and whether the page still offers to sign in. The host is kept only in the
+    data directory; the summary says yes or no."""
+    pages = [p for p in context.pages if not p.is_closed()]
+    if not pages:
+        return
+    page = pages[-1]
+    try:
+        result["ready_host"] = host_of(page.url)
+        result["ready_on_configured_host"] = result["ready_host"] == probe.copilot_host
+        result["ready_path_segments"] = len([s for s in _segments(page.url) if s])
+        result["ready_signed_out_hints"] = await js(page, "signedOutHints")
+    except PlaywrightError:
+        pass
 
 
 async def step_discover(probe: Probe, result: dict) -> None:
@@ -977,6 +996,12 @@ def print_summary(step: str, result: dict, ui_status: str | None) -> None:
             f"launch_ms: {result.get('launch_ms')}  first_load_ms: {result.get('first_load_ms')}  "
             f"confirmed_by_person: {result.get('confirmed_by_person')}"
         )
+        if "ready_on_configured_host" in result:
+            lines.append(
+                f"ready page: on configured host {yes_no(result['ready_on_configured_host'])}  "
+                f"path segments {result.get('ready_path_segments')}  "
+                f"signed-out hints {result.get('ready_signed_out_hints')}"
+            )
     if result.get("discovery"):
         lines += discovery_lines(result["discovery"])
     if result.get("missing_locators"):

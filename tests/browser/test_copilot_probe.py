@@ -93,7 +93,8 @@ class Run:
     real_status_after: str
 
     def result(self, step: str) -> dict:
-        files = sorted((self.data / "copilot").glob(f"probe-{step}-*.json"))
+        # the stamp starts with a digit: "login" must not pick probe-login-state-*
+        files = sorted((self.data / "copilot").glob(f"probe-{step}-[0-9]*.json"))
         return json.loads(files[-1].read_text(encoding="utf-8"))
 
 
@@ -135,6 +136,11 @@ def full_run(edge_ready, tmp_path_factory) -> Run:
 def test_full_probe_run_succeeds(full_run):
     assert full_run.codes == {"login": 0, "measure": 0, "login-state": 0}, full_run.stdout
     assert "copilot probe summary" in full_run.stdout
+
+
+def test_login_describes_where_copilot_was_ready(full_run):
+    assert "ready page: on configured host yes  path segments 1  signed-out hints 0" in full_run.stdout
+    assert full_run.result("login")["ready_host"] == "127.0.0.1"  # data directory only
 
 
 def test_prompts_sent_belong_to_the_fixed_list(full_run):

@@ -42,6 +42,8 @@ uv run python scripts/copilot_probe.py login
 
 (Igual en macOS.) Se abre Edge con el perfil dedicado (`HARNESS_DATA_DIR/edge-profile`). Inicia sesión: cuenta, contraseña, MFA. **Si pregunta «¿Mantener la sesión iniciada?», responde Sí**: si no, la sesión se pierde al cerrar Edge y el paso 2 verá la página de invitado. Cuando veas Copilot listo para escribir, vuelve a la terminal y pulsa **Enter**.
 
+El resumen trae una línea `ready page:` sobre la página donde pulsaste Enter. Si dice `on configured host no`, Copilot quedó listo en otra dirección: pon en `HARNESS_COPILOT_URL` esa dirección (esquema, host y ruta, **sin** identificadores ni lo que va tras `?`) y repite este paso. Si `signed-out hints` no es 0, esa página aún ofrece iniciar sesión.
+
 Si el resumen dice `P1 controllable: no`, Edge no se deja controlar en tu equipo: para ahí y pégame el resumen. `not measured` significa que lo interrumpiste antes de medirlo: repite el paso.
 
 ## 2. Medir
