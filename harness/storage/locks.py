@@ -1,4 +1,4 @@
-"""Per-session lock backed by SQLite's own file locking.
+"""Per-session and named locks backed by SQLite's own file locking.
 
 Holding an exclusive transaction on a small per-session database is the lock. SQLite takes
 care of the operating system's locking primitive, so this is the same code on every platform,
@@ -8,16 +8,19 @@ That makes "the lock is free" a reliable sign that nobody is still working on th
 
 from __future__ import annotations
 
+import asyncio
+import re
 import sqlite3
+import time
 from pathlib import Path
 from uuid import UUID
 
+LOCK_NAME = re.compile(r"[a-z][a-z0-9-]{0,31}")
 
-class SessionLock:
-    """Exclusive, non-blocking lock for one session."""
 
-    def __init__(self, data_dir: Path, session_id: UUID) -> None:
-        self._path = data_dir / "locks" / f"{session_id}.lock"
+class _ExclusiveLock:
+    def __init__(self, path: Path) -> None:
+        self._path = path
         self._conn: sqlite3.Connection | None = None
 
     def acquire(self) -> bool:
@@ -42,3 +45,40 @@ class SessionLock:
         finally:
             self._conn.close()
             self._conn = None
+
+
+class SessionLock(_ExclusiveLock):
+    """Exclusive, non-blocking lock for one session."""
+
+    def __init__(self, data_dir: Path, session_id: UUID) -> None:
+        super().__init__(data_dir / "locks" / f"{session_id}.lock")
+
+
+class NamedLock(_ExclusiveLock):
+    """Exclusive lock for a shared resource such as the browser, same mechanism as sessions.
+
+    A name is lowercase letters, digits and hyphens, so it can never collide with a session id.
+    """
+
+    def __init__(self, data_dir: Path, name: str) -> None:
+        if not LOCK_NAME.fullmatch(name) or _looks_like_uuid(name):
+            raise ValueError(f"invalid lock name {name!r}")
+        super().__init__(data_dir / "locks" / f"{name}.lock")
+
+    async def acquire_within(self, timeout_s: float, poll_s: float = 0.25) -> bool:
+        """Poll until the lock is free or `timeout_s` runs out. False when it ran out."""
+        deadline = time.monotonic() + timeout_s
+        while not self.acquire():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(poll_s, remaining))
+        return True
+
+
+def _looks_like_uuid(name: str) -> bool:
+    try:
+        UUID(name)
+    except ValueError:
+        return False
+    return True

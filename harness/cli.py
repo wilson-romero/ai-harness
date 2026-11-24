@@ -37,6 +37,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     history = commands.add_parser("history", help="show the history of a session")
     history.add_argument("session_id")
+
+    copilot = commands.add_parser("copilot", help="Copilot Web: manual login")
+    copilot_commands = copilot.add_subparsers(dest="copilot_command", required=True)
+    copilot_commands.add_parser("login", help="open the dedicated Edge profile to sign in by hand")
     return parser
 
 
@@ -54,6 +58,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _run(args: argparse.Namespace) -> int:
     settings = Settings.from_env(os.environ)
+    if args.command == "copilot":
+        return _copilot_login(settings)
     conn = open_database(settings.data_dir)
     try:
         service = SessionService(
@@ -110,4 +116,14 @@ def _history(service: SessionService, session_id: str) -> int:
     for entry in entries:
         content = entry.content if entry.content is not None else "(content not stored)"
         print(f"[{entry.request_status}] {entry.role}: {content}")
+    return EXIT_OK
+
+
+def _copilot_login(settings: Settings) -> int:
+    from harness.browser.login import manual_login  # Playwright loads only for this command
+
+    print("Sign in to Copilot in the Edge window; it closes by itself when Copilot is ready.",
+          file=sys.stderr)
+    asyncio.run(manual_login(settings))
+    print("Copilot is ready in the dedicated profile.")
     return EXIT_OK
