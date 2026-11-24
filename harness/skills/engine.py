@@ -563,6 +563,20 @@ class SkillEngine:
                     self._finish_run_locked(state.run_id, state.session, "cancelled",
                                             "approval_rejected")
                 return RunOutcome(state.run_id, "cancelled", message="the approval was rejected")
+            if decided >= live["expires_at"]:
+                # The prompt blocks until the person answers; an answer after the expiry is
+                # never recorded as `granted` (review 8.8). A new approval is asked on resume.
+                with transaction(self._conn):
+                    self._set_approval(live["approval_id"], "expired", decided_at=decided)
+                    self._audit("approval.expired", "expired", state.session, state.run_id,
+                                self._approval_detail(live))
+                    self._set_step(row, "awaiting_approval")
+                    self._set_run(state.run_id, "awaiting_approval")
+                return RunOutcome(
+                    state.run_id, "awaiting_approval",
+                    message=f"the approval of step {step.id!r} expired before the answer; "
+                    f"nothing was applied. Run `skill resume {state.run_id}` to be asked again",
+                )
             with transaction(self._conn):
                 self._set_approval(live["approval_id"], "granted", decided_at=decided,
                                    identity=identity)

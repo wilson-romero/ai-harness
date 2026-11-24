@@ -125,7 +125,12 @@ def render_for_terminal(proposal: Proposal, approval_hash: str, expires_at: str)
 
 
 def decide(terminal: Terminal, shown: str, approval_hash: str) -> Decision:
-    """Show the proposal and ask for the code, at most MAX_ATTEMPTS times."""
+    """Show the proposal and ask for the code, at most MAX_ATTEMPTS times.
+
+    The question blocks the session (its lock is held) until the person answers or closes the
+    input; there is no timer, because a bounded wait would need platform code or a thread that
+    outlives the command. The caller checks the expiry after the answer (review 8.8).
+    """
     terminal.show(shown)
     code = approval_hash[:CODE_LENGTH]
     question = f"Type the first {CODE_LENGTH} characters of the hash to approve, or n to reject: "

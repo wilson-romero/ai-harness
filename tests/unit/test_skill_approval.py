@@ -205,10 +205,13 @@ def test_granted_approval_expired_before_the_effect(conn, data_dir, tmp_path):
     terminal.on_ask = lambda: clock.advance(2)  # the person answers after the expiry
     outcome = _resume(engine, first.run_id)
     assert outcome.status == "awaiting_approval" and effect.written() == []
-    assert [a["status"] for a in _approval(conn)] == ["expired"]
+    assert "expired" in outcome.message
+    approval = _approval(conn)[0]
+    assert approval["status"] == "expired" and approval["identity"] is None
     events = [r[0] for r in conn.execute(
         "SELECT event_type FROM audit_events WHERE event_type LIKE 'approval.%' ORDER BY rowid")]
-    assert events[-3:] == ["approval.granted", "approval.denied", "approval.expired"]
+    # 8.8: an answer that arrives after the expiry is never recorded as `granted`.
+    assert events == ["approval.requested", "approval.expired"]
 
 
 # -- 5.4 single use, alteration and the closed list of effects ------------------------------------
