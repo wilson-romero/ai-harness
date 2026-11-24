@@ -9,7 +9,7 @@ Premisas medidas el 2026-11-24 en la Mac con `uv run python` (CPython 3.14.8):
 - `uuid.uuid7()` existe en la biblioteca estándar.
 - SQLite enlazado: 3.53.1.
 - Una clave foránea compuesta `(request_id, session_id)` rechaza un mensaje de otra sesión (`FOREIGN KEY constraint failed`) y acepta el de la propia, con `PRAGMA foreign_keys=ON`.
-- `fcntl` está disponible en macOS. `msvcrt.locking` en Windows **no está medido**: se mide en la tarea 5.4.
+- Dos conexiones SQLite sobre el mismo fichero: la segunda falla en `BEGIN EXCLUSIVE` con `timeout=0`, y lo obtiene cuando el proceso de la primera muere por `kill` (medido con `tests/unit/test_locks.py`).
 
 ## Goals / Non-Goals
 
@@ -81,16 +81,19 @@ Premisas medidas el 2026-11-24 en la Mac con `uv run python` (CPython 3.14.8):
   - Definir ya `create_session/recover/close`: su forma depende de cómo Copilot Web identifica una conversación, que se mide en la sonda del Corte 2.
 - **Impacto:** spec `llm-provider` (Resultado distinto según el punto de fallo). El Corte 2 amplía la interfaz y lo declara en su propio design.
 
-### D7 · Bloqueo por sesión con un fichero bloqueado por el sistema operativo
+### D7 · Bloqueo por sesión con una transacción exclusiva de SQLite
 
-- **Qué:** `ask` toma un bloqueo exclusivo, no bloqueante, sobre `<data>/locks/<session_id>.lock` (`fcntl.flock` en macOS/Linux, `msvcrt.locking` en Windows) y lo mantiene hasta registrar el resultado. Si no lo obtiene, rechaza la pregunta. La recuperación al arrancar intenta tomar el bloqueo de cada sesión con solicitudes `pending`/`running`: si lo obtiene, el proceso dueño ya no existe y las marca `uncertain`; si no, las deja.
-- **Por qué:** el sistema operativo libera el bloqueo cuando el proceso muere, también con `kill -9` o un corte de luz. Es la única señal de «sigue vivo» que no puede quedarse mintiendo. Esto define además el «bloqueo por sesión» que el plan maestro nombra sin concretar: protege de dos procesos de CLI en la misma sesión.
+**Revisada el 2026-11-24.** La primera versión usaba `fcntl.flock` en macOS/Linux y `msvcrt.locking` en Windows: queda **revertida**. Dejaba una rama de código que en la Mac no se ejecuta nunca, y Wilson fijó ese día la regla de que lo probado en una plataforma tiene que ser el mismo código que corre en la otra. Specs releídas tras el cambio: `request-recovery` describe la conducta (sesión ocupada, solicitud viva, huérfana) y no el mecanismo; no cambia ningún requisito ni escenario.
+
+- **Qué:** `ask` abre una base SQLite propia de la sesión, `<data>/locks/<session_id>.lock`, con `timeout=0` y ejecuta `BEGIN EXCLUSIVE`; mantiene la transacción hasta registrar el resultado. Si `BEGIN EXCLUSIVE` falla con «database is locked», rechaza la pregunta. La recuperación al arrancar intenta lo mismo en cada sesión con solicitudes `pending`/`running`: si obtiene el bloqueo, el proceso dueño ya no existe y las marca `uncertain`; si no, las deja.
+- **Por qué:** SQLite ya resuelve el bloqueo de ficheros en cada sistema operativo, así que el código del harness es idéntico en macOS y Windows y no hay rama sin probar. El sistema operativo libera el bloqueo cuando el proceso muere, también con `kill -9` o un corte de luz: es una señal de «sigue vivo» que no puede quedarse mintiendo. Esto define además el «bloqueo por sesión» que el plan maestro nombra sin concretar: protege de dos procesos de CLI en la misma sesión.
 - **Alternativas rechazadas:**
+  - `fcntl.flock` + `msvcrt.locking` (la versión revertida): dos implementaciones, y la de Windows solo se podía probar en Windows.
   - Guardar el PID en la solicitud y comprobar si existe: los PID se reutilizan y la comprobación es distinta en cada plataforma.
-  - Latido periódico en SQLite: exige un hilo o tarea de fondo y un umbral de caducidad que siempre es demasiado corto o demasiado largo.
+  - Latido periódico en la base principal: exige una tarea de fondo y un umbral de caducidad que siempre es demasiado corto o demasiado largo.
   - Marcar `uncertain` todo lo que esté en curso al arrancar: `session list` en otra terminal rompería una pregunta viva.
-  - Dependencia `filelock`: resuelve lo mismo que unas 30 líneas de biblioteca estándar.
-- **Impacto:** spec `request-recovery` completa; tareas 5.x. El Corte 2 reutiliza el mismo bloqueo para serializar el navegador por sesión.
+  - Dependencia `filelock`: por dentro también ramifica por plataforma, y añade un paquete para lo que la biblioteca estándar ya da.
+- **Impacto:** spec `request-recovery` completa; tareas 5.x. `tests/unit/test_portability.py` impide que vuelva a entrar código condicionado por plataforma. El Corte 2 reutiliza el mismo bloqueo para serializar el navegador por sesión.
 
 ### D8 · Estado de sesión derivado de su última solicitud
 
@@ -118,12 +121,12 @@ Premisas medidas el 2026-11-24 en la Mac con `uv run python` (CPython 3.14.8):
 
 ## Risks / Trade-offs
 
-- [`msvcrt.locking` se comporta distinto de `flock`: bloquea un rango de bytes y puede fallar con el fichero abierto en otro modo] → envoltorio de una sola función con test propio; la tarea 5.4 lo ejecuta en Windows antes de cerrar el corte. Si falla, se reabre D7.
+- [El harness no se ha ejecutado en Windows] → el producto no tiene código condicionado por plataforma (`test_portability`), así que lo que corre en Windows es lo mismo que pasa los tests en la Mac; las diferencias quedan dentro de SQLite y de CPython. Una ejecución en Windows es una confirmación opcional, no una puerta del corte.
 - [Un sistema de ficheros en red no garantiza los bloqueos] → `HARNESS_DATA_DIR` debe ser un disco local; se documenta en el README. No se va a arreglar.
 - [Una solicitud `uncertain` puede haber llegado al proveedor y haber sido respondida; el harness no lo sabrá] → es el significado del estado. La reconciliación con la conversación remota es trabajo del Corte 2.
 - [SQLite sin cifrar] → en este corte solo guarda contenido sintético (D5). Límite conocido, no se arregla aquí.
 - [Entre `on_sent` y el registro del estado `running` puede morir el proceso] → la solicitud se inserta como `pending` antes de llamar al proveedor, así que la recuperación la encuentra siempre; el peor caso es un `uncertain` de algo que no salió, nunca un envío sin rastro.
-- [`scripts/verify.sh` es bash] → en Windows se ejecuta desde Git Bash; si no hay, la demo de Windows usa los comandos `uv run` directos y lo deja anotado.
+- [`scripts/verify.sh` y la demo son bash] → son herramientas de desarrollo, no producto; en Windows se ejecutan desde Git Bash.
 
 ## Open Questions
 

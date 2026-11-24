@@ -46,14 +46,14 @@ Cada `[x]` lleva su recibo debajo (comando y salida relevante, o SHA). Los orác
 
 ## 5. Bloqueo y recuperación
 
-- [x] 5.1 Implementar el bloqueo de fichero por sesión para macOS/Linux y Windows (D7). Oráculo: test que toma el bloqueo en un subproceso y comprueba que un segundo intento falla y que tras matar el subproceso se obtiene.
-  - Recibo (2026-11-24, macOS arm64, Python 3.14.8): `tests/unit/test_locks.py`, 2 pasados en macOS (`fcntl.flock`). La rama de Windows queda sin ejecutar: ver 5.4.
+- [x] 5.1 Implementar el bloqueo por sesión con una transacción exclusiva de SQLite, sin código condicionado por plataforma (D7 revisada). Oráculo: test que toma el bloqueo en un subproceso y comprueba que un segundo intento falla y que tras matar el subproceso se obtiene.
+  - Recibo (2026-11-24, macOS arm64, Python 3.14.8): `tests/unit/test_locks.py`, 2 pasados con la versión SQLite. La primera versión (`fcntl`/`msvcrt`) quedó revertida.
 - [x] 5.2 Implementar la recuperación al arrancar. Oráculo: test que lanza `ask` en un subproceso con `HARNESS_MOCK_DELAY_MS` alto, lo mata con `kill`, ejecuta `session list` y comprueba `SELECT status FROM requests` = `uncertain` y sesión `uncertain`; el Mock registra cero llamadas durante la recuperación («La recuperación no reenvía»).
   - Recibo (2026-11-24, macOS arm64, Python 3.14.8): `test_killed_process_leaves_the_request_uncertain` (subproceso matado con `kill`) y `test_recovery_does_not_resend` (`provider.calls == 0`).
-- [x] 5.3 Tests de «Listar mientras otra pregunta sigue en curso», «Segunda pregunta en la misma sesión», «Preguntas en sesiones distintas», «Interrupción con Ctrl+C» (señal SIGINT al subproceso), «Repetir es una solicitud nueva» y «Aviso y vuelta a activa». Control negativo: desactivar la comprobación del bloqueo en la recuperación y confirmar que «Listar mientras otra pregunta sigue en curso» falla; anotar el recibo.
-  - Recibo (2026-11-24, macOS arm64, Python 3.14.8): Seis tests en `tests/integration/test_recovery.py`. Control negativo: con `recover()` ignorando el bloqueo, `test_live_request_is_not_touched_by_another_process` falla (1 failed, 8 passed); restaurado, pasa. El de Ctrl+C se omite en Windows con motivo visible.
-- [ ] 5.4 Ejecutar la suite completa en Windows (segunda plataforma) y medir `msvcrt.locking`. Oráculo: salida de `uv run pytest` en Windows con el recuento de pasados/fallados/omitidos y la versión de Python. Estado: PASS, FAIL, NOT RUN o BLOCKED. Si falla el bloqueo, reabrir D7 antes de seguir.
-  - Estado: **NOT RUN**. No hay Windows en esta sesión; lo ejecuta Wilson. `msvcrt.locking` sigue sin medir.
+- [x] 5.3 Tests de «Listar mientras otra pregunta sigue en curso», «Segunda pregunta en la misma sesión», «Preguntas en sesiones distintas», «Interrupción con Ctrl+C» (cancelación de la pregunta en curso, que es como llega Ctrl+C, más el código 130 de la CLI), «Repetir es una solicitud nueva» y «Aviso y vuelta a activa». Control negativo: desactivar la comprobación del bloqueo en la recuperación y confirmar que «Listar mientras otra pregunta sigue en curso» falla; anotar el recibo.
+  - Recibo (2026-11-24, macOS arm64, Python 3.14.8): siete tests en `tests/integration/test_recovery.py`, ninguno omitido en ninguna plataforma. Control negativo: con `recover()` ignorando el bloqueo, `test_live_request_is_not_touched_by_another_process` falla (1 failed, 8 passed); restaurado, pasa.
+- [x] 5.4 Demostrar que el producto no tiene código condicionado por plataforma, de modo que lo probado en la Mac es lo que corre en Windows. Oráculo: `tests/unit/test_portability.py` y `grep -rnE "sys\.platform|os\.name|msvcrt|fcntl" harness main.py` sin resultados. Control negativo: el test debe fallar contra la versión `fcntl`/`msvcrt` del bloqueo.
+  - Recibo (2026-11-24): contra el bloqueo antiguo, `test_product_code_has_no_platform_branches` falló citando `harness/storage/locks.py:14: if sys.platform == "win32":`; con el bloqueo SQLite pasa y el grep no devuelve nada. Sustituye a la tarea original «ejecutar la suite en Windows» por decisión de Wilson del 2026-11-24: Windows no es puerta del corte.
 
 ## 6. Documentación
 
@@ -65,9 +65,9 @@ Cada `[x]` lleva su recibo debajo (comando y salida relevante, o SHA). Los orác
 ## 7. Integración y demo
 
 - [x] 7.1 `scripts/verify.sh` sobre el árbol limpio. Oráculo: línea `verify: PASS on <SHA>`. Control negativo: romper un escenario a propósito en una copia de trabajo y confirmar que `verify.sh` termina distinto de 0.
-  - Recibo (2026-11-24, macOS arm64, Python 3.14.8): `verify: PASS on 45c7df9f4bf1719106fc919d6009b81dc44df635` (43 pasados). Control negativo en un worktree desechable con `uncertain` cambiado por `timeout`: 3 FAILED y sin línea `verify: PASS`.
-- [ ] 7.2 Demo del Corte 1. Wilson reproduce, con el SHA de 7.1, en macOS y en Windows: (a) crear tres sesiones; (b) una pregunta en cada una; (c) cerrar la terminal, abrir otra y ver `history` de las tres sin mezcla; (d) `ask` con `HARNESS_MOCK_DELAY_MS=60000`, matar el proceso, y ver la solicitud y la sesión en `uncertain`; (e) `history` con un identificador mal formado. Evidencia: log de `scripts/demo-session-core.sh` en cada plataforma. Estado por plataforma: PASS, FAIL, NOT RUN o BLOCKED.
-  - macOS: **PASS** ejecutado por el agente (`scripts/demo-session-core.sh` → `demo: PASS`, 2026-11-24, sobre `45c7df9`); falta que Wilson lo reproduzca. Windows: **NOT RUN**.
+  - Recibo (2026-11-24, macOS arm64, Python 3.14.8): ver el SHA de `verify: PASS` en la descripción del PR #2 (se vuelve a ejecutar tras cada commit). Control negativo en un worktree desechable con `uncertain` cambiado por `timeout`: 3 FAILED y sin línea `verify: PASS`.
+- [ ] 7.2 Demo del Corte 1. Wilson reproduce con el SHA del PR: (a) crear tres sesiones; (b) una pregunta en cada una; (c) cerrar la terminal, abrir otra y ver `history` de las tres sin mezcla; (d) `ask` con `HARNESS_MOCK_DELAY_MS=60000`, matar el proceso, y ver la solicitud y la sesión en `uncertain`; (e) `history` con un identificador mal formado. Evidencia: log de `scripts/demo-session-core.sh`. Estado: PASS, FAIL, NOT RUN o BLOCKED. Una ejecución en Windows es una confirmación opcional.
+  - macOS: **PASS** ejecutado por el agente (`scripts/demo-session-core.sh` → `demo: PASS`, 2026-11-24); falta que Wilson lo reproduzca.
 
 ## Workflow follow-up
 

@@ -1,7 +1,7 @@
 """SEC-07 and SEC-08: interrupted requests become uncertain and are never resent."""
 
-import signal
-import sys
+import asyncio
+from uuid import uuid7
 
 import pytest
 
@@ -10,7 +10,6 @@ from harness.providers.mock import MockProvider
 from harness.storage import repositories as repo
 from harness.storage.database import transaction
 from tests.conftest import query, run_main, spawn_main, wait_for_running
-from uuid import uuid7
 
 SLOW = {"HARNESS_MOCK_DELAY_MS": "60000"}
 
@@ -53,26 +52,37 @@ def test_killed_process_leaves_the_request_uncertain(data_dir):
     assert history.stdout.strip() == "[uncertain] user: will be interrupted"
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="Ctrl+C cannot be delivered to a single child process on Windows; "
-    "checked by hand in the demo",
-)
-def test_ctrl_c_after_send_leaves_the_request_uncertain(data_dir):
-    session_id = _create(data_dir)
-    proc = spawn_main(data_dir, "ask", session_id, "interrupt me", **SLOW)
-    try:
-        request_id = wait_for_running(data_dir, session_id)
-        proc.send_signal(signal.SIGINT)
-        code = proc.wait(timeout=10)
-    finally:
-        proc.kill()
-    assert code == 130
-    # Already uncertain before any other command runs: no recovery was involved.
-    assert _status(data_dir, request_id) == "uncertain"
-    assert query(data_dir, "SELECT actor FROM audit_events WHERE outcome = 'uncertain'") == [
-        ("cli",)
-    ]
+async def test_interruption_after_send_leaves_the_request_uncertain(conn, make_service):
+    """Ctrl+C reaches the question as a cancellation; the state is recorded before it ends."""
+    service = make_service({"mock": MockProvider(delay_ms=60_000)})
+    session = service.create_session("S")
+    task = asyncio.create_task(service.ask(str(session.session_id), "interrupt me"))
+    while conn.execute("SELECT count(*) FROM requests WHERE status = 'running'").fetchone()[0] == 0:
+        await asyncio.sleep(0.01)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert conn.execute("SELECT status, error_code FROM requests").fetchone()[:] == (
+        "uncertain",
+        "interrupted",
+    )
+    assert repo.get_session(conn, session.session_id).status is SessionStatus.UNCERTAIN
+    # The lock was released on the way out: the session accepts a new question.
+    healthy = make_service()
+    assert (await healthy.ask(str(session.session_id), "again")).status is RequestStatus.COMPLETED
+
+
+def test_ctrl_c_exits_with_130_and_no_traceback(cli, monkeypatch):
+    session_id = cli("session", "create", "S")[1].strip()
+
+    def interrupted(coroutine):
+        coroutine.close()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("harness.cli.asyncio.run", interrupted)
+    code, out, err = cli("ask", session_id, "hello")
+    assert (code, out, err.strip()) == (130, "", "interrupted")
 
 
 def test_recovery_does_not_resend(conn, make_service):
