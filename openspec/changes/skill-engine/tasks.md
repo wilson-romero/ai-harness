@@ -58,3 +58,4 @@ Cada `[x]` lleva su recibo debajo (comando y salida relevante, o SHA). Los orác
 - Abrir el PR de `feature/skill-engine` contra `develop` con descripción en español; el merge lo aprueba Wilson.
 - `feature/architecture-skills-llm` se crea desde esta rama cuando el PR esté aprobado o mergeado.
 - Orden de archivo: `session-core`, `project-memory`, `skill-engine`, `architecture-skills-llm`.
+- Confirmado por Wilson el 2026-11-24 en preguntas directas: la aprobación se concede escribiendo los 8 primeros caracteres del hash de la propuesta, caduca a los 15 minutos y es de un solo uso (design, decisión de aprobación).
