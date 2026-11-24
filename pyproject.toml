@@ -1,0 +1,24 @@
+[project]
+name = "ai-harness"
+version = "0.1.0"
+description = "Local architecture copilot: Copilot Web, MCP, Skills, memory and Enterprise Architect"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "pydantic>=2.14.4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.5.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "windows: needs Windows",
+    "ea: needs Enterprise Architect installed and licensed",
+    "copilot: needs an authorised Copilot Web session",
+]
+addopts = "-ra --strict-markers"
