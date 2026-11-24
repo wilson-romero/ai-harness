@@ -14,6 +14,7 @@ import pytest
 from harness.skills.approvals import Proposal, normalise_content, proposal_hash
 from tests.skill_support import (
     GOOD_ECHO,
+    ApprovingTerminal,
     Clock,
     FakeTerminal,
     ScriptedProvider,
@@ -225,7 +226,7 @@ def _completed_with_approval(conn, data_dir, tmp_path, **kwargs):
 def test_approval_reused(conn, data_dir, tmp_path):
     engine, _, effect, run_id = _completed_with_approval(conn, data_dir, tmp_path)
     approval_id = _approval(conn)[0]["approval_id"]
-    assert asyncio.run(engine.apply_approval(run_id, "confirm", approval_id)) is False
+    assert asyncio.run(engine._apply_approval(run_id, "confirm", approval_id)) is False
     assert len(effect.written()) == 1
     denied = conn.execute(
         "SELECT run_id, detail FROM audit_events WHERE event_type = 'approval.denied'").fetchall()
@@ -242,7 +243,7 @@ def test_approval_of_another_run(conn, data_dir, tmp_path):
     run_b = _run(engine, session_b).run_id  # same content, another run: another hash
     hashes = {a["run_id"]: a["proposal_hash"] for a in _approval(conn)}
     assert hashes[run_a] != hashes[run_b]
-    assert asyncio.run(engine.apply_approval(run_b, "confirm", approval_a)) is False
+    assert asyncio.run(engine._apply_approval(run_b, "confirm", approval_a)) is False
     assert effect.written() == []
     assert conn.execute("SELECT status FROM approvals WHERE approval_id = ?",
                         (approval_a,)).fetchone()[0] == "granted"
@@ -298,3 +299,66 @@ def test_the_model_says_it_is_approved(conn, data_dir, tmp_path, interactive):
     outcome = _run(engine, session)
     assert outcome.status == "awaiting_approval"
     assert [a["status"] for a in _approval(conn)] == ["pending"] and effect.written() == []
+
+
+# -- 8. independent review ------------------------------------------------------------------------
+
+
+class ShiftingEffect:
+    """An effect whose `prepare` gives another target on every call, and records what it got."""
+
+    scope = "test.shift"
+
+    def __init__(self) -> None:
+        self.prepared = 0
+        self.received: list[tuple[str | None, str]] = []
+
+    def prepare(self, context, validated):
+        from harness.skills.effects import Prepared
+
+        self.prepared += 1  # the same target twice, then another one: a non-deterministic effect
+        target = "Decisiones/a.md" if self.prepared < 3 else "Decisiones/otro.md"
+        return Prepared(content=validated, target=target, effect_ref=None)
+
+    def apply(self, context, *args):
+        received = args[-1]  # the verified proposal (or, before 8.3, a second `Prepared`)
+        content = args[0] if isinstance(args[0], str) else received.content
+        self.received.append((received.target, content))
+
+    def reconcile(self, context, *args):
+        return "absent"
+
+
+def test_apply_receives_exactly_the_hashed_proposal(conn, data_dir, tmp_path):
+    """8.3: `prepare` runs once and `apply` gets the target and content that were hashed."""
+    root = copy_skills(tmp_path)
+    with_effect(root, "demo-echo", "test.shift")
+    effect = ShiftingEffect()
+    terminal = ApprovingTerminal()
+    engine, sessions, _ = build(conn, data_dir, root=root, terminal=terminal,
+                                effects={"test.shift": effect})
+    session = sessions.create_session("Demo")
+    assert _run(engine, session).status == "completed"
+    shown_target = next(l for l in terminal.shown[0].splitlines()
+                        if l.strip().startswith("target:")).split()[-1]
+    assert effect.received == [(shown_target, GOOD_ECHO)]
+    assert effect.prepared == 1
+
+
+def test_applying_an_approval_is_private_and_takes_the_session_lock(conn, data_dir, tmp_path):
+    """8.9: the direct way into an effect is not public and takes the session lock."""
+    from harness.core.errors import SessionBusy
+    from harness.storage.locks import SessionLock
+
+    engine, session, effect, run_id = _completed_with_approval(conn, data_dir, tmp_path)
+    approval_id = _approval(conn)[0]["approval_id"]
+    apply = getattr(engine, "_apply_approval", None) or engine.apply_approval
+    lock = SessionLock(data_dir, session.session_id)
+    assert lock.acquire()
+    try:
+        with pytest.raises(SessionBusy):
+            asyncio.run(apply(run_id, "confirm", approval_id))
+    finally:
+        lock.release()
+    assert len(effect.written()) == 1
+    assert not hasattr(engine, "apply_approval")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import shutil
 import sqlite3
 from collections.abc import Mapping
@@ -77,6 +78,17 @@ class FakeTerminal:
         return line.split()[-1][:8]
 
 
+class ApprovingTerminal(FakeTerminal):
+    """A person at the terminal who types the code of the proposal just shown, every time."""
+
+    def ask(self, question: str) -> str | None:
+        self.questions += 1
+        if self.on_ask is not None:
+            self.on_ask()
+        line = next(l for l in self.shown[-1].splitlines() if l.strip().startswith("hash:"))
+        return line.split()[-1][:8]
+
+
 class WriteEffect(NoEffect):
     """A test effect with consequences: each apply writes a new file in a temporary folder."""
 
@@ -90,9 +102,17 @@ class WriteEffect(NoEffect):
         return Prepared(content=validated, target=f"{self.folder.name}/salida.md",
                         effect_ref=context.run_id)
 
-    def apply(self, context: EffectContext, content: str, prepared: Prepared) -> None:
+    def apply(self, context: EffectContext, proposal) -> None:
         index = len(list(self.folder.iterdir()))
-        (self.folder / f"{index}.md").write_text(content, encoding="utf-8")
+        (self.folder / f"{index}.md").write_bytes(proposal.content.encode("utf-8"))
+
+    def reconcile(self, context: EffectContext, effect_ref, content_sha256: str):
+        """`applied` if a file holds exactly that content; `conflict` if another file is there."""
+        files = self.written()
+        digests = {hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
+        if content_sha256 in digests:
+            return "applied"
+        return "conflict" if files else "absent"
 
     def written(self) -> list[Path]:
         return sorted(self.folder.iterdir())

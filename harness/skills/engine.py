@@ -86,6 +86,15 @@ class _Run:
     started: float = 0.0
 
 
+@dataclass(frozen=True)
+class _Proposed:
+    """One `prepare`: the proposal (None if too large), where it goes and what it came from."""
+
+    proposal: Proposal | None
+    effect_ref: str | None
+    source: str
+
+
 def utc_iso(moment: datetime) -> str:
     """Fixed-width UTC timestamps, so that SQLite compares them as text correctly."""
     return moment.astimezone(UTC).isoformat(timespec="microseconds")
@@ -326,21 +335,30 @@ class SkillEngine:
             return None
         return skill_output["output_text"]
 
-    async def apply_approval(self, raw_run_id: str, step_key: str, approval_id: str) -> bool:
-        """Consume an approval and run its effect: the only way into an effect.
+    async def _apply_approval(self, raw_run_id: str, step_key: str, approval_id: str) -> bool:
+        """Try to consume a given approval and run its effect, under the session lock.
 
-        Exposed so that a second use of the same approval can be tried directly (D12).
+        Not a command: it exists so that tests can try a second use of an approval, or the
+        approval of another run, directly (D12). It takes the session lock like `run` and
+        `resume` (review 8.9, 2026-11-24).
         """
         run_id = parse_run_id(raw_run_id)
         row = self._require_run(run_id)
         skill = self._load_same_skill(row)
         session = self._sessions.require_session(row["session_id"])
         provider = self._sessions.provider_for(session)
-        state = _Run(run_id, session, provider, skill, {}, started=self._monotonic())
-        step = skill.step(step_key)
-        assert isinstance(step, ApprovalStep)
-        outcome = await self._apply(state, step, approval_id)
-        return outcome is None
+        lock = self._lock(session)
+        try:
+            state = _Run(run_id, session, provider, skill, {}, started=self._monotonic())
+            step = skill.step(step_key)
+            assert isinstance(step, ApprovalStep)
+            proposed = self._propose(state, step)
+            if proposed.proposal is None:
+                return False
+            outcome = await self._apply(state, step, approval_id, proposed)
+            return outcome is None
+        finally:
+            lock.release()
 
     # -- the loop -------------------------------------------------------------------------------
 
@@ -441,14 +459,19 @@ class SkillEngine:
 
     # -- approval -------------------------------------------------------------------------------
 
-    def _proposal(self, state: _Run, step: ApprovalStep) -> Proposal | None:
-        """The proposal recomputed from what is stored (and this invocation's outputs)."""
+    def _propose(self, state: _Run, step: ApprovalStep) -> _Proposed:
+        """The proposal from what is stored (and this invocation's outputs): one `prepare`.
+
+        Everything after this works on the returned proposal: what is shown, hashed, consumed
+        and applied is the same object (review 8.3, 2026-11-24).
+        """
         effect = self._effects[step.effect]
-        prepared = effect.prepare(self._effect_context(state, step), self._output(state, step.of))
+        source = self._output(state, step.of)
+        prepared = effect.prepare(self._effect_context(state, step), source)
         content = normalise_content(prepared.content)
         if len(content.encode("utf-8")) > MAX_CONTENT_BYTES:
-            return None
-        return Proposal(
+            return _Proposed(None, prepared.effect_ref, source)
+        proposal = Proposal(
             scope=effect.scope,
             session_id=str(state.session.session_id),
             run_id=state.run_id,
@@ -459,11 +482,13 @@ class SkillEngine:
             target=prepared.target,
             content=content,
         )
+        return _Proposed(proposal, prepared.effect_ref, source)
 
     async def _approval(
         self, state: _Run, step: ApprovalStep, row: sqlite3.Row
     ) -> RunOutcome | None:
-        proposal = self._proposal(state, step)
+        proposed = self._propose(state, step)
+        proposal = proposed.proposal
         if proposal is None:
             return self._stop(state, step.id, row, "limit:proposal_bytes", limit="proposal_bytes")
         proposal_hash = proposal.sha256
@@ -528,26 +553,30 @@ class SkillEngine:
                                    identity=identity)
                 self._audit("approval.granted", "granted", state.session, state.run_id,
                             self._approval_detail(live))
-        return await self._apply(state, step, live["approval_id"])
+        return await self._apply(state, step, live["approval_id"], proposed)
 
-    async def _apply(self, state: _Run, step: ApprovalStep, approval_id: str) -> RunOutcome | None:
+    async def _apply(
+        self, state: _Run, step: ApprovalStep, approval_id: str,
+        proposed: _Proposed,
+    ) -> RunOutcome | None:
+        proposal = proposed.proposal
+        assert proposal is not None
         row = self._latest_steps(state.run_id)[step.id]
         approval = self._conn.execute(
             "SELECT * FROM approvals WHERE approval_id = ?", (approval_id,)
         ).fetchone()
         if approval is None:
             raise InvalidInput(f"approval {approval_id} does not exist")
-        proposal = self._proposal(state, step)
         own = approval["run_id"] == state.run_id and approval["step_key"] == step.id
-        if own and (proposal is None or (
-            approval["status"] == "granted" and proposal.sha256 != approval["proposal_hash"]
-        )):
+        # What the proposal was made from must still be what is stored: a change while the
+        # person was reading revokes the approval. No second `prepare`: only the source is read.
+        altered = self._output(state, step.of) != proposed.source
+        if own and approval["status"] == "granted" and (
+            altered or proposal.sha256 != approval["proposal_hash"]
+        ):
             return self._revoke(state, step, row, approval)
-        if proposal is None:
-            return self._stop(state, step.id, row, "limit:proposal_bytes", limit="proposal_bytes")
         effect = self._effects[step.effect]
         effect_context = self._effect_context(state, step)
-        prepared = effect.prepare(effect_context, self._output(state, step.of))
         now = utc_iso(self._clock())
         with transaction(self._conn):
             consumed = self._conn.execute(
@@ -566,7 +595,7 @@ class SkillEngine:
                 self._conn.execute(
                     "UPDATE skill_steps SET status = 'applying', prepared_at = ?, effect_ref = ? "
                     "WHERE step_id = ?",
-                    (now, prepared.effect_ref, row["step_id"]),
+                    (now, proposed.effect_ref, row["step_id"]),
                 )
                 self._audit("approval.consumed", "consumed", state.session, state.run_id,
                             self._approval_detail(approval))
@@ -580,7 +609,7 @@ class SkillEngine:
                 "proposal); nothing was applied",
             )
         try:
-            effect.apply(effect_context, proposal.content, prepared)
+            effect.apply(effect_context, proposal)
         except Exception as exc:  # the effect failed: never retried by itself
             with transaction(self._conn):
                 self._set_step(row, "failed", error_code=f"effect_{type(exc).__name__}",
