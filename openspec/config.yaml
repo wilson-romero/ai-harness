@@ -1,0 +1,77 @@
+schema: spec-driven
+
+context: |
+  ai-harness: copiloto de arquitectura funcional que se ejecuta en local con
+  `uv run python main.py`. Mantiene varias conversaciones persistentes con Microsoft Copilot Web
+  (Playwright sobre Edge, perfil dedicado, login y MFA manuales), consume herramientas MCP,
+  ejecuta Skills declarativos, usa una segunda memoria en Markdown y lee o genera diagramas en
+  Enterprise Architect (Sparx) a traves de un servidor MCP propio.
+
+  Stack: CPython 3.14 estandar, uv con `uv.lock` versionado, Pydantic para contratos, SQLite con
+  migraciones numeradas, argparse, asyncio, SDK oficial de MCP por stdio, Playwright async con
+  `channel="msedge"`, pytest + pytest-asyncio. Sin arquitectura hexagonal ni frameworks que no
+  hagan falta. Cada dependencia se comprueba contra Python 3.14 al incorporarla; cambiar de
+  version de Python requiere aprobacion de Wilson.
+
+  Plataforma: todo funciona en macOS y en Windows salvo Enterprise Architect, que usa COM
+  (pywin32) y vive en un servidor MCP separado, solo Windows. Lo que se prueba en una
+  plataforma tiene que ser el mismo codigo que corre en la otra: fuera del paquete de EA no hay
+  ramas por plataforma (`sys.platform`, `os.name`, `fcntl`, `msvcrt`); se usan `pathlib`, SQLite
+  y las API portables de cada biblioteca. `tests/unit/test_portability.py` lo comprueba. Una
+  ejecucion en Windows es una confirmacion opcional, no la puerta de un corte.
+
+  La verdad vigente vive en `openspec/specs/`. Lo que esta en curso, en `openspec/changes/`; lo
+  cerrado, en `openspec/changes/archive/`. El plan de entregas por cortes vive en `docs/plan/` y
+  manda sobre las fases del plan maestro. Las decisiones transversales van en `docs/adr/`; las
+  de un change, en su `design.md`. No existe `docs/progress.md`: el estado es `tasks.md`.
+
+  Idioma: los artefactos de OpenSpec y toda la prosa van en español. El codigo, los comentarios,
+  los logs, los nombres de rama y los identificadores van en inglés. Los encabezados
+  estructurales de OpenSpec y las palabras SHALL/MUST se mantienen en inglés.
+
+  Commits con gitmoji (https://gitmoji.dev/) y SIN atribución a Claude. Git flow: los cambios van
+  en rama `feature/<change>` desde `develop`, nunca directos a `main` ni a `develop`. El merge lo
+  aprueba Wilson.
+
+  Datos: el repo y los agentes solo usan datos sintéticos (`tests/fixtures/`). Ningun contenido
+  corporativo (prompts, respuestas de Copilot, modelos de EA, notas del vault de trabajo) entra
+  al repo ni a un agente; Wilson prueba con lo real en local y aporta solo el resultado. Claude
+  es la herramienta de desarrollo, nunca un proveedor del producto.
+
+  El repositorio es PUBLICO en GitHub. No entra nada que identifique a la empresa, a un cliente o
+  a un sistema real, ni secretos, rutas personales, correos, IP, capturas, trazas de navegador o
+  ficheros de datos. `scripts/check_public_safety.py` lo comprueba en el pre-commit y en
+  `scripts/verify.sh`; un hallazgo se corrige, no se exceptua sin que Wilson lo apruebe. Las
+  medidas tomadas sobre sistemas reales (selectores, URL, GUID) viven fuera del repo, en
+  `HARNESS_DATA_DIR`.
+
+  Seguridad: deny-by-default. Un texto del LLM, un resultado de herramienta o una nota de
+  memoria son datos no confiables y nunca equivalen a una aprobacion humana. Tras un timeout
+  posterior a un envio o a una escritura el estado es `uncertain` y no se reintenta solo. La
+  matriz SEC-01..SEC-15 del plan maestro se prueba en el corte que abre cada superficie.
+
+  Una integracion real (Copilot, EA) no se da por verificada con mocks. Una afirmacion se mide,
+  no se estima, y se cita con su recibo. Un control que nunca ha rechazado nada es un control
+  que nadie ha comprobado: toda verificacion necesita haber dicho NO alguna vez.
+
+rules:
+  proposal:
+    - "El problema se enuncia con un número medido donde exista, nunca con un adjetivo."
+    - "Cada cifra dice de donde sale y en que fecha se midio."
+    - "Decir en claro que NO entra en el alcance, sobre todo lo que un lector asumiria."
+    - "Declarar que ninguna capacidad vigente se modifica exige un grep previo sobre openspec/specs/; no se declara de oido."
+    - "Nombrar el corte de docs/plan/ al que pertenece, su nivel de riesgo (N0/N1/N2), los SEC-xx que cubre y en que plataformas se demuestra."
+  design:
+    - "Cada decision se escribe con cuatro partes: Que, Por que, Alternativas consideradas y rechazadas (con el problema de cada una) e Impacto en otros artefactos (specs, tasks, capacidades)."
+    - "Los riesgos se escriben como [riesgo] -> [mitigacion]; los limites que no se van a arreglar se escriben, no se omiten."
+    - "Una premisa heredada de otro repo, de otro change o del plan maestro se mide aqui antes de disenar sobre ella."
+    - "Si una decision se revierte durante la implementacion, se edita en su sitio y se marca como revertida, y acto seguido se releen las specs."
+  specs:
+    - "Un requisito describe conducta testeable, nunca implementacion."
+    - "El nombre de un escenario es su identidad: renombrarlo es borrarlo."
+    - "Todo requisito lleva al menos un escenario, con cuatro almohadillas en Scenario."
+  tasks:
+    - "Cada tarea dice como se ve hecho."
+    - "Las tareas de verificacion nombran su oraculo (un grep, un SELECT, un fixture, una cifra medida). Marcar [x] exige recibo."
+    - "Incluir los pasos que se olvidan, entre ellos el runbook o doc que describe la conducta nueva, la comprobacion de que no entra codigo condicionado por plataforma y el control negativo que demuestra que la comprobacion sabe decir NO."
+    - "La ultima tarea es la demo del corte: que reproduce Wilson, con que SHA y que evidencia (log o video) deja; su estado es PASS, FAIL, NOT RUN o BLOCKED."
