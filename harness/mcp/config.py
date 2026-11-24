@@ -1,0 +1,207 @@
+"""The local allowlist of MCP servers (mcp-gateway D2).
+
+Only the person edits it; the harness only reads it. It names the servers that may be started,
+the exact command of each (an argument list, never a shell string), the names of the
+environment variables each one receives, its deadlines, and the tools and arguments that may be
+used, each tool with its operation (`read` or `write`). Whatever a server says about itself
+can only restrict this, never extend it (D5).
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+from harness.core.errors import HarnessError
+from harness.core.git_guard import VersionableFile, ensure_not_versionable
+from harness.core.strict_json import loads_strict
+from harness.text.safe_text import safe_foreign_line
+
+CONFIG_ENV = "HARNESS_MCP_CONFIG"
+FORMAT = "ai-harness/mcp/1"
+MAX_CONFIG_BYTES = 256 * 1024
+NAME_PATTERN = r"[a-z][a-z0-9_-]{0,63}"
+ARGUMENT_NAME_PATTERN = r"[A-Za-z_][A-Za-z0-9_]{0,63}"
+ENV_NAME_PATTERN = r"[A-Za-z_][A-Za-z0-9_]{0,127}"
+MAX_TIMEOUT_S = 300
+DEFAULT_STARTUP_TIMEOUT_S = 20
+DEFAULT_CALL_TIMEOUT_S = 30
+DEFAULT_MAX_RESULT_BYTES = 64 * 1024
+MIN_RESULT_BYTES = 1024
+MAX_RESULT_BYTES = 1024 * 1024
+MAX_STRING_LENGTH = 4096
+MAX_PATTERN_LENGTH = 256
+
+
+class ConfigError(HarnessError):
+    """The allowlist is missing, unreadable, versionable or invalid. Nothing is started."""
+
+
+class _Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+
+class StringArgument(_Strict):
+    type: Literal["string"]
+    max_length: int = Field(ge=1, le=MAX_STRING_LENGTH)
+    pattern: str | None = Field(default=None, max_length=MAX_PATTERN_LENGTH)
+    required: bool = False
+
+    @field_validator("pattern")
+    @classmethod
+    def _compiles(cls, value: str | None) -> str | None:
+        if value is not None:
+            try:
+                re.compile(value)
+            except re.error:
+                raise ValueError("is not a valid regular expression") from None
+        return value
+
+
+class IntegerArgument(_Strict):
+    type: Literal["integer"]
+    minimum: int
+    maximum: int
+    required: bool = False
+
+
+class BooleanArgument(_Strict):
+    type: Literal["boolean"]
+    required: bool = False
+
+
+class EnumArgument(_Strict):
+    type: Literal["enum"]
+    values: list[Annotated[str, Field(min_length=1, max_length=256)]] = Field(
+        min_length=1, max_length=64
+    )
+    required: bool = False
+
+
+Argument = Annotated[
+    StringArgument | IntegerArgument | BooleanArgument | EnumArgument,
+    Field(discriminator="type"),
+]
+
+
+class ToolEntry(_Strict):
+    operation: Literal["read", "write"]
+    max_result_bytes: int = Field(
+        default=DEFAULT_MAX_RESULT_BYTES, ge=MIN_RESULT_BYTES, le=MAX_RESULT_BYTES
+    )
+    arguments: dict[Annotated[str, Field(pattern=f"^{ARGUMENT_NAME_PATTERN}$")], Argument] = Field(
+        default_factory=dict, max_length=64
+    )
+
+
+class ServerEntry(_Strict):
+    command: list[Annotated[str, Field(min_length=1, max_length=4096)]] = Field(
+        min_length=1, max_length=64
+    )
+    cwd: str | None = None
+    env: list[Annotated[str, Field(pattern=f"^{ENV_NAME_PATTERN}$")]] = Field(
+        default_factory=list, max_length=64
+    )
+    startup_timeout_s: int = Field(default=DEFAULT_STARTUP_TIMEOUT_S, ge=1, le=MAX_TIMEOUT_S)
+    call_timeout_s: int = Field(default=DEFAULT_CALL_TIMEOUT_S, ge=1, le=MAX_TIMEOUT_S)
+    tools: dict[Annotated[str, Field(pattern=f"^{NAME_PATTERN}$")], ToolEntry] = Field(
+        default_factory=dict, max_length=256
+    )
+
+    @field_validator("command")
+    @classmethod
+    def _absolute_program(cls, value: list[str]) -> list[str]:
+        if any("\x00" in part for part in value):
+            raise ValueError("must not contain NUL characters")
+        if not Path(value[0]).is_absolute():
+            raise ValueError("the program (first element) must be an absolute path")
+        return value
+
+    @field_validator("cwd")
+    @classmethod
+    def _absolute_cwd(cls, value: str | None) -> str | None:
+        if value is not None and ("\x00" in value or not Path(value).is_absolute()):
+            raise ValueError("must be an absolute path")
+        return value
+
+
+class McpConfig(_Strict):
+    format: Literal["ai-harness/mcp/1"]
+    servers: dict[Annotated[str, Field(pattern=f"^{NAME_PATTERN}$")], ServerEntry] = Field(
+        max_length=64
+    )
+
+
+@dataclass(frozen=True)
+class LoadedConfig:
+    config: McpConfig | None  # None: no HARNESS_MCP_CONFIG, so no servers at all
+
+    @property
+    def servers(self) -> Mapping[str, ServerEntry]:
+        return self.config.servers if self.config is not None else {}
+
+
+def load_config(env: Mapping[str, str]) -> LoadedConfig:
+    """Read and validate the allowlist named by `HARNESS_MCP_CONFIG`; nothing is started."""
+    raw = (env.get(CONFIG_ENV) or "").strip()
+    if not raw:
+        return LoadedConfig(None)
+    path = Path(raw)
+    if not path.is_absolute():
+        raise ConfigError(f"{CONFIG_ENV} must be an absolute path")
+    text = _read_checked(path.resolve())
+    try:
+        data = loads_strict(text, max_bytes=MAX_CONFIG_BYTES, what="the MCP configuration")
+    except HarnessError as exc:
+        raise ConfigError(str(exc)) from None
+    try:
+        return LoadedConfig(McpConfig.model_validate(data))
+    except ValidationError as exc:
+        raise ConfigError(f"invalid MCP configuration: {_first_error(exc)}") from None
+
+
+def _read_checked(path: Path) -> str:
+    """Open first, then ask Git, then make sure the open file is still the file at that path.
+
+    The file read is the one that was checked: a file swapped in between the check and the
+    read is refused, not read.
+    """
+    try:
+        handle = path.open("rb")
+    except OSError:
+        raise ConfigError("the MCP configuration file cannot be read") from None
+    with handle:
+        opened = os.fstat(handle.fileno())
+        try:
+            ensure_not_versionable(path)
+        except VersionableFile as exc:
+            raise ConfigError(
+                f"the MCP configuration file is refused: {exc}; keep it outside any repository "
+                "or make Git ignore it"
+            ) from None
+        try:
+            current = os.stat(path)
+        except OSError:
+            raise ConfigError("the MCP configuration file changed while it was read") from None
+        if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+            raise ConfigError("the MCP configuration file changed while it was read")
+        raw = handle.read(MAX_CONFIG_BYTES + 1)
+    if len(raw) > MAX_CONFIG_BYTES:
+        raise ConfigError(f"the MCP configuration is larger than {MAX_CONFIG_BYTES} bytes")
+    try:
+        return raw.decode("utf-8").removeprefix("﻿")
+    except UnicodeDecodeError:
+        raise ConfigError("the MCP configuration is not valid UTF-8") from None
+
+
+def _first_error(exc: ValidationError) -> str:
+    """The field path and message of the first error, never the offending value."""
+    error = exc.errors(include_url=False, include_input=False, include_context=False)[0]
+    location = ".".join(str(part) for part in error["loc"]) or "(top level)"
+    return safe_foreign_line(f"{location}: {error["msg"]}").text[:300]

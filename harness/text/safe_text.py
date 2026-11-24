@@ -8,6 +8,7 @@ character hidden inside a credential cannot keep the pattern from matching and t
 
 from __future__ import annotations
 
+import re
 import unicodedata
 
 from harness.text.redaction import Redacted, redact
@@ -57,3 +58,27 @@ def neutralise_delimiters(text: str) -> str:
     return text.replace(OPEN_DELIMITER, OPEN_REPLACEMENT).replace(
         CLOSE_DELIMITER, CLOSE_REPLACEMENT
     )
+
+
+# ANSI/ECMA-48 control sequences as a whole: CSI (`ESC [ params intermediates final`) and OSC
+# (`ESC ] ... BEL` or `ESC ] ... ESC \`). Dropping only the ESC character, as `terminal_safe`
+# does, leaves `[31m` glued to what follows, and a credential right after a colour code would
+# then have no word boundary and escape redaction. The character classes of each part are
+# disjoint, so matching is linear; an unterminated OSC stops at the next ESC or BEL.
+_ESCAPE_SEQUENCE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?")
+
+
+def drop_escape_sequences(text: str) -> str:
+    """Remove whole terminal escape sequences (used before `safe_text` on tool results)."""
+    return _ESCAPE_SEQUENCE.sub("", text)
+
+
+def safe_foreign_line(text: str) -> Redacted:
+    """`safe_line` for text from outside the harness's control (tool results, server names,
+    requested names): whole escape sequences go first, so none can glue itself to a secret."""
+    return safe_line(drop_escape_sequences(text))
+
+
+def safe_foreign_text(text: str) -> Redacted:
+    """`safe_text` for text from outside the harness's control; see `safe_foreign_line`."""
+    return safe_text(drop_escape_sequences(text))
