@@ -45,5 +45,5 @@ class SyncedLocationRefused(HarnessError):
     """A work vault or data directory sits where it would leave the machine."""
 
 
-class NotImplementedInThisBuild(HarnessError):
-    pass
+class ProjectMismatch(HarnessError):
+    """A question with project memory in a session created for another project, or none."""

@@ -68,8 +68,6 @@ def test_no_memory_command_writes_outside_the_data_dir(cli, vault, tmp_path, dat
     ]
     for command in commands:
         code, _, err = cli(*command, **env)
-        # TODO(project-memory 5.x/6.1): once these are implemented the stub message disappears
-        # and every command must exit 0 here.
-        assert code == 0 or "not implemented in this build" in err, (command, err)
+        assert code == 0, (command, err)
         assert fingerprint(vault) == vault_before, command
         assert _outside_data(tmp_path, data_dir) == tree_before, command

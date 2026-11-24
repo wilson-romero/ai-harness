@@ -11,11 +11,19 @@ from pathlib import Path
 
 from harness.config import Settings
 from harness.core.contracts import RequestStatus
-from harness.core.errors import HarnessError, InvalidInput, NotImplementedInThisBuild
+from harness.core.errors import HarnessError, InvalidInput
 from harness.core.service import SessionService
-from harness.memory.config import bind_data_dir, load_memory_settings
-from harness.memory.paths import resolve_project, validate_project_slug
-from harness.memory.search import DEFAULT_LIMIT, parse_query, search_vault, validate_limit
+from harness.memory.config import MemorySettings, bind_data_dir, load_memory_settings
+from harness.memory.context import ProjectContext, build_context
+from harness.memory.maintenance import maintenance_report
+from harness.memory.paths import validate_project_slug
+from harness.memory.search import (
+    DEFAULT_LIMIT,
+    parse_query,
+    search_vault,
+    terminal_safe,
+    validate_limit,
+)
 from harness.providers.registry import provider_factory
 from harness.storage.database import open_database
 
@@ -83,9 +91,11 @@ def _run(args: argparse.Namespace) -> int:
     settings = Settings.from_env(os.environ)
     if args.command == "memory":
         return _memory(args, settings)
+    memory: MemorySettings | None = None
     if args.command == "ask" and args.project is not None:
-        # TODO(project-memory 5.4): replace with the real `ask --project`.
-        raise NotImplementedInThisBuild("ask --project is not implemented in this build")
+        # Same order as the memory commands: arguments, then configuration, then the vault.
+        validate_project_slug(args.project)
+        memory = load_memory_settings(os.environ, settings.data_dir)
     conn = open_database(settings.data_dir)
     try:
         service = SessionService(
@@ -102,6 +112,12 @@ def _run(args: argparse.Namespace) -> int:
             return EXIT_OK
         if args.command == "session":
             return _list_sessions(service)
+        if args.command == "ask" and memory is not None:
+            bind_data_dir(conn, memory)
+            service.check_project_question(args.session_id, args.prompt, args.project)
+            context = build_context(memory.vault_root, args.project, memory.context_max_bytes)
+            _context_summary(context)
+            return _ask(service, args.session_id, args.prompt, context)
         if args.command == "ask":
             return _ask(service, args.session_id, args.prompt)
         return _history(service, args.session_id)
@@ -120,8 +136,13 @@ def _list_sessions(service: SessionService) -> int:
     return EXIT_OK
 
 
-def _ask(service: SessionService, session_id: str, prompt: str) -> int:
-    response = asyncio.run(service.ask(session_id, prompt))
+def _ask(
+    service: SessionService,
+    session_id: str,
+    prompt: str,
+    context: ProjectContext | None = None,
+) -> int:
+    response = asyncio.run(service.ask(session_id, prompt, context))
     for warning in response.warnings:
         print(f"warning: {warning}", file=sys.stderr)
     if response.status is RequestStatus.COMPLETED:
@@ -170,11 +191,11 @@ def _memory(args: argparse.Namespace, settings: Settings) -> int:
     if args.memory_command == "search":
         return _search(memory.vault_root, terms, args.project, args.limit)
     if args.memory_command == "context":
-        resolve_project(memory.vault_root, args.project)
-        # TODO(project-memory 5.3): replace with the real `memory context`.
-        raise NotImplementedInThisBuild("memory context is not implemented in this build")
-    # TODO(project-memory 6.1): replace with the real `memory maintain --dry-run`.
-    raise NotImplementedInThisBuild("memory maintain is not implemented in this build")
+        context = build_context(memory.vault_root, args.project, memory.context_max_bytes)
+        print(context.text)
+        _context_summary(context)
+        return EXIT_OK
+    return _maintain(memory.vault_root)
 
 
 def _search(root: Path, terms: tuple[str, ...], project: str | None, limit: int) -> int:
@@ -197,4 +218,31 @@ def _search(root: Path, terms: tuple[str, ...], project: str | None, limit: int)
         + f", {result.redactions} credential(s) redacted",
         file=sys.stderr,
     )
+    return EXIT_OK
+
+
+def _context_summary(context: ProjectContext) -> None:
+    """What went into the block, on stderr: the block itself is the only thing on stdout."""
+    for relative in context.omitted:
+        print(f"omitted: {terminal_safe(relative)}", file=sys.stderr)
+    if context.truncated_walk:
+        print("warning: the vault walk stopped at the file limit", file=sys.stderr)
+    truncated = sum(1 for note in context.included if note.truncated)
+    skipped = sum(context.skipped_counts.values())
+    print(
+        f"context: {context.project}, {len(context.included)} note(s) included, "
+        f"{truncated} truncated, {len(context.omitted)} omitted, "
+        f"{context.size} of {context.max_bytes} bytes, "
+        f"{skipped} entr{'y' if skipped == 1 else 'ies'} skipped, "
+        f"{context.redactions} credential(s) redacted",
+        file=sys.stderr,
+    )
+
+
+def _maintain(root: Path) -> int:
+    report = maintenance_report(root)
+    print(report.text, end="")
+    if report.truncated_walk:
+        print("warning: the vault walk stopped at the file limit", file=sys.stderr)
+    print("maintain: dry run, nothing in the vault was changed", file=sys.stderr)
     return EXIT_OK

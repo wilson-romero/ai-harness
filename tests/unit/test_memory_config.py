@@ -90,15 +90,6 @@ def test_ask_without_project_does_not_read_the_vault(cli, tmp_path):
     assert code == 0 and "pregunta" in out
 
 
-def test_ask_with_project_is_a_stub_in_this_build(cli, vault):
-    session_id = cli("session", "create", "Con memoria", "--project", "demo-alpha")[1].strip()
-    code, out, err = cli(
-        "ask", session_id, "pregunta", "--project", "demo-alpha", HARNESS_VAULT_ROOT=str(vault)
-    )
-    assert code == 1 and out == ""
-    assert "not implemented in this build" in err
-
-
 def test_maintain_without_dry_run(cli, tmp_path):
     # The vault does not even exist: the usage error comes before any configuration is read.
     code, out, err = cli("memory", "maintain", HARNESS_VAULT_ROOT=str(tmp_path / "absent"))

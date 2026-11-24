@@ -116,6 +116,29 @@ def fingerprint(root: Path) -> dict[str, tuple]:
     return prints
 
 
+class RecordingProvider:
+    """A synthetic provider that keeps the exact text it was sent, like a wire tap."""
+
+    name = "mock"
+    synthetic_content = True
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    async def ask(self, request, on_sent) -> str:
+        self.prompts.append(request.prompt)
+        on_sent()
+        return "respuesta sintética"
+
+
+@pytest.fixture
+def recorder(monkeypatch: pytest.MonkeyPatch) -> RecordingProvider:
+    """Make every provider the CLI builds a RecordingProvider, and return it."""
+    provider = RecordingProvider()
+    monkeypatch.setattr("harness.cli.provider_factory", lambda settings: lambda name: provider)
+    return provider
+
+
 @pytest.fixture
 def conn(data_dir: Path) -> Iterator[sqlite3.Connection]:
     connection = open_database(data_dir)
