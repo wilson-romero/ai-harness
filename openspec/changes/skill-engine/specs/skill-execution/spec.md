@@ -39,6 +39,10 @@ Las entradas SHALL pasarse con `--input NOMBRE=VALOR` o `--input-file NOMBRE=RUT
 - **WHEN** el usuario pasa con `--input-file` un fichero de 65 537 bytes
 - **THEN** el sistema rechaza la ejecución sin leerlo entero y sin llamar al proveedor
 
+#### Scenario: Entrada que no es Unicode válido
+- **WHEN** el usuario pasa con `--input` un valor con un byte que no es UTF-8
+- **THEN** el sistema rechaza la ejecución con un error controlado antes de crearla
+
 #### Scenario: Canario de una entrada fuera de SQLite
 - **WHEN** una ejecución con el Mock completa un paso `llm` cuya entrada contiene un canario
 - **THEN** el canario no aparece en ninguna columna de texto de ninguna tabla, y `skill_runs` guarda el SHA-256 de la entrada
@@ -93,7 +97,7 @@ Una ejecución SHALL detenerse cuando un prompt compuesto supere 64 KiB sin cont
 
 #### Scenario: Respuesta demasiado grande
 - **WHEN** la respuesta guionizada ocupa 131 073 bytes
-- **THEN** el paso queda `failed` con el límite `response_bytes`, ningún paso posterior se ejecuta y la salida no se guarda
+- **THEN** el paso queda `failed` con el límite `response_bytes`, ningún paso posterior se ejecuta y el paso no guarda salida; la respuesta queda en el historial de la sesión como cualquier respuesta de `ask`, solo si el proveedor es sintético
 
 #### Scenario: Plazo del paso tras el envío
 - **WHEN** el Mock está en `timeout_after_send` y el paso declara un plazo de 1 segundo
@@ -109,6 +113,10 @@ Una ejecución SHALL detenerse cuando un prompt compuesto supere 64 KiB sin cont
 #### Scenario: Estado tras reinicio
 - **WHEN** una ejecución quedó en `awaiting_approval` y se consulta su estado desde otro proceso
 - **THEN** la salida muestra `awaiting_approval`, el paso y la caducidad de la aprobación, sin el texto de la propuesta
+
+#### Scenario: Secuencias de escape en la salida
+- **WHEN** la salida final de un Skill (aunque nombre un paso `llm`) contiene ESC, BEL, U+202E o U+200B
+- **THEN** ni `skill run` ni `skill status --output` imprimen esos caracteres
 
 ### Requirement: Paso incierto nunca se repite solo
 Una ejecución `uncertain` SHALL NOT reanudarse sin una decisión explícita: `skill resume RUN_ID` SHALL rechazarse explicando qué paso es incierto, y solo `skill resume RUN_ID --retry-step ID`, con el identificador exacto de ese paso, SHALL repetirlo como un intento nuevo, con un máximo de 3 intentos por paso.
@@ -126,11 +134,15 @@ Una ejecución `uncertain` SHALL NOT reanudarse sin una decisión explícita: `s
 - **THEN** el sistema se niega sin cambiar nada
 
 ### Requirement: Recuperación de ejecuciones interrumpidas
-Al arrancar, una ejecución `running` cuya sesión no tiene un proceso vivo SHALL pasar a `uncertain` si tenía un paso `llm` en curso, o a `pending` si estaba entre pasos o en un paso `validate`. Un paso `validate` interrumpido SHALL poder repetirse porque no tiene efectos fuera.
+Al arrancar, una ejecución `running`, o no terminal con un paso `running` o `applying`, cuya sesión no tiene un proceso vivo SHALL pasar a `uncertain` si tenía un paso `llm` o `approval` en curso, o a `pending` si estaba entre pasos o en un paso `validate`. Un paso `validate` interrumpido SHALL poder repetirse porque no tiene efectos fuera.
 
 #### Scenario: Proceso muerto durante un paso llm
 - **WHEN** se mata el proceso de `skill run` mientras el Mock espera tras el envío y se ejecuta después cualquier comando
 - **THEN** la ejecución y el paso quedan `uncertain` y la solicitud de la sesión también
+
+#### Scenario: Paso applying en una ejecución que espera aprobación
+- **WHEN** un paso `approval` quedó `applying` en una ejecución `awaiting_approval` y se ejecuta la recuperación
+- **THEN** el paso y la ejecución quedan `uncertain`
 
 #### Scenario: Ejecución viva no se toca
 - **WHEN** una ejecución está en curso en otro proceso y se ejecuta `skill status` sobre ella

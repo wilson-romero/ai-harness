@@ -46,7 +46,16 @@ El guard reconoce formatos conocidos; no detecta un secreto con forma desconocid
 
 ## Aprobaciones de Skills
 
-Una aprobación se concede solo en una terminal interactiva, escribiendo los 8 primeros caracteres del hash de la propuesta, y se registra el usuario local del sistema operativo que la concedió. **Esa identidad no es una autenticación.** Protege contra que un modelo, un fichero o un argumento aprueben, contra reutilizar o alterar una aprobación y contra aprobar sin haber visto la propuesta; **no** protege contra un proceso que corre con tu misma cuenta y abre una pseudoterminal: ese proceso puede hacerse pasar por ti. Si alguien o algo controla tu cuenta, las aprobaciones no lo detienen.
+Una aprobación se concede solo en una terminal interactiva, escribiendo los 8 primeros caracteres del hash de la propuesta, y se registra el usuario local del sistema operativo que la concedió. **Esa identidad no es una autenticación.**
+
+Se garantiza:
+
+- El código se deriva del contenido exacto que se muestra (y de su destino, la ejecución, el paso y el Skill). Lo mostrado, lo hasheado y lo aplicado son los mismos bytes: sin caracteres de control ni de formato, con los demás invisibles escritos como `<U+XXXX>`; un destino que no se puede mostrar tal cual se rechaza.
+- El código, o cualquier parte del hash, solo aparece dentro de la pregunta interactiva, junto al contenido. El mensaje de espera (código 3) y `skill status` muestran el identificador de la aprobación, su estado y su caducidad.
+- No se aprueba con stdin redirigido, con el fin de la entrada, con Enter, con una opción de la CLI ni con una variable de entorno; ningún texto de un modelo, nota o fichero aprueba.
+- Una aprobación está ligada a una propuesta, caduca (una respuesta después de la caducidad no la concede) y se usa una vez. Un efecto interrumpido se reconcilia antes de seguir y nunca se aplica dos veces.
+
+**No** se garantiza que haya una persona delante. Un proceso que corre con tu misma cuenta y maneja una pseudoterminal puede leer la propuesta y escribir el código: puede hacerse pasar por ti. Si alguien o algo controla tu cuenta, las aprobaciones no lo detienen. Un canal más fuerte (un diálogo del sistema operativo, un segundo dispositivo) es una decisión abierta antes del efecto que escribe en el vault.
 
 ## Si algo se filtra
 

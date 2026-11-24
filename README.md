@@ -91,7 +91,7 @@ uv run python main.py skill cancel RUN_ID
 
 - `skill list` muestra cada Skill con su versión y `valid` o `invalid` con el motivo; `skill show NAME` imprime descripción, versión, hash, entradas y pasos sin preguntar nada ni crear ninguna ejecución (un Skill inválido termina con código 1 y sus motivos).
 - `skill run NAME --session ID [--input N=V]… [--input-file N=RUTA]…` ejecuta los pasos en orden y, si termina, imprime la salida declarada por stdout. Las entradas tienen que ser las declaradas, de hasta 64 KiB cada una y 128 KiB en total; `--input-file` lee UTF-8 y comprueba el tamaño antes de leer.
-- `skill status RUN_ID [--output]` muestra el Skill, su versión y hash, la sesión, el estado de la ejecución y de cada paso con su intento, y la aprobación pendiente con su caducidad; nunca el texto de las entradas ni de las salidas. `--output` imprime la salida final si se guardó.
+- `skill status RUN_ID [--output]` muestra el Skill, su versión y hash, la sesión, el estado de la ejecución y de cada paso con su intento, y la aprobación pendiente con su identificador y su caducidad (nunca su hash); nunca el texto de las entradas ni de las salidas. `--output` imprime la salida final si se guardó, sin caracteres de control ni de formato y con las credenciales conocidas redactadas, igual que `skill run`.
 - `skill resume RUN_ID [--input…] [--retry-step ID]` sigue desde el primer paso no completado. `skill cancel RUN_ID` deja la ejecución `cancelled` y revoca su aprobación.
 - Una sesión tiene como mucho una ejecución abierta. Mientras una espera aprobación, la sesión admite `ask`.
 - Con esos comandos, `run` y `resume` sin terminal interactiva terminan con código 3 (`awaiting_approval`); en una terminal, `resume` muestra la propuesta y pide el código. `scripts/demo_skill_engine.py` recorre lo mismo en cualquier sistema, PowerShell incluido.
@@ -116,7 +116,7 @@ Referencias en las plantillas: `{{inputs.NOMBRE}}`, `{{steps.ID.output}}` y `{{s
 | `awaiting_approval` | Espera a una persona. Código de salida **3**. |
 | `completed` | Terminó; la salida va por stdout. Código 0. |
 | `failed` | Un paso falló, una comprobación no pasó o se superó un límite. Código 1. |
-| `uncertain` | Una pregunta pudo llegar al proveedor y no hubo respuesta. Código 1. |
+| `uncertain` | Una pregunta pudo llegar al proveedor y no hubo respuesta, o un efecto se interrumpió y no se sabe si se aplicó. Código 1. |
 | `pending` | Se interrumpió entre pasos; se puede reanudar. |
 | `cancelled` | Cancelada o aprobación rechazada. Código 1. |
 
@@ -124,9 +124,18 @@ Errores de uso (una opción mal escrita, `--input-file` demasiado grande): códi
 
 ### Aprobación
 
-Al llegar a un paso `approval`, el harness calcula la propuesta (Skill con versión y hash, ejecución, paso, alcance, destino y SHA-256 y tamaño del contenido) y su hash. **Solo se aprueba en una terminal interactiva**: el harness muestra la propuesta entera (contenido sin caracteres de control ni bidireccionales, credenciales conocidas redactadas, como máximo 32 KiB) y hay que escribir los **8 primeros caracteres del hash**; `n` rechaza y cancela la ejecución. Tres códigos equivocados o el fin de la entrada la dejan pendiente. Sin terminal (stdin redirigido, un script, un agente), `skill run` y `skill resume` dejan la ejecución en `awaiting_approval` y terminan con código 3 indicando `skill resume RUN_ID`. Ningún texto del modelo, fichero, variable ni argumento puede aprobar.
+Al llegar a un paso `approval`, el harness calcula la propuesta (Skill con versión y hash, ejecución, paso, alcance, destino y SHA-256 y tamaño del contenido) y su hash. **Solo se aprueba en una terminal interactiva**: el harness muestra la propuesta entera y hay que escribir los **8 primeros caracteres del hash**; `n` rechaza y cancela la ejecución. Tres códigos equivocados o el fin de la entrada la dejan pendiente. La pregunta bloquea la sesión hasta que contestas; si contestas después de la caducidad, la aprobación queda caducada y no se aplica nada. Sin terminal (stdin redirigido, un script, un agente), `skill run` y `skill resume` dejan la ejecución en `awaiting_approval` y terminan con código 3 indicando `skill resume RUN_ID`, el identificador de la aprobación y su caducidad.
 
-Una aprobación caduca a los `HARNESS_APPROVAL_TTL_S` segundos (900 por defecto); al reanudar se pide otra. Sirve una sola vez y solo para esa propuesta: si cambia un byte de lo aprobado, del Skill o de la ejecución, se deniega y se revoca. Se registra el usuario local que la concedió; no es una autenticación (ver [`SECURITY.md`](SECURITY.md)).
+Lo que se muestra es lo que se aprueba y lo que se aplica: el contenido sin caracteres de control ni de formato, con las credenciales conocidas redactadas, como máximo 32 KiB, y con cualquier otro carácter invisible escrito como `<U+XXXX>` (un emoji con selector de variación se ve como `❤<U+FE0F>`). Un destino con caracteres invisibles o que no está en NFC hace fallar el paso sin preguntar.
+
+Qué garantiza la aprobación:
+
+- El código sale del contenido exacto que se muestra, de su destino, de la ejecución, del paso y del Skill. El código, o cualquier parte del hash, solo aparece dentro de la pregunta interactiva, junto al contenido: ni el mensaje del código 3 ni `skill status` lo muestran.
+- No se aprueba con stdin redirigido, con el fin de la entrada, con Enter, con una opción de la CLI ni con una variable de entorno. Ningún texto del modelo ni ningún fichero aprueba.
+- Una aprobación vale para una sola propuesta, caduca a los `HARNESS_APPROVAL_TTL_S` segundos (900 por defecto; al reanudar se pide otra) y se usa una vez: si cambia un byte de lo aprobado, del Skill o de la ejecución, se deniega y se revoca.
+- Un efecto interrumpido no se aplica dos veces: `skill resume` pregunta al efecto si ya está en su destino. Si está, el paso termina; si no hay nada, pide una aprobación nueva; si hay otra cosa, se niega (código 1) y la ejecución queda `uncertain` para que lo mires y la canceles. `--retry-step` nunca acepta un paso `approval`.
+
+Qué **no** garantiza: que haya una persona delante. Un proceso que corre con tu misma cuenta y maneja una pseudoterminal puede leer la propuesta y escribir el código. Se registra el usuario local que la concedió, pero no es una autenticación (ver [`SECURITY.md`](SECURITY.md)).
 
 ### Un paso incierto
 

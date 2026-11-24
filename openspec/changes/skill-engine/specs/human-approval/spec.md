@@ -28,6 +28,24 @@ La terminal SHALL mostrar el contenido exacto de la propuesta, su destino, su ta
 - **WHEN** el contenido de la propuesta supera 32 KiB
 - **THEN** el paso queda `failed` sin pedir aprobación
 
+### Requirement: Caracteres invisibles escritos de forma visible
+Cualquier carácter invisible que quede en el contenido aprobable (categorías `Cs`, `Co`, `Cn`, selectores de variación y demás puntos ignorables por defecto) SHALL mostrarse, hashearse y aplicarse escrito como `<U+XXXX>`.
+
+#### Scenario: Caracteres invisibles en el contenido
+- **WHEN** la salida que se va a aprobar contiene U+FE0F, U+E0100, U+3164 o U+034F
+- **THEN** el contenido mostrado los escribe como `<U+FE0F>`, `<U+E0100>`, `<U+3164>` y `<U+034F>`, no contiene los caracteres, y lo que el efecto aplica tiene exactamente esos bytes y el SHA-256 aprobado
+
+### Requirement: Un solo destino mostrado, hasheado y aplicado
+El destino de una propuesta SHALL mostrarse, hashearse y aplicarse como la misma cadena. Un destino que no esté en NFC o que contenga un carácter de control, de formato o invisible SHALL hacer fallar el paso sin pedir aprobación.
+
+#### Scenario: Destino con caracteres invisibles
+- **WHEN** el destino que prepara el efecto contiene U+202E, U+200B, U+FE0F, U+3164 o ESC, o no está en NFC
+- **THEN** el paso queda `failed` con `invalid_target`, no se pide ninguna aprobación y no se aplica nada
+
+#### Scenario: El destino mostrado es el aplicado
+- **WHEN** se aprueba una propuesta con destino `Decisiones/café.md`
+- **THEN** el destino que recibe el efecto es exactamente la cadena mostrada en la línea del destino
+
 ### Requirement: Solo una persona en una terminal interactiva aprueba
 Una aprobación SHALL concederse solo cuando stdin y stdout son una terminal interactiva y la persona escribe los 8 primeros caracteres del hash mostrado. Ningún texto de un modelo, salida de un paso, nota de memoria, fichero, variable de entorno ni argumento de la CLI SHALL conceder una aprobación. Se registra el usuario local del sistema operativo que la concede.
 
@@ -51,6 +69,13 @@ Una aprobación SHALL concederse solo cuando stdin y stdout son una terminal int
 - **WHEN** la persona responde `n`
 - **THEN** la aprobación queda `rejected`, no ocurre ningún efecto y la ejecución queda `cancelled`
 
+### Requirement: El código solo en la pregunta interactiva
+El hash de una propuesta, o cualquier parte de él, SHALL mostrarse solo dentro de la pregunta interactiva, junto al contenido. El mensaje del código 3 y `skill status` SHALL mostrar el identificador de la aprobación, su estado y su caducidad. El sistema no garantiza que haya una persona delante: un proceso del mismo usuario con una pseudoterminal puede aprobar.
+
+#### Scenario: El código no sale de la pregunta interactiva
+- **WHEN** `skill run` sin terminal deja una aprobación `pending` y después se ejecuta `skill status RUN_ID`
+- **THEN** ni el mensaje del código 3 ni la salida de `status` contienen los 8 primeros caracteres del hash, y los dos muestran el identificador de la aprobación
+
 ### Requirement: Caducidad
 Cada aprobación SHALL caducar `HARNESS_APPROVAL_TTL_S` segundos después de pedirse (900 por defecto, admitido 60–3600). Una aprobación caducada SHALL NOT autorizar ningún efecto; al reanudar, el sistema SHALL marcarla `expired` y pedir una nueva sobre la propuesta recalculada.
 
@@ -61,6 +86,10 @@ Cada aprobación SHALL caducar `HARNESS_APPROVAL_TTL_S` segundos después de ped
 #### Scenario: Aprobación concedida y caducada antes del efecto
 - **WHEN** una aprobación `granted` llega al efecto después de su caducidad
 - **THEN** el efecto se deniega, la aprobación queda `expired` y la denegación queda auditada
+
+#### Scenario: Respuesta después de la caducidad
+- **WHEN** la persona escribe el código correcto después de `expires_at`
+- **THEN** la aprobación queda `expired` sin haber quedado nunca `granted`, no ocurre ningún efecto y la ejecución queda `awaiting_approval`
 
 #### Scenario: TTL fuera de rango
 - **WHEN** `HARNESS_APPROVAL_TTL_S` vale 30 o 7200
@@ -77,12 +106,35 @@ Una aprobación concedida SHALL autorizar un solo efecto: el paso del estado `gr
 - **WHEN** se intenta usar la aprobación concedida para la ejecución A en la ejecución B con el mismo contenido
 - **THEN** se deniega porque el hash de la propuesta de B es distinto
 
+### Requirement: Un efecto interrumpido nunca se aplica dos veces
+La transacción que consume una aprobación SHALL poner el paso en `applying` y la ejecución en `running`; tras una interrupción ese paso SHALL pasar a `uncertain`. `skill resume` SHALL reconciliarlo con el efecto: aplicado, el paso queda `completed` sin aplicar nada; ausente, SHALL pedirse una aprobación nueva; en otro caso el paso SHALL seguir `uncertain` y `resume` SHALL negarse con código 1, también con `--retry-step`.
+
+#### Scenario: Proceso muerto antes de consumir la aprobación
+- **WHEN** el proceso muere después de conceder la aprobación y antes de consumirla, y se reanuda
+- **THEN** la aprobación concedida se consume una vez y el efecto se aplica una vez
+
+#### Scenario: Proceso muerto entre consumir y aplicar
+- **WHEN** el proceso muere con la aprobación consumida y el efecto sin empezar, y se reanuda
+- **THEN** el paso pasa a `uncertain`, la reconciliación dice que no hay nada y se pide una aprobación nueva antes de aplicar
+
+#### Scenario: Proceso muerto durante el efecto
+- **WHEN** el proceso muere con el efecto a medias y se reanuda, con o sin `--retry-step`
+- **THEN** `resume` se niega, el paso y la ejecución siguen `uncertain`, no se pregunta nada y el destino no cambia
+
+#### Scenario: Proceso muerto tras el efecto
+- **WHEN** el proceso muere después de aplicar el efecto y antes de registrar el paso, y se reanuda
+- **THEN** el paso queda `completed` sin aplicar el efecto otra vez y sin pedir otra aprobación
+
 ### Requirement: Propuesta alterada denegada
-Antes de aplicar un efecto, el sistema SHALL recalcular la propuesta desde los datos guardados y SHALL aplicar el efecto solo si su hash coincide con el de la aprobación. Si no coincide, SHALL denegar el efecto, revocar la aprobación y dejar el paso en `failed`.
+Antes de aplicar un efecto, el sistema SHALL recalcular la propuesta desde los datos guardados y SHALL aplicar el efecto solo si su hash coincide con el de la aprobación. Si no coincide, SHALL denegar el efecto, revocar la aprobación y dejar el paso en `failed`. La propuesta se prepara una sola vez por intento: el efecto SHALL recibir exactamente la propuesta mostrada y hasheada, nunca una preparada de nuevo.
 
 #### Scenario: Salida modificada tras aprobar
 - **WHEN** después de conceder una aprobación se cambia en SQLite la salida del paso que se aprobó
 - **THEN** el efecto se deniega, la aprobación queda `revoked` y no se escribe nada
+
+#### Scenario: El efecto recibe la propuesta aprobada
+- **WHEN** un efecto devolvería otro destino si se le pidiera preparar la propuesta otra vez
+- **THEN** se prepara una vez y el efecto recibe el destino y el contenido que se mostraron
 
 ### Requirement: Efectos de una lista cerrada
 El efecto de un paso `approval` SHALL ser uno de los registrados en el código del harness; un Skill SHALL NOT poder declarar un efecto nuevo ni su implementación. En este change el único efecto es `none`, que deja continuar la ejecución y consume la aprobación.
