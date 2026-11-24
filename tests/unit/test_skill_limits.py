@@ -2,7 +2,7 @@
 
 import asyncio
 
-from tests.skill_support import GOOD_ECHO, ScriptedProvider, build, copy_skills
+from tests.skill_support import GOOD_ECHO, FakeTerminal, ScriptedProvider, build, copy_skills
 
 
 def _limits(conn):
@@ -35,6 +35,21 @@ def test_response_too_large(conn, data_dir):
     assert _run(engine, session).status == "failed"
     _check_failed_draft(conn, "limit:response_bytes")
     assert _limits(conn) == [("response_bytes", "step=draft;limit=response_bytes")]
+    # The step keeps no output; the session history keeps the answer like any answer of a
+    # synthetic provider (as `ask` does, which has no size limit) (review, 2026-11-24).
+    assert [tuple(r) for r in conn.execute(
+        "SELECT role, length(content) FROM messages ORDER BY rowid")] == [
+        ("user", len("[skill demo-echo/draft intento 1]")), ("assistant", 131_073)]
+
+
+def test_response_too_large_from_a_real_provider_is_stored_nowhere(conn, data_dir):
+    provider = ScriptedProvider({"tarea: demo-echo/draft": "y" * 131_073}, synthetic=False)
+    engine, sessions, _ = build(conn, data_dir, provider=provider,
+                                terminal=FakeTerminal(interactive=True))
+    assert _run(engine, sessions.create_session("Demo")).status == "failed"
+    _check_failed_draft(conn, "limit:response_bytes")
+    assert [tuple(r) for r in conn.execute("SELECT role, content FROM messages ORDER BY rowid")
+            ] == [("user", None), ("assistant", None)]
 
 
 def test_response_too_large_in_utf8_bytes_only(conn, data_dir):

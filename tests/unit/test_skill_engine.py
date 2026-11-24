@@ -144,6 +144,47 @@ def test_a_model_answer_that_is_not_valid_unicode_fails_the_step(conn, data_dir,
     assert _rows(conn, "SELECT status, error_code FROM requests") == [("failed", "invalid_text")]
 
 
+def _json_answer(**changes) -> str:
+    data = json.loads(JSON_ANSWER)
+    data.update(changes)
+    return json.dumps(data)
+
+
+@pytest.mark.parametrize(
+    "skill, answer, step, code",
+    [
+        ("demo-echo", "## Resumen\nTexto resumido.", "check",
+         "validation_failed:required_headings:Preguntas pendientes"),
+        ("demo-json", _json_answer(otro=1), "fields", "validation_failed:extra_field:otro"),
+        ("demo-json", _json_answer(priority="dos"), "fields", "validation_failed:type:priority"),
+        ("demo-json", '{"title": "a", "title": "b", "kind": "decision", "points": [], '
+         '"priority": 2}', "fields", "validation_failed:json:-"),
+        ("demo-json", '{"title": "a", "kind": "decision", "points": [], "priority": NaN}',
+         "fields", "validation_failed:json:-"),
+    ],
+    ids=["missing-heading", "extra-field", "wrong-type", "duplicate-key", "nan"],
+)
+def test_a_failed_validate_stops_the_run(conn, data_dir, tmp_path, skill, answer, step, code):
+    """Review: a failed `validate` leaves step and run `failed` after exactly one question."""
+    root = copy_skills(tmp_path)
+    path = root / "demo-json" / "workflow.json"
+    path.write_text(path.read_text(encoding="utf-8").replace(', "memory": "project"', ""),
+                    encoding="utf-8")
+    provider = ScriptedProvider({f"tarea: {skill}/": answer})
+    engine, sessions, _ = build(conn, data_dir, root=root, provider=provider)
+    session = sessions.create_session("Demo")
+    inputs = {"text": "x"} if skill == "demo-echo" else {"source": "x"}
+    outcome = _run(engine, skill, session, **inputs)
+    assert outcome.status == "failed" and provider.calls == 1
+    assert _rows(conn, "SELECT status, error_code FROM skill_steps WHERE step_key = ?", step
+                 ) == [("failed", code)]
+    assert _rows(conn, "SELECT status, error_code FROM skill_runs") == [("failed", code)]
+    later = _rows(conn, "SELECT status FROM skill_steps WHERE position > (SELECT position FROM "
+                  "skill_steps WHERE step_key = ?)", step)
+    assert all(status == ("pending",) for status in later)
+    assert _rows(conn, "SELECT count(*) FROM approvals") == [(0,)]
+
+
 def test_input_canary_stays_out_of_sqlite(conn, data_dir):
     engine, sessions, provider = build(conn, data_dir)
     session = sessions.create_session("Demo")
