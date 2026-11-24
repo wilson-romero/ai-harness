@@ -60,7 +60,7 @@ def maintain(cli, vault):
 
 def test_without_dry_run(cli, vault):
     code, out, err = cli("memory", "maintain", HARNESS_VAULT_ROOT=str(vault))
-    assert code != 0 and out == ""
+    assert code == 2 and out == ""  # a usage error, as the README's table says
     assert "only exists as --dry-run" in err
 
 

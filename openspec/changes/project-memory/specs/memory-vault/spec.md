@@ -18,14 +18,18 @@ Los comandos de memoria y `ask --project` SHALL exigir una raíz de vault config
 - **THEN** el sistema rechaza la configuración con un error controlado y código distinto de 0
 
 ### Requirement: El harness no copia, sincroniza ni modifica el vault
-El sistema SHALL NOT copiar, subir ni sincronizar el vault a ningún destino, y ningún comando de memoria SHALL crear, modificar, mover ni borrar nada en el vault ni fuera del directorio de datos.
+El sistema SHALL NOT copiar, subir ni sincronizar el vault a ningún destino, y ningún comando de memoria SHALL crear, modificar, mover ni borrar nada en el vault ni fuera del directorio de datos. Un comando que usa la memoria SHALL rechazar con un error controlado un directorio de datos que esté dentro de la raíz del vault.
 
 #### Scenario: Ningún comando de memoria escribe fuera del directorio de datos
 - **WHEN** se ejecutan todos los comandos de memoria sobre el vault sintético
 - **THEN** el vault queda idéntico (mismas rutas, tamaños y contenidos) y no se crea ningún fichero fuera del directorio de datos
 
+#### Scenario: Directorio de datos dentro del vault
+- **WHEN** `HARNESS_DATA_DIR` es una carpeta dentro de `HARNESS_VAULT_ROOT` (directamente o a través de un enlace) y el usuario ejecuta un comando `memory …` o `ask --project`
+- **THEN** el sistema lo rechaza con un error controlado y el vault queda idéntico; con el vault dentro del directorio de datos, el comando funciona
+
 ### Requirement: Lectura confinada a la raíz del vault
-El sistema SHALL leer solo ficheros regulares cuya ruta real esté dentro de la raíz real del vault. SHALL ignorar enlaces simbólicos, uniones de directorio y ficheros con más de un enlace duro, y SHALL informar de cuántas entradas ignoró.
+El sistema SHALL leer solo ficheros regulares cuya ruta real esté dentro de la raíz real del vault y que sigan siendo, al leerlos, el mismo fichero que vio el recorrido. SHALL ignorar enlaces simbólicos, uniones de directorio, ficheros con más de un enlace duro, ficheros sustituidos o que superan el límite de tamaño entre el recorrido y la lectura, y directorios que no se pueden listar, y SHALL informar de cuántas entradas ignoró.
 
 #### Scenario: Enlace simbólico hacia fuera ignorado
 - **WHEN** el vault contiene un enlace simbólico a un fichero fuera de la raíz que contiene la palabra buscada
@@ -34,6 +38,14 @@ El sistema SHALL leer solo ficheros regulares cuya ruta real esté dentro de la 
 #### Scenario: Directorio enlazado hacia fuera ignorado
 - **WHEN** el vault contiene un directorio enlazado a otro directorio fuera de la raíz
 - **THEN** ningún comando de memoria lee ficheros de ese directorio
+
+#### Scenario: Fichero sustituido después del recorrido
+- **WHEN** después del recorrido una nota de sesión se sustituye por un enlace a un fichero de fuera con un canario, o crece por encima del límite de tamaño
+- **THEN** el contexto no contiene el canario ni el texto añadido, y la nota cuenta como ignorada
+
+#### Scenario: Directorio que no se puede listar
+- **WHEN** una carpeta del vault no tiene permiso de lectura
+- **THEN** `memory search`, `memory context` y `memory maintain --dry-run` la cuentan como ignorada, y `maintain` nombra su ruta relativa
 
 #### Scenario: Raíz del vault que es un enlace
 - **WHEN** la raíz configurada es un enlace simbólico a un directorio que contiene el vault

@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import difflib
 import re
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from harness.memory.notes import Note, frontmatter_problem, load_note
 from harness.memory.paths import (
+    SKIP_CHANGED,
     SKIP_HARD_LINK,
     SKIP_LINK,
     SKIP_NOT_MARKDOWN,
@@ -22,10 +24,10 @@ from harness.memory.paths import (
     SKIP_OUTSIDE_ROOT,
     SKIP_TOO_LARGE,
     SKIP_UNREADABLE,
+    SkippedRead,
     walk_vault,
 )
-from harness.memory.redaction import secret_kinds
-from harness.memory.search import terminal_safe
+from harness.memory.safe_text import safe_line, safe_text
 
 CATEGORIES = (
     "sync_conflicts",
@@ -51,6 +53,7 @@ REPORTED_SKIPS = (
     SKIP_TOO_LARGE,
     SKIP_OUTSIDE_ROOT,
     SKIP_UNREADABLE,
+    SKIP_CHANGED,
 )
 LIMIT_NOTE = (
     "note: secrets_found only covers known credential formats; "
@@ -74,7 +77,8 @@ class MaintenanceReport:
         for category in CATEGORIES:
             entries = self.findings[category]
             lines.append(f"{category}: {len(entries)}")
-            lines += [f"  {terminal_safe(entry)}" for entry in entries[:MAX_LISTED]]
+            # Entries hold paths and index targets: vault text, so cleaned and redacted.
+            lines += [f"  {safe_line(entry).text}" for entry in entries[:MAX_LISTED]]
             if len(entries) > MAX_LISTED:
                 lines.append(f"  ... and {len(entries) - MAX_LISTED} more")
         return "\n".join(lines) + "\n" + LIMIT_NOTE
@@ -101,19 +105,26 @@ def maintenance_report(root: Path) -> MaintenanceReport:
             continue  # it would be quarantined; its content is not analysed
         try:
             notes.append(load_note(file))
-        except OSError:
-            findings["skipped"].append(f"{file.relative} ({SKIP_UNREADABLE})")
+        except SkippedRead as refused:
+            findings["skipped"].append(f"{file.relative} ({refused.reason})")
 
     indexes = [n for n in notes if _is_index(n.relative)]
+    # A credential may sit in a file name as well as in a note's text; names are checked for
+    # every entry the report can name, texts only for the notes that were read.
+    kinds_by_path: dict[str, Counter[str]] = {}
+    reported = [relative for relative, reason in walk.skipped if reason in REPORTED_SKIPS]
+    for relative in dict.fromkeys(all_files + reported):
+        kinds_by_path[relative] = Counter(safe_line(relative).kinds)
     for note in notes:
         if not _is_index(note.relative):
             problem = frontmatter_problem(note.frontmatter)
             if problem:
                 findings["invalid_frontmatter"].append(f"{note.relative} ({problem})")
-        kinds = secret_kinds(note.text)
+        kinds_by_path[note.relative] += Counter(safe_text(note.text).kinds)
+    for relative, kinds in kinds_by_path.items():
         if kinds:
             listed = ", ".join(f"{kind} ({kinds[kind]})" for kind in sorted(kinds))
-            findings["secrets_found"].append(f"{note.relative}: {listed}")
+            findings["secrets_found"].append(f"{relative}: {listed}")
 
     known = [r for r in all_files if not _is_conflict(r)]
     findings["broken_links"] += _broken_links(notes, known)
