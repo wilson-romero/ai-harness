@@ -113,11 +113,17 @@ def insert_audit(
     actor: str,
     session_id: UUID | None = None,
     request_id: UUID | None = None,
+    run_id: str | None = None,
+    detail: str | None = None,
 ) -> None:
-    """Record what happened. There is deliberately no free-text column for content."""
+    """Record what happened. There is deliberately no free-text column for content.
+
+    `detail` is structured and built only from identifiers, hashes, counts and fixed names
+    (step, attempt, limit), never from an input, a template or a model output.
+    """
     conn.execute(
         "INSERT INTO audit_events (event_id, session_id, request_id, event_type, outcome, actor,"
-        " created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        " created_at, run_id, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             str(uuid7()),
             str(session_id) if session_id else None,
@@ -126,6 +132,8 @@ def insert_audit(
             outcome,
             actor,
             utc_now(),
+            run_id,
+            detail,
         ),
     )
 

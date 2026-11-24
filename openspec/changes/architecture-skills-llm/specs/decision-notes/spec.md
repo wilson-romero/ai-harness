@@ -1,0 +1,106 @@
+# Spec Delta
+
+## Purpose
+
+Define la única escritura del harness en el vault: una nota de decisión nueva en `Decisiones/`, con formato compatible con la memoria, escrita de forma atómica y confinada solo después de una aprobación ligada a sus bytes exactos.
+
+## ADDED Requirements
+
+### Requirement: Única escritura del harness en el vault
+El harness SHALL escribir en el vault solo para crear una nota de decisión nueva directamente dentro de `Decisiones/`, y solo como efecto de una aprobación `granted`, vigente y no consumida cuyo hash coincide con la propuesta recalculada. Ningún comando `memory …` SHALL escribir en el vault, y nada SHALL copiarlo, subirlo ni sincronizarlo.
+
+#### Scenario: Comandos de memoria siguen sin escribir
+- **WHEN** se ejecutan `memory search`, `memory context`, `memory maintain --dry-run` y `ask --project` sobre el vault sintético
+- **THEN** la huella del vault es idéntica antes y después de cada uno
+
+#### Scenario: Un fichero nuevo y nada más
+- **WHEN** se aprueba y se escribe una decisión
+- **THEN** la huella del vault después es la de antes más exactamente una entrada nueva, en `Decisiones/`
+
+### Requirement: Nombre e identificador de la nota
+El identificador SHALL derivarse de forma determinista del proyecto y del título normalizado, y el fichero SHALL llamarse `YYYY-MM-DD-<slug>-<id8>.md`, con la fecha de preparación, un slug ASCII de como mucho 48 caracteres derivado del título y los 8 primeros caracteres del identificador. El nombre SHALL ser válido en Windows y en macOS.
+
+#### Scenario: Título con acentos y signos
+- **WHEN** el título es «¿Cola gestionada o bus propio? Mensajería de ventas»
+- **THEN** el nombre es `<fecha>-cola-gestionada-o-bus-propio-mensajeria-de-ventas-<id8>.md` o su recorte a 48 caracteres de slug, sin caracteres fuera de `[a-z0-9-]`
+
+#### Scenario: Título que solo forma un nombre reservado
+- **WHEN** el título normalizado produciría el slug `con` o un slug vacío
+- **THEN** el nombre usa `decision` como slug y sigue siendo válido
+
+#### Scenario: Mismo título, mismo identificador
+- **WHEN** dos decisiones de `demo-alpha` tienen títulos que solo difieren en mayúsculas y espacios
+- **THEN** tienen el mismo identificador
+
+### Requirement: Frontmatter compatible con el vault
+La nota SHALL empezar con un frontmatter que el lector de memoria acepta como válido, con `type: decision`, `decision_id`, `project_slug`, `status: accepted`, `created`, `updated`, `tags` en línea con `decision` y el proyecto, `source: ai-harness`, `skill` con nombre y versión, y `run_id`. Ningún valor del frontmatter SHALL venir del texto del modelo.
+
+#### Scenario: La nota escrita entra en el contexto del proyecto
+- **WHEN** se escribe una decisión de `demo-alpha` y después se ejecuta `memory context demo-alpha`
+- **THEN** la nota aparece en la sección `Decisiones` del bloque y `memory maintain --dry-run` no la cuenta en `invalid_frontmatter`
+
+### Requirement: Escritura atómica que nunca sobrescribe
+La nota SHALL escribirse en un temporal oculto dentro de `Decisiones/` que después se renombra al nombre final, y SHALL NOT escribirse si el nombre final ya existe, de cualquier tipo. Un lector SHALL ver la nota entera o ninguna nota.
+
+#### Scenario: Destino ocupado
+- **WHEN** justo antes del renombrado el fichero de destino ya existe con otro contenido
+- **THEN** no se sobrescribe, el temporal se borra, el paso queda `failed` con `conflict` y el fichero existente conserva sus bytes
+
+#### Scenario: Temporal invisible para la memoria
+- **WHEN** queda un temporal de la escritura en `Decisiones/`
+- **THEN** `memory search` y `memory context` no lo leen
+
+### Requirement: Escritura confinada a Decisiones
+El destino SHALL resolverse dentro de la raíz real del vault, en `Decisiones/` directamente; `Decisiones/` SHALL ser un directorio real, no un enlace ni una unión; si es un enlace, una unión o no es un directorio, la escritura SHALL denegarse sin crear nada. Si `Decisiones/` no existe, el harness SHALL crearla dentro de la raíz real del vault solo en el momento de la primera escritura aprobada, y ningún comando de solo lectura SHALL crearla.
+
+#### Scenario: Decisiones es un enlace hacia fuera
+- **WHEN** `Decisiones/` del vault es un enlace simbólico a una carpeta fuera del vault
+- **THEN** la ejecución queda `failed` antes de pedir aprobación y la carpeta de fuera queda intacta
+
+#### Scenario: Decisiones creada en la primera escritura aprobada
+- **WHEN** el vault no tiene la carpeta `Decisiones/` y se aprueba y se escribe una decisión
+- **THEN** la huella del vault después es la de antes más exactamente la carpeta `Decisiones/` y la nota dentro de ella
+
+#### Scenario: Decisiones no se crea sin escritura aprobada
+- **WHEN** el vault no tiene la carpeta `Decisiones/` y se ejecutan los comandos `memory …`, `ask --project`, y una ejecución de `architecture-memory` que se rechaza o queda esperando aprobación
+- **THEN** la carpeta sigue sin existir y la huella del vault es idéntica
+
+### Requirement: Solo los bytes aprobados
+Los bytes escritos SHALL ser exactamente los del contenido de la propuesta aprobada. Si la nota recalculada justo antes de escribir difiere en un byte de la aprobada, SHALL NOT escribirse nada.
+
+#### Scenario: Salida validada alterada tras aprobar
+- **WHEN** después de conceder la aprobación se modifica en SQLite la salida validada de la decisión
+- **THEN** la escritura se deniega, la aprobación queda `revoked` y el vault queda intacto
+
+#### Scenario: Bytes escritos igual a bytes mostrados
+- **WHEN** se aprueba y se escribe una decisión
+- **THEN** el SHA-256 del fichero escrito es el de la propuesta aprobada y su contenido es el que mostró la terminal
+
+### Requirement: Escrituras serializadas
+Dos procesos del harness SHALL NOT escribir decisiones en el mismo vault a la vez; el segundo SHALL esperar como mucho un plazo corto y, si no obtiene el turno, SHALL fallar sin escribir y sin consumir su aprobación.
+
+#### Scenario: Escritor ocupado
+- **WHEN** otro proceso tiene tomado el bloqueo de escritura del vault durante todo el plazo
+- **THEN** la escritura falla con un error controlado, la aprobación sigue `granted` y el vault queda intacto
+
+### Requirement: Escritura interrumpida se reconcilia sin repetir
+Si el proceso muere después de consumir la aprobación y antes de registrar el final de la escritura, el paso SHALL quedar `uncertain`. Al reanudar, el sistema SHALL comprobar el vault sin escribir: si existe la nota con ese identificador y los bytes aprobados, el paso se completa; si no existe, se pide una aprobación nueva; si existe con otros bytes, el paso queda `failed`.
+
+#### Scenario: Muerte tras el renombrado
+- **WHEN** el proceso muere justo después de renombrar la nota y se reanuda la ejecución
+- **THEN** el paso queda `completed` sin escribir otra vez y el vault tiene una sola nota con ese identificador
+
+#### Scenario: Muerte antes del renombrado
+- **WHEN** el proceso muere después de consumir la aprobación y antes de renombrar, y se reanuda en una terminal
+- **THEN** se pide una aprobación nueva para los mismos bytes y solo con ella se escribe la nota
+
+#### Scenario: Nota distinta con el mismo identificador
+- **WHEN** al reconciliar existe una nota con ese identificador y otro contenido
+- **THEN** el paso queda `failed` con `conflict` y no se escribe nada
+
+### Requirement: Nada del contenido en SQLite con proveedor real
+Con un proveedor que no declara contenido sintético, SQLite SHALL guardar de la nota solo su identificador de decisión, su SHA-256 y su tamaño, nunca su ruta ni su texto.
+
+#### Scenario: Proveedor de prueba no sintético
+- **WHEN** se escribe una decisión con un proveedor de prueba no sintético en una terminal
+- **THEN** ninguna columna de texto de ninguna tabla contiene el título ni la ruta de la nota, y `skill_steps.effect_ref` contiene el identificador

@@ -34,6 +34,16 @@ from harness.storage.database import transaction
 from harness.storage.locks import SessionLock
 
 
+def is_valid_unicode(text: str) -> bool:
+    """False when the text holds a lone surrogate (for example, invalid bytes in argv), which
+    cannot be encoded as UTF-8, stored in SQLite or sent (skill-engine review 8.6)."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def parse_session_id(raw: str) -> UUID:
     """Accept only a full, canonical UUID: no prefixes, braces or URN forms."""
     try:
@@ -97,6 +107,8 @@ class SessionService:
     def create_session(self, name: str, project_id: str | None = None) -> Session:
         if not name.strip():
             raise InvalidInput("the session name must not be empty")
+        if not is_valid_unicode(name):
+            raise InvalidInput("the session name is not valid Unicode text")
         self._provider_factory(self._default_provider)  # must exist before anything is stored
         now = datetime.now(UTC)
         session = Session(
@@ -189,6 +201,8 @@ class SessionService:
         session = self._require_session(raw_session_id)
         if not prompt.strip():
             raise InvalidInput("the prompt must not be empty")
+        if not is_valid_unicode(prompt):
+            raise InvalidInput("the prompt is not valid Unicode text (it has a lone surrogate)")
         if context is not None:
             self._check_project(session, context.project)
         self._provider_factory(self._default_provider)  # a misconfigured provider stops here
@@ -201,13 +215,44 @@ class SessionService:
         finally:
             lock.release()
 
+    def require_session(self, raw_session_id: str) -> Session:
+        return self._require_session(raw_session_id)
+
+    def provider_for(self, session: Session) -> LLMProvider:
+        """The provider of a session, after checking the configured one exists."""
+        self._provider_factory(self._default_provider)
+        return self._provider_factory(session.provider)
+
+    async def ask_with_lock_held(
+        self,
+        session_id: UUID,
+        provider: LLMProvider,
+        prompt: str,
+        context: ProjectContext | None = None,
+        *,
+        stored_text: str,
+        timeout_s: float,
+    ) -> LLMResponse:
+        """A question from a caller that already holds the session lock (skill-engine D7).
+
+        Same states, deadline and no-resend rules as `ask`. `stored_text` is what the history
+        keeps as the question (when the provider is synthetic) instead of `prompt`.
+        """
+        return await self._ask_locked(
+            session_id, provider, prompt, context, stored_text=stored_text, timeout_s=timeout_s
+        )
+
     async def _ask_locked(
         self,
         session_id: UUID,
         provider: LLMProvider,
         prompt: str,
         context: ProjectContext | None = None,
+        *,
+        stored_text: str | None = None,
+        timeout_s: float | None = None,
     ) -> LLMResponse:
+        deadline_s = self._timeout_s if timeout_s is None else timeout_s
         session = repo.get_session(self._conn, session_id)
         assert session is not None
         warnings: tuple[str, ...] = ()
@@ -221,9 +266,10 @@ class SessionService:
         # stored, and only when the provider's content is synthetic (D7).
         sent_text = compose_prompt(context, prompt) if context is not None else prompt
         request = LLMRequest(
-            request_id=uuid7(), session_id=session_id, prompt=sent_text, timeout_s=self._timeout_s
+            request_id=uuid7(), session_id=session_id, prompt=sent_text, timeout_s=deadline_s
         )
         store_content = provider.synthetic_content
+        question = prompt if stored_text is None else stored_text
         with transaction(self._conn):
             repo.insert_request(self._conn, request.request_id, session_id)
             repo.insert_message(
@@ -231,7 +277,7 @@ class SessionService:
                 session_id=session_id,
                 request_id=request.request_id,
                 role="user",
-                content=prompt if store_content else None,
+                content=question if store_content else None,
             )
             if context is not None:
                 for note in context.included:
@@ -306,7 +352,7 @@ class SessionService:
             )
 
         try:
-            async with asyncio.timeout(self._timeout_s):
+            async with asyncio.timeout(deadline_s):
                 text = await provider.ask(request, on_sent)
         except TimeoutError:
             if sent:
@@ -333,6 +379,13 @@ class SessionService:
                 RequestStatus.FAILED,
                 error_code=type(exc).__name__,
                 detail=f"the provider reported an error: {exc}",
+            )
+        if not is_valid_unicode(text):
+            # The answer arrived but cannot be stored or shown: a controlled failure (8.6).
+            return finish(
+                RequestStatus.FAILED,
+                error_code="invalid_text",
+                detail="the provider's answer is not valid Unicode text; it was not kept",
             )
         return finish(RequestStatus.COMPLETED, text=text)
 

@@ -29,7 +29,7 @@ def test_first_run_creates_the_schema(conn):
         row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
     session_core = {"sessions", "requests", "messages", "audit_events", "schema_migrations"}
-    assert tables == session_core | {"request_context"}
+    assert tables == session_core | {"request_context", "skill_runs", "skill_steps", "approvals"}
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
 
@@ -43,7 +43,7 @@ def test_migrating_twice_changes_nothing(data_dir):
     assert migrate(second) == []
     after = second.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
     assert [tuple(r) for r in after] == [tuple(r) for r in before]
-    assert [r["version"] for r in after] == [1, 2]
+    assert [r["version"] for r in after] == [1, 2, 3]
     assert repo.get_session(second, session.session_id) == session
     second.close()
 
@@ -113,3 +113,93 @@ def test_request_context_needs_an_existing_request(conn):
                 size_bytes=10,
                 truncated=False,
             )
+
+
+# -- migration 003: skills (skill-engine D8) ------------------------------------------------------
+
+
+def _new_run(conn, session, status="pending", run_id=None):
+    run_id = run_id or str(uuid7())
+    conn.execute(
+        "INSERT INTO skill_runs (run_id, session_id, skill_name, skill_version, skill_sha256,"
+        " status, inputs_manifest, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (run_id, str(session.session_id), "demo-echo", "1.0.0", "0" * 64, status, "{}",
+         "2026-11-24T00:00:00+00:00", "2026-11-24T00:00:00+00:00"),
+    )
+    return run_id
+
+
+def _new_approval(conn, run_id, status="pending"):
+    conn.execute(
+        "INSERT INTO approvals (approval_id, run_id, step_key, scope, proposal_hash, status,"
+        " created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (str(uuid7()), run_id, "confirm", "none", "a" * 64, status,
+         "2026-11-24T00:00:00+00:00", "2026-11-24T00:15:00+00:00"),
+    )
+
+
+def test_skill_indexes_exist(conn):
+    indexes = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+        if not row[0].startswith("sqlite_autoindex")
+    }
+    assert {"idx_skill_runs_one_open_per_session", "idx_approvals_one_live_per_step"} <= indexes
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(audit_events)")}
+    assert {"run_id", "detail"} <= columns
+
+
+def test_one_open_run_per_session(conn):
+    session = _new_session(conn)
+    with transaction(conn):
+        _new_run(conn, session, "awaiting_approval")
+    with pytest.raises(sqlite3.IntegrityError):
+        with transaction(conn):
+            _new_run(conn, session, "pending")
+    with transaction(conn):  # closed runs do not count
+        _new_run(conn, session, "completed")
+        _new_run(conn, session, "cancelled")
+    other = _new_session(conn, "other")
+    with transaction(conn):
+        _new_run(conn, other, "running")
+
+
+def test_one_live_approval_per_step(conn):
+    session = _new_session(conn)
+    with transaction(conn):
+        run_id = _new_run(conn, session)
+        _new_approval(conn, run_id, "pending")
+    with pytest.raises(sqlite3.IntegrityError):
+        with transaction(conn):
+            _new_approval(conn, run_id, "granted")
+    with transaction(conn):
+        _new_approval(conn, run_id, "expired")
+        _new_approval(conn, run_id, "consumed")
+
+
+@pytest.mark.parametrize(
+    "table, sql",
+    [
+        ("skill_runs", "UPDATE skill_runs SET status = 'paused'"),
+        ("skill_runs", "UPDATE skill_runs SET skill_sha256 = 'short'"),
+        ("approvals", "UPDATE approvals SET status = 'approved'"),
+        ("approvals", "UPDATE approvals SET channel = 'file'"),
+    ],
+)
+def test_skill_checks_refuse_unknown_values(conn, table, sql):
+    session = _new_session(conn)
+    with transaction(conn):
+        run_id = _new_run(conn, session)
+        _new_approval(conn, run_id)
+    with pytest.raises(sqlite3.IntegrityError):
+        with transaction(conn):
+            conn.execute(sql)
+
+
+def test_skill_run_needs_an_existing_session(conn):
+    class Ghost:
+        session_id = uuid7()
+
+    with pytest.raises(sqlite3.IntegrityError):
+        with transaction(conn):
+            _new_run(conn, Ghost)
