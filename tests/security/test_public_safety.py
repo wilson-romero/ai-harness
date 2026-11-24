@@ -111,6 +111,23 @@ def test_denylist_matches_without_printing_the_term(tmp_path, capsys):
     assert term.lower() not in str(findings[0]).lower()
 
 
+def test_denylist_matches_whole_words_only():
+    term = "ac" + "me"
+    hits = lambda line, terms: len(guard.check_text("a.md", line, terms))
+    assert hits("contrato con ACME firmado", [term]) == 1
+    assert hits("acme-portal.internal", [term]) == 1
+    assert hits("la academia y el acmeismo", [term]) == 0
+
+
+def test_case_sensitive_term_spares_the_ordinary_word():
+    name = "Cla" + "ra"  # a name that is also an ordinary word in lower case
+    hits = lambda line: len(guard.check_text("a.md", line, ["cs:" + name]))
+    assert hits(f"Reunion con {name} el lunes") == 1
+    assert hits("una respuesta " + name.lower() + " y directa") == 0
+    # Without the prefix the ordinary word is flagged too: that is the difference.
+    assert len(guard.check_text("a.md", "una respuesta " + name.lower(), [name])) == 1
+
+
 def test_missing_denylist_is_reported_not_hidden(tmp_path):
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "README.md"],
