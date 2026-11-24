@@ -1,0 +1,244 @@
+# Design
+
+## Context
+
+Parte de `develop` en `8cb2ec5` (cortes 0, 1 y 3 mergeados y archivados). La motivación está en `proposal.md`; los requisitos, en `specs/`. Lo que este change toca de lo que ya existe:
+
+- CLI `argparse` en `harness/cli.py` con códigos de salida 0, 1, 2 y 130 (D10 de `session-core`) y salida en UTF-8 por capacidad (`reconfigure`), no por plataforma.
+- SQLite con migraciones numeradas `001_initial.sql` y `002_memory.sql`; `audit_events` sin columna de detalle. `feature/skill-engine` (no mergeada) añade `003_skills.sql`, `approvals`, `audit_events.run_id`/`detail` y generaliza `SessionLock` a `NamedLock`; `feature/copilot-web-provider` (no mergeada) añade `playwright`, `harness/browser/` y un bloqueo con nombre `browser`. Este change no toca ninguno de esos ficheros y su migración toma el número libre al integrar.
+- `harness/memory/safe_text.py` y `harness/memory/redaction.py`: el saneado común (quitar `Cc`, `Cf` y separadores de línea, después redactar 13 patrones lineales). Es lo que se reutiliza para los resultados (D7).
+- `tests/unit/test_portability.py`: ninguna rama por plataforma fuera de `harness/enterprise_architect/`.
+
+Restricciones que mandan sobre todo lo que sigue:
+
+- **Repositorio público.** La lista de servidores vive fuera del repo; los servidores de prueba son sintéticos; un resultado de herramienta nunca se escribe en SQLite ni en el repo.
+- **Un solo camino de código.** Ni este change ni sus tests añaden `sys.platform`, `os.name`, `fcntl` ni `msvcrt`. Lo que depende de la plataforma (crear el proceso, matar su árbol) lo hace el SDK, que ya contiene esas ramas (medido, ver premisas).
+- **Lecciones de Windows de este proyecto:** un entorno de subproceso nunca se construye desde cero; stdio y ficheros en UTF-8 explícito; todo proceso hijo se mata y se recoge con esperas acotadas (una prueba de bloqueo con nombre estuvo colgada 1 h 46 min en Windows el 2026-11-24 porque un `communicate(timeout=30)` no saltó); las carpetas de OneDrive bloquean directorios.
+
+### Premisas medidas
+
+Todas comprobadas el 2026-11-24, en la Mac (arm64, CPython 3.14.8, uv 0.13.1), salvo donde se dice otra cosa.
+
+- **SDK `mcp`** (PyPI JSON, `https://pypi.org/pypi/mcp/json`): última versión **2.3.0**, subida el 2026-10-02, `requires_python >=3.10`, clasificador `Programming Language :: Python :: 3.14`, rueda `py3-none-any`. Dependencias declaradas: `anyio`, `httpx2`, `jsonschema`, `mcp-types==2.3.0`, `opentelemetry-api`, `pydantic>=2.12`, `pyjwt[crypto]`, `python-multipart`, `sse-starlette`, `starlette`, `typing-extensions`, `typing-inspection`, `uvicorn` y **`pywin32>=311; sys_platform == "win32"`**.
+- **Resolución y wheels:** `uv lock` en un proyecto desechable fuera del repo con `pydantic>=2.14.4`, `mcp==2.3.0` y `pywin32>=312; sys_platform == 'win32'` resuelve 31 paquetes (25 más que el lock actual) en 1,8 s; `uv sync` instala en la Mac; `from mcp import Client, StdioServerParameters, stdio_client` importa. El lock trae ruedas `win_amd64` para CPython 3.14 de los paquetes compilados: `cffi-2.1.1-cp314`, `cryptography-50.0.2-cp311-abi3`, `rpds_py-2026.9.1-cp314`, `pywin32-312-cp314`. **No medido:** la instalación real en Windows (lo confirma la tarea 1.2 con Wilson o la primera ejecución de `ea-read`).
+- **API del cliente** (documentación oficial v2.3.0 en Context7, `/modelcontextprotocol/python-sdk/v2.3.0`, páginas `docs/client/transports.md`, `docs/client/index.md`, `docs/migration.md`, `docs/run/index.md`, `docs/advanced/low-level-server.md`; y el código instalado `mcp/client/stdio.py`, 355 líneas):
+  - `Client(StdioServerParameters(command, args, env, cwd, encoding="utf-8", encoding_error_handler="strict"))`; para mandar el stderr del servidor a otro sitio, `Client(stdio_client(params, errlog=fichero))`.
+  - `Client.call_tool(name, arguments, read_timeout_seconds=...)`. Una herramienta que falla **no lanza**: vuelve con `is_error=True` y el mensaje en `content`; pedir una herramienta inexistente también vuelve así («Unknown tool»). `MCPError` solo cuando el servidor responde con un error JSON-RPC.
+  - Si la herramienta declara `output_schema`, el `Client` valida `structured_content` con `jsonschema` y lanza `RuntimeError("Invalid structured content returned by tool …")` si no lo cumple.
+  - **Entorno del hijo:** no hereda el del padre. `get_default_environment()` copia de `os.environ` una lista fija (`DEFAULT_INHERITED_ENV_VARS`): en POSIX `HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM`, `USER`; en Windows `APPDATA`, `HOMEDRIVE`, `HOMEPATH`, `LOCALAPPDATA`, `PATH`, `PATHEXT`, `PROCESSOR_ARCHITECTURE`, `SYSTEMDRIVE`, `SYSTEMROOT`, `TEMP`, `USERNAME`, `USERPROFILE` (leído en el código instalado; la lista de Windows no se ha ejecutado). `env=` se mezcla encima. Es decir: el entorno se **copia** de `os.environ` filtrado, no se inventa; cumple la lección de Windows.
+  - **Cierre:** al salir del bloque, cierra stdin, espera 2 s (`PROCESS_TERMINATION_TIMEOUT`), y si sigue vivo mata el árbol: en POSIX el grupo de procesos (el hijo se crea con sesión propia) con SIGTERM y 2 s después SIGKILL; en Windows termina el Job Object del servidor, que mata también a sus hijos. Si sobrevive a todo, registra un aviso y lo **abandona**. Un servidor que **sale solo** al cerrar su stdin deja vivos a sus hijos en POSIX (documentado en `docs/migration.md`).
+  - **Lectura de stdout:** acumula en un `str` hasta el salto de línea (`buffer = (buffer + chunk).split("\n")`), **sin límite**: una línea enorme sin salto crece en memoria y el coste de concatenar es cuadrático. Una línea que no es JSON-RPC se devuelve como excepción a la sesión, que la entrega al `message_handler` del cliente; el SDK además la registra con `logger.exception`, cuyo texto incluye un trozo de la línea.
+  - **Servidor:** `MCPServer` (antes `FastMCP`) por stdio mueve el protocolo a descriptores privados y desvía a stderr lo que se escriba en stdout mientras sirve; lo escrito antes de empezar a servir sí llega al canal.
+- **`uv run --with`** (documentación de uv en Context7, `/astral-sh/uv`, `docs/concepts/projects/run.md`): añade una dependencia «para una sola invocación». Medido en la Mac: `uv run --with pywin32 python -c ...` falla al resolver («pywin32>=311 has no wheels with a matching platform tag (e.g., `macosx_26_0_arm64`)») y `git status` queda limpio, es decir, no toca `uv.lock` ni `pyproject.toml`. Lo usa la sonda de `ea-read`, no este change.
+
+## Goals / Non-Goals
+
+**Goals:**
+
+- Que `ea-read` sea solo un servidor MCP más: todo lo que el harness necesita para arrancarlo, limitarlo, auditarlo y cerrarlo está aquí y se demuestra en la Mac con un servidor sintético.
+- Que ninguna conducta de un servidor (colgarse, inundar, escribir basura, morir, ignorar el cierre) pueda colgar el harness ni dejarle procesos propios vivos sin que lo diga.
+- Que la política sea una función pura, probada exhaustivamente sin procesos.
+
+**Non-Goals:**
+
+- Servidor MCP propio, transportes de red, recursos, prompts, muestreo, elicitación.
+- Escrituras aprobadas (Corte 6), llamadas desde Skills o a propuesta de un modelo (Corte 7).
+- Contener a un servidor de terceros dentro de su proceso: corre con los permisos del usuario (ver Riesgos).
+
+## Decisions
+
+### D1 · SDK oficial `mcp`, fijado, y qué partes se usan
+
+- **Qué:** dependencia `mcp==2.3.0` (fijada con `==`; se sube con un change propio). Del SDK se usan solo `Client`, `StdioServerParameters`, `stdio_client` (con `errlog`) y, en los servidores de prueba y en `ea-read`, `MCPServer`. Nada de HTTP, SSE, autenticación ni `mcp.cli`.
+- **Por qué:** el plan maestro y `openspec/config.yaml` fijan «SDK oficial de MCP por stdio». El SDK ya resuelve en su código lo que este proyecto no puede escribir sin ramas por plataforma: crear el proceso en su propio ámbito de terminación (grupo de procesos en POSIX, Job Object en Windows) y matar el árbol entero (medido en `mcp/client/stdio.py`). Fijar la versión importa porque la conducta de cierre cambió entre 1.x y 2.x (`docs/migration.md`).
+- **Alternativas rechazadas:**
+  - Implementar JSON-RPC sobre stdio a mano con `asyncio.create_subprocess_exec`: control total del tamaño de línea, pero matar el árbol en Windows exige Job Objects (`ctypes` o `pywin32`) y una rama por plataforma en el núcleo, que la regla del proyecto prohíbe.
+  - Un transporte propio que cumpla el protocolo `Transport` del SDK para poner límite a la línea: misma objeción (habría que reescribir el arranque y la terminación del árbol); se reconsidera si la tarea 2.6 mide que la falta de límite es un problema real.
+  - `mcp` sin fijar o con `>=`: el lock lo fija igual, pero un `uv lock --upgrade` cambiaría la conducta de cierre sin que nadie lo revise.
+- **Coste aceptado:** 25 paquetes nuevos en el lock, entre ellos servidores web (`starlette`, `uvicorn`) que este proyecto no importa. Se justifica porque el SDK no ofrece un paquete solo-cliente (`mcp-types` solo trae los tipos). `pywin32` entra en el lock de Windows por el propio SDK, antes incluso de `ea-read`.
+- **Impacto:** `pyproject.toml`, `uv.lock`; tarea 1.2; `ea-read` hereda la dependencia.
+
+### D2 · La lista local de servidores: formato, ubicación y quién la edita
+
+- **Qué:**
+  - **Ubicación:** la ruta absoluta de `HARNESS_MCP_CONFIG`. Sin la variable, no hay servidores (`mcp list` lo dice y termina con 0). La ruta se rechaza si está dentro de un árbol de trabajo de Git y no está ignorada (la misma comprobación que la sonda de Copilot, con `git check-ignore`), porque la lista contiene rutas locales que no deben acabar en el repo público. `.gitignore` ya ignora `mcp.local.json`.
+  - **Quién la edita:** la persona, a mano. El harness **solo la lee**: no existe ningún comando que la escriba, y ninguna herramienta puede escribirla porque en este corte toda herramienta `write` se deniega.
+  - **Formato** (JSON, modelos Pydantic con `extra="forbid"`; un error nombra el campo):
+
+    ```json
+    {
+      "format": "ai-harness/mcp/1",
+      "servers": {
+        "synthetic": {
+          "command": ["/ruta/absoluta/al/python", "/ruta/absoluta/al/servidor.py"],
+          "cwd": null,
+          "env": ["HARNESS_TEST_CANARY"],
+          "startup_timeout_s": 20,
+          "call_timeout_s": 30,
+          "tools": {
+            "get_project_metadata": {
+              "operation": "read",
+              "max_result_bytes": 65536,
+              "arguments": {
+                "project": {"type": "string", "max_length": 64, "pattern": "[a-z0-9][a-z0-9-]*", "required": true}
+              }
+            }
+          }
+        }
+      }
+    }
+    ```
+
+  - **Reglas:** nombre de servidor y de herramienta `[a-z][a-z0-9_-]{0,63}`; `command` es una lista no vacía y `command[0]` una ruta absoluta (sin búsqueda en `PATH`, para que un ejecutable plantado en el directorio actual o al principio de `PATH` no se cuele); `cwd` nulo o absoluto; `env` es una lista de **nombres** cuyos valores se copian de `os.environ` del harness (nunca valores escritos en la lista, para que no se guarden secretos en ella); plazos entre 1 y 300 s; `operation` obligatorio, `read` o `write`; `max_result_bytes` entre 1 KiB y 1 MiB (64 KiB por defecto); argumentos de tipo `string` (`max_length` ≤ 4096 obligatorio, `pattern` opcional con `re.fullmatch`), `integer` (`minimum`, `maximum` obligatorios), `boolean` o `enum` (lista de cadenas). Sin objetos anidados en este corte: las herramientas de `ea-read` no los necesitan.
+  - Los servidores **incorporados** (el de EA en `ea-read`) se declaran con `"builtin": "<nombre>"` en lugar de `command`: la orden y la lista de herramientas las fija el código, y la entrada solo aporta los datos locales (el destino).
+- **Por qué:** JSON se lee con la biblioteca estándar y Pydantic ya valida los contratos del proyecto. Declarar los argumentos en local (y no fiarse del esquema del servidor) es lo que hace la política deny-by-default de verdad: lo que la persona no escribió no existe. Pedir nombres de variables y no valores evita que la lista se convierta en un almacén de secretos.
+- **Alternativas rechazadas:**
+  - El formato `mcpServers` de otros clientes (orden como cadena, `env` con valores): admite una orden de shell y secretos en claro.
+  - TOML: legible, pero `tomllib` solo lee y el proyecto no usa TOML para nada más; no aporta nada frente a JSON validado por Pydantic.
+  - Validar los argumentos con el `inputSchema` del servidor y `jsonschema`: el esquema lo escribe el servidor, que es justo la parte no confiable (D5).
+  - Lista dentro de `HARNESS_DATA_DIR` por defecto: el directorio de datos lo escribe el harness; la lista la escribe solo la persona.
+- **Impacto:** spec `mcp-client` (Lista local de servidores permitidos, La orden de arranque solo sale de la configuración local, Entorno heredado acotado); `README.md`; `.env.example`; tareas 2.1 y 2.2.
+
+### D3 · Un servidor por comando, arrancado y cerrado por el comando
+
+- **Qué:** `mcp tools` y `mcp call` arrancan el servidor, negocian, hacen su única operación y lo cierran dentro del mismo comando. El arranque usa `Client(stdio_client(StdioServerParameters(command=cmd[0], args=cmd[1:], env=<D2 más la marca de D8>, cwd=..., encoding="utf-8"), errlog=<fichero>))`. El stderr del servidor va a `HARNESS_DATA_DIR/logs/mcp/<servidor>.stderr.log` (UTF-8, en modo añadir; si al empezar pasa de 1 MiB se renombra a `.1`, uno solo), nunca a la terminal: el stderr de un servidor puede llevar contenido real (nombres del modelo de EA). El registrador `mcp` del SDK se silencia (nivel por encima de `CRITICAL`): sus mensajes citan líneas del servidor sin sanear.
+- **Por qué:** sin servidor propio ni demonio en este corte, un proceso por comando es lo único que garantiza que al terminar el comando no queda nada vivo. Arrancar EA cuesta (lo mide la sonda de `ea-read`); si resulta caro, mantener un servidor vivo entre comandos es una decisión del Corte 7 con un bloqueo con nombre, no de este.
+- **Alternativas rechazadas:**
+  - Mantener servidores vivos en segundo plano entre comandos: exige un proceso demonio, un canal para hablar con él (que sería una superficie de entrada, SEC-09) y un dueño del ciclo de vida.
+  - Dejar el stderr del servidor en la terminal (el valor por defecto del SDK): mezclaría contenido no saneado con la salida del harness.
+- **Impacto:** spec `mcp-client` (Descubrir herramientas, Llamar a una herramienta); tareas 3.1 y 3.2.
+
+### D4 · Plazos duros y ciclo de vida del subproceso (SEC-10)
+
+- **Qué:**
+  - **Fases y plazos:** arranque y negociación (`startup_timeout_s`, 20 s por defecto), `list_tools` (el mismo plazo), llamada (`call_timeout_s`, 30 s; se pasa como `read_timeout_seconds` y además se envuelve en `asyncio.timeout`), cierre (lo hace el SDK: 2 s de gracia, terminación del árbol, 2 s más en POSIX, 2 s para recoger; unos 6 s en el peor caso medido en el código). **Plazo total** del comando = arranque + llamada + 15 s de margen.
+  - **El plazo total no depende del SDK:** toda la conversación con el servidor corre en un hilo con su propio bucle de eventos; el hilo principal espera con `join(timeout=plazo_total)`. Si el hilo no ha vuelto (porque el cierre del SDK, que corre protegido contra cancelación, no termina), el comando imprime `error: the MCP server did not shut down in time`, marca la llamada como `abandoned` en la auditoría y termina el proceso con `os._exit(1)` tras cerrar la base de datos. Es la última barrera, no el camino normal; en Windows, al morir el harness se cierra el Job Object y el SDK lo crea para matar el árbol (documentado, no medido en Windows).
+  - **Interrupción (`Ctrl+C`):** el hilo principal cancela el bucle del hilo de trabajo y espera el cierre con el mismo margen de 15 s; código 130.
+  - **Cómo se prueba sin colgar la batería:** cada test con procesos activa `faulthandler.dump_traceback_later(120, exit=True)` (biblioteca estándar, sin dependencia) para que un cuelgue imprima la traza y aborte en 2 minutos en lugar de horas; ningún test llama a `communicate()` ni a `wait()` sin plazo. Para saber si un proceso sigue vivo sin ramas por plataforma (ni `os.kill(pid, 0)`, que en Windows **mata** el proceso), el servidor sintético escribe un fichero de latido cada 100 ms; el test comprueba que el latido se detiene en menos de 3 s tras el comando. El control negativo es un servidor que ignora el cierre con el SDK sustituido por uno que no mata el árbol: el test tiene que fallar.
+- **Por qué:** la lección de Windows del 2026-11-24 es que un plazo que vive dentro de la misma operación que se cuelga no salta. Un hilo vigilante con `join(timeout)` y una salida dura es un plazo que no depende de nada de lo que vigila.
+- **Alternativas rechazadas:**
+  - Confiar solo en `read_timeout_seconds`: no cubre el arranque ni el cierre.
+  - `asyncio.wait_for` sobre todo el bloque: el cierre del SDK corre en un ámbito protegido contra cancelación; no se puede cortar desde fuera del bucle.
+  - Un subproceso intermedio vigilante: otro proceso más que cerrar y otra rama de terminación por plataforma.
+  - `pytest-timeout`: una dependencia de desarrollo para lo que `faulthandler` ya hace.
+- **Límite que no se arregla:** en POSIX, un servidor que **sale solo** al cerrarse su stdin deja vivos a los hijos que haya lanzado (decisión documentada del SDK 2.x); el harness no los ve ni los mata. En Windows los mata el Job Object. El servidor de EA no lanza hijos (ver `ea-read`). Se escribe en el README.
+- **Impacto:** spec `mcp-client` (Plazos duros, Ningún proceso propio queda vivo); tareas 3.3 a 3.6.
+
+### D5 · Motor de políticas: una función pura, deny-by-default
+
+- **Qué:** `decide(config, offered_tools, server, tool, arguments) -> Decision(allowed, reason, operation)`, sin efectos, en `harness/mcp/policy.py`. Orden de comprobación y motivos (el primero que falla):
+  1. `recursion` si el proceso tiene la marca de D8.
+  2. `server_not_allowed` si el servidor no está en la lista.
+  3. `args_too_large` si el JSON canónico de los argumentos pasa de 16 KiB; `args_not_object` si no es un objeto.
+  4. `tool_not_allowed` si la herramienta no está declarada para ese servidor.
+  5. `tool_absent` si el servidor no la ofrece en `list_tools`; `schema_mismatch` si el esquema de entrada del servidor no tiene alguno de los argumentos declarados o exige uno que la lista no declara.
+  6. `argument_not_allowed`, `argument_missing`, `argument_invalid` por cada argumento (nombre, obligatorio, tipo, longitud, patrón, rango, enumeración).
+  7. `write_requires_approval` si la operación declarada es `write` (o falta, que la configuración rechaza).
+  - Solo `allowed` con operación `read` llega a `call_tool`.
+  - **La política vive en la lista local** (D2): qué servidores, herramientas, argumentos y operación. Lo que el servidor declara (descripción, esquema, anotaciones como `readOnlyHint`) solo puede **restringir** (motivos 5), nunca ampliar.
+  - Las comprobaciones 2, 3, 4, 6 y 7 se hacen **antes** de arrancar el servidor (no hace falta para negar); la 5 después de `list_tools`.
+- **Por qué:** una función pura se prueba con cientos de casos sin procesos, en la Mac, con las mismas entradas que en Windows. El orden pone primero lo que no necesita arrancar nada: una llamada denegada por configuración no consume ni un proceso.
+- **Alternativas rechazadas:**
+  - Permitir por defecto las herramientas con `readOnlyHint`: es el servidor diciendo de sí mismo que es inofensivo.
+  - Validar argumentos solo contra el `inputSchema` del servidor con `jsonschema` (que el SDK ya trae): el esquema podría aceptar `path` o un objeto arbitrario; además `jsonschema` no es dependencia directa del proyecto.
+  - Una política en un fichero aparte de la lista de servidores: dos ficheros que pueden discrepar sobre el mismo servidor.
+- **Impacto:** spec `tool-policy` (Denegado por defecto, Escrituras denegadas sin aprobación, Lo que dice el servidor no amplía la política); tareas 2.3 y 2.4.
+
+### D6 · Escrituras: denegadas aquí; en el Corte 6, la aprobación de `skill-engine`
+
+- **Qué:** en este corte toda herramienta `write` se deniega con `write_requires_approval` y se audita. El Corte 6 no inventará una aprobación nueva: reutilizará la de `skill-engine` (D12 de su design: propuesta canónica `ai-harness/approval/1`, hash SHA-256 con prefijo de dominio, concesión solo en terminal interactiva copiando 8 caracteres del hash, caducidad, consumo con un único `UPDATE ... WHERE status='granted' AND proposal_hash=? AND expires_at>?`). Para una llamada MCP la propuesta tendrá `scope = "mcp:<servidor>/<herramienta>"`, `target` = el destino del servidor (para EA, el identificador local del target de pruebas) y `content` = SHA-256 y bytes del JSON canónico de los argumentos; el consumo de la aprobación y el paso de la fila de `tool_calls` a `applying` irán en la misma transacción; un plazo vencido tras enviar una escritura deja la llamada `uncertain` y no se reintenta.
+- **Por qué:** dos mecanismos de aprobación serían dos sitios donde equivocarse con SEC-12; el de `skill-engine` ya está diseñado para «propuesta exacta, caducidad, uso único».
+- **Alternativas rechazadas:**
+  - Una confirmación `[s/N]` en `mcp call` para escrituras: se aprueba sin leer y sin hash; el Corte 6 tendría que retirarla.
+  - Diseñar ya la columna de aprobación en `tool_calls`: `approvals` no existe en `develop`; se añade con la migración del Corte 6.
+- **Impacto:** spec `tool-policy` (Escrituras denegadas sin aprobación); ninguna tarea de este change implementa aprobaciones.
+
+### D7 · Resultados como datos no confiables, con el saneado común movido a un módulo neutral
+
+- **Qué:**
+  - `harness/memory/redaction.py` y `harness/memory/safe_text.py` se **mueven** a `harness/text/redaction.py` y `harness/text/safe_text.py`, sin cambiar ni una línea de su lógica; `harness/memory/` los importa desde allí. El test de lista blanca de `tests/security/test_memory_no_writes.py` añade `harness.text` a los módulos permitidos. Los tests de redacción siguen pasando sin cambios de aserciones.
+  - **Presentación** (`harness/mcp/render.py`): el tamaño se mide sobre el resultado **tal como llegó** (JSON canónico de `content` + `structured_content`) y se compara con `max_result_bytes` antes de tocar nada. Después: `structured_content` se recorre entero y cada clave pasa por `safe_line` y cada cadena por `safe_text` (las claves también: un nombre de campo puede llevar una credencial); se imprime con `json.dumps(..., ensure_ascii=False, indent=2, sort_keys=True)`. Cada bloque de texto de `content` pasa por `safe_text`. Imágenes, audio y recursos embebidos se sustituyen por `[<tipo> withheld: N bytes]`. El recuento de sustituciones sale por stderr. Si hay `structured_content` válido, se imprime ese y no el texto (el SDK lo valida contra `output_schema`).
+  - **Nada del resultado se guarda:** la auditoría guarda bytes, no texto (D11). Un error de la herramienta (`is_error`) se imprime saneado por stderr. Las excepciones del SDK nunca se imprimen tal cual: se traducen a un código (`protocol_error`, `server_exited`, `invalid_result`, `timeout`…).
+  - **Un resultado no puede pedir nada:** el código no interpreta ningún resultado; `mcp call` hace una llamada y termina (D8).
+- **Por qué:** el saneado ya está probado contra controles invisibles, credenciales troceadas y entradas adversarias de 1 MiB (tareas 8.2–8.4 de `project-memory`); duplicarlo para MCP sería la segunda copia que se queda atrás. Medir antes de sanear impide que un resultado enorme haga trabajar al saneado.
+- **Alternativas rechazadas:**
+  - Dejar el saneado en `harness/memory/` e importarlo desde `harness/mcp/`: un paquete de herramientas dependería del de memoria por un detalle de ubicación.
+  - Imprimir el JSON crudo y sanear solo los textos: las claves quedarían sin sanear.
+  - Guardar el resultado con un proveedor sintético, como los mensajes del Mock: el resultado no lo escribe el proveedor; podría ser contenido real del modelo de EA.
+- **Impacto:** spec `tool-policy` (Resultados como datos no confiables); requisito ADDED «Resultados de herramientas enmascarados» de `secret-redaction`; tareas 1.3 y 4.1. Cuando el Corte 7 envíe resultados a un proveedor, los envolverá con el aviso y los delimitadores con nonce de D6 de `project-memory`, que también se moverán a `harness/text/` entonces.
+
+### D8 · Sin bucles ni recursión
+
+- **Qué:**
+  - Un `mcp call` hace como mucho una llamada `call_tool`; no hay bucle que lea un resultado y decida otra llamada.
+  - El `Client` se crea **sin** `sampling_callback`, `elicitation_callback` ni `list_roots_callback`: el harness no ofrece esas capacidades y una petición del servidor recibe un error (**no medido**: qué responde exactamente el SDK 2.3.0 sin callback lo mide la tarea 3.7 con el servidor sintético en modo `sampling`).
+  - **Marca de recursión:** el entorno de todo servidor lleva `AI_HARNESS_MCP_CHILD=1`; si un proceso del harness la ve, todo comando `mcp` se niega (`recursion`, código 1) antes de leer la configuración. Así un servidor permitido que ejecute `main.py mcp call …` no puede encadenar llamadas a través del harness.
+- **Por qué:** es lo que pide §7 del plan maestro («evitar ciclos de herramientas y llamadas recursivas al propio harness») traducido a lo que existe en este corte: no hay modelo que proponga llamadas, así que el único bucle posible es un servidor que vuelve a llamar al harness o que le pide al cliente que hable con un modelo (muestreo).
+- **Alternativas rechazadas:**
+  - Un contador de profundidad que permita N niveles: no hay ningún caso de uso que necesite recursión.
+  - Detectar la recursión por el árbol de procesos: depende de la plataforma.
+- **Límite:** la marca es una variable de entorno; un servidor malicioso puede borrarla antes de lanzar el harness. Protege contra el error y el encadenamiento accidental, no contra un servidor que ya ejecuta código arbitrario con los permisos del usuario.
+- **Impacto:** spec `tool-policy` (Sin bucles ni recursión); tareas 3.7 y 3.8. Los Skills del Corte 7 añadirán un límite de llamadas por ejecución (SEC-15).
+
+### D9 · SEC-09 en este corte: qué se cubre y qué no
+
+- **Qué:** SEC-09 («cliente no autorizado → sin acceso») habla del servidor MCP propio del harness, que llega en el Corte 8. En este corte el harness **no tiene ninguna superficie de entrada**: no abre puertos ni sockets de escucha, no lee órdenes de ningún canal que no sea su propia línea de órdenes, y los servidores que arranca le hablan solo por los tubos que el propio harness creó. Lo que se prueba: (a) un test con `sys.addaudithook` registra los eventos `socket.bind` y `socket.listen` durante un `mcp call` y no encuentra ninguno que quede escuchando (la emulación de `socketpair` de la biblioteca estándar en Windows escucha en bucle local y se cierra al aceptar; se distingue por cerrarse antes de que el comando continúe); (b) un test estructural (`ast`) sobre `harness/mcp/` no encuentra `asyncio.start_server`, `socketserver`, `http.server`, `.listen(` ni transportes HTTP del SDK.
+- **Por qué:** escribir «SEC-09 cubierto» sin servidor propio sería un recibo falso. Lo honesto es probar que no hay puerta y dejar la autorización de clientes para el corte que abre la puerta.
+- **Alternativas rechazadas:** un token compartido entre el harness y sus servidores: stdio entre padre e hijo ya es un canal privado; un token no añade nada que un proceso del mismo usuario no pueda leer.
+- **Impacto:** spec `tool-policy` (Ninguna superficie de entrada en este corte); `SECURITY.md`; tarea 4.4. `ea-read` aplica lo mismo al servidor de EA.
+
+### D10 · CLI
+
+- **Qué:**
+  - `mcp list`: lee la lista (sin arrancar nada) e imprime por servidor su nombre, si es incorporado o externo, y sus herramientas con su operación. Nunca imprime la orden de arranque ni rutas (puede ser una ruta personal y la salida se pega en otros sitios).
+  - `mcp tools SERVER`: arranca, `list_tools`, cierra; una línea por herramienta: nombre, operación declarada o `-`, estado `allowed`/`denied:<motivo>`/`absent`/`schema_mismatch`, y la descripción del servidor saneada y recortada a 120 caracteres.
+  - `mcp call SERVER TOOL [--args JSON]` (por defecto `{}`): política previa, arranque, `list_tools`, política completa, una llamada, cierre. Resultado saneado por stdout; resumen por stderr: `call: <servidor>/<herramienta> <estado> in <ms> ms, <bytes> bytes, <n> credential(s) redacted`.
+  - Códigos: 0 completada sin error de herramienta; 1 denegada, error de herramienta, de protocolo o plazo vencido; 2 uso (JSON de `--args` no válido o demasiado grande); 130 interrumpida.
+- **Por qué:** los tres comandos que pide el corte; el resumen por stderr sigue la convención de `memory context` (el contenido es lo único que va por stdout).
+- **Alternativas rechazadas:** `--args-file`: no hace falta con argumentos de 16 KiB como máximo; `--json` para la salida: la salida ya es JSON cuando el resultado es estructurado.
+- **Impacto:** spec `mcp-client`; `README.md`; tarea 4.2.
+
+### D11 · Auditoría: tabla `tool_calls`, sin contenido
+
+- **Qué:** migración aditiva con **el siguiente número libre al integrar** (hoy sería `003`, pero `feature/skill-engine` ya usa `003_skills.sql`; si se integra antes, esta será `004`; `test_migrating_twice_changes_nothing` detecta la colisión). Tabla `tool_calls(call_id PK, server TEXT, tool TEXT, operation TEXT NULL CHECK IN ('read','write'), decision CHECK IN ('allowed','denied'), reason TEXT NULL, args_sha256 CHECK(length=64) NULL, args_bytes, status CHECK IN ('denied','running','completed','failed','timeout','abandoned'), error_code NULL, result_bytes NULL, duration_ms NULL, created_at, finished_at NULL)`. `server` y `tool` se guardan saneados con `safe_line` y recortados a 64 caracteres (un nombre pedido que no está en la lista puede contener cualquier cosa). El identificador es UUIDv7 (D4 de `session-core`). Una llamada permitida inserta `running` en una transacción antes de enviar y la cierra después; una denegada inserta `denied` directamente.
+  - **Recuperación:** al empezar un comando `mcp`, una fila `running` más antigua que el plazo total máximo (300 + 300 + 15 s) pasa a `failed` con `error_code = 'interrupted'`. Para lectura es exacto (repetirla no cambia nada); el Corte 6 hará que una escritura `running` pase a `uncertain`.
+- **Por qué:** es la tabla `tool_calls` de §6 del plan maestro con lo que pide SEC-05 (qué se denegó y por qué) y nada de contenido, como «Auditoría sin contenido» de `session-management`. El hash de los argumentos permite comprobar después qué se pidió sin guardarlo.
+- **Alternativas rechazadas:**
+  - Usar `audit_events`: no tiene columnas para servidor, herramienta ni motivo en `develop`; `skill-engine` le añade `detail` como texto libre, que es justo lo que no se puede consultar con un `SELECT`.
+  - Guardar los argumentos con un proveedor sintético: pueden contener un GUID real de EA.
+- **Límite:** el SHA-256 de unos argumentos de pocos valores posibles (un nombre de proyecto) permite comprobar una suposición por fuerza bruta a quien lea la base. La base es local y del usuario; se acepta y se escribe.
+- **Impacto:** spec `tool-policy` (Auditoría de cada decisión sin contenido); `harness/storage/migrations/`; tareas 1.4 y 4.3.
+
+### D12 · Servidores de prueba sintéticos
+
+- **Qué:** `tests/fixtures/mcp/synthetic_server.py`, un `MCPServer` del SDK con `get_project_metadata(project)` (devuelve nombre, estado y tres etiquetas inventados para `demo-alpha` y `demo-beta`), `set_project_metadata` (declarada `write`; nunca se debe llegar a llamar) y `echo_env(name)` (dice si ve una variable). El modo se elige por argumento de su orden de arranque, que escribe el test en una lista temporal: `ok`, `hang-init`, `hang-call`, `flood` (2 MiB en un resultado), `long-line` (una línea de 8 MiB sin salto), `garbage` (texto antes de la respuesta), `die` (sale al recibir la llamada), `ignore-close` (ignora EOF y SIGTERM), `bad-schema`, `sampling`, `recurse` (ejecuta el harness), `leaky` (credenciales, ANSI y bidireccionales en el resultado). Todos escriben un fichero de latido (D4) y un registro de llamadas recibidas, en el directorio temporal del test.
+- **Por qué:** cada conducta del spec necesita un servidor que la provoque de forma determinista; un único fichero con modos se mantiene mejor que doce.
+- **Alternativas rechazadas:** servidores de terceros (los de referencia de MCP): red, otra cadena de herramientas y conducta que no controlamos.
+- **Impacto:** fixtures; todas las tareas de los grupos 3 y 4; `scripts/demo_mcp_gateway.py`.
+
+### D13 · Paquete y límites estructurales
+
+- **Qué:** `harness/mcp/` con `config.py` (D2), `policy.py` (D5), `client.py` (D3, D4), `render.py` (D7), `audit.py` (D11) y `commands.py` (D10). Un test estructural (`ast`) comprueba que `harness/mcp/` no importa `subprocess` ni `harness.enterprise_architect`, no usa `shell=True`, `os.system` ni `os.popen` (el único camino a un proceso es `stdio_client`) y no abre sockets de escucha (D9). Ninguna rama por plataforma (`test_portability.py`).
+- **Por qué:** subconjunto de `harness/mcp/` de §4 del plan maestro sin `server.py` (Corte 8).
+- **Alternativas rechazadas:** un único `mcp.py`: mezclaría la parte pura (política, configuración) con la de procesos.
+- **Impacto:** tareas 1.1 y 4.4.
+
+## Risks / Trade-offs
+
+- [El SDK lee líneas sin límite: un servidor que escribe una línea enorme sin salto agota memoria y CPU (medido en el código, no ejecutado)] → la tarea 2.6 lo mide con el modo `long-line` (8 MiB) y el plazo total corta el comando; si la memoria o el tiempo medidos no son aceptables, se reabre D1 (transporte propio que cumpla `Transport`). Mientras, solo arrancan servidores que la persona escribió en su lista.
+- [Un servidor que sale solo deja vivos a sus hijos en POSIX] → limitación documentada del SDK (D4); README. El servidor de EA no lanza hijos.
+- [Cambio de conducta del SDK al subir de versión] → versión fijada con `==`; los tests de ciclo de vida (grupo 3) son el oráculo al subirla.
+- [`os._exit` como última barrera deja la auditoría con la fila en `abandoned` y sin `finished_at`] → aceptado: es el estado verdadero; la recuperación de D11 la cierra en el siguiente comando.
+- [El stderr del servidor en `logs/mcp/` puede tener contenido real] → vive en `HARNESS_DATA_DIR`, ignorado por Git y por el guard público (`logs/*`, `*.log`); el README lo dice.
+- [Un servidor de terceros corre con los permisos del usuario y puede hacer cualquier cosa en su proceso] → no se arregla: el harness decide qué arranca (lista local), qué le pasa (argumentos declarados, entorno acotado), cuánto espera y qué deja salir. Se escribe en `SECURITY.md`.
+- [La lista local en una carpeta de OneDrive que bloquea el fichero] → solo se lee; un error de lectura es un error controlado. No medido.
+- [Colisión de número de migración con `skill-engine`] → número libre al integrar; `test_migrating_twice_changes_nothing` lo detecta.
+- [Mover `safe_text`/`redaction` choca con otra rama que los toque] → `feature/skill-engine` los importa desde `harness/memory/`; al integrar, el segundo en llegar actualiza la importación. Se deja en `Workflow follow-up`.
+
+## Migration Plan
+
+Aditivo: una tabla nueva y un subcomando nuevo. Sin `HARNESS_MCP_CONFIG` el harness se comporta como en `8cb2ec5` salvo `mcp list`, que dice que no hay servidores. El movimiento de `safe_text`/`redaction` no cambia conducta (los tests de memoria son el oráculo). Vuelta atrás: revertir el change; la tabla queda sin uso.
+
+## Open Questions
+
+- ¿Plazos por defecto para EA? No cambian este change (son configurables por servidor); los fija `ea-read` con las cifras de su sonda.
