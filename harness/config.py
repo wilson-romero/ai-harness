@@ -16,6 +16,7 @@ class Settings:
     request_timeout_s: float
     mock_behavior: str
     mock_delay_ms: int
+    mock_responses: str  # path of the scripted answers of the Mock, or empty
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
@@ -25,6 +26,7 @@ class Settings:
             request_timeout_s=_number(env, "HARNESS_REQUEST_TIMEOUT_S", 120.0),
             mock_behavior=env.get("HARNESS_MOCK_BEHAVIOR") or "ok",
             mock_delay_ms=int(_number(env, "HARNESS_MOCK_DELAY_MS", 0)),
+            mock_responses=(env.get("HARNESS_MOCK_RESPONSES") or "").strip(),
         )
 
 

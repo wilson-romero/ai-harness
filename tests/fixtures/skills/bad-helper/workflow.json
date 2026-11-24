@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "version": "1.0.0",
+  "inputs": {
+    "text": {"description": "Texto sintético que se resume", "required": true}
+  },
+  "steps": [
+    {"id": "draft", "kind": "llm", "template": "templates/draft.md", "timeout_s": 30},
+    {
+      "id": "check",
+      "kind": "validate",
+      "of": "draft",
+      "format": "markdown",
+      "required_headings": ["Resumen", "Preguntas pendientes"],
+      "max_bytes": 32768
+    },
+    {"id": "confirm", "kind": "approval", "of": "check", "effect": "none"}
+  ],
+  "output": "check"
+}
