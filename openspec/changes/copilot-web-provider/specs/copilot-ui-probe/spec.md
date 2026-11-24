@@ -75,6 +75,13 @@ Cuando no tenga localizadores completos, la sonda SHALL encontrarlos por lo que 
 - **WHEN** la sonda descubre los controles en una página sintética que envía con botón y en otra que envía con Enter desde un párrafo editable, con convenciones de atributos distintas
 - **THEN** en las dos encuentra todos los controles obligatorios con dos envíos y el resumen no contiene ningún selector, canario ni dirección
 
+### Requirement: Turnos sustituidos y enlace a la aplicación
+El descubrimiento SHALL NOT tomar por respuesta un elemento que contenga el prompt enviado y SHALL volver a localizar el mensaje y la respuesta cuando la respuesta termine, porque la página puede sustituir los elementos que mostró primero. Como única excepción a la regla del texto, MAY usar un enlace cuyo destino sea el primer segmento de la ruta de la propia página (`/chat`), que procede de la dirección configurada.
+
+#### Scenario: Copia optimista del mensaje y conversación nueva por enlace
+- **WHEN** la sonda descubre los controles en una página sintética que muestra el mensaje enviado y luego lo sustituye por otra copia que también contiene el marcador, con los turnos dentro de un feed virtualizado y la conversación nueva como enlace a la ruta de la propia aplicación
+- **THEN** encuentra los turnos de usuario y de respuesta por separado, comprueba la conversación nueva y no falta nada; sin esas dos reglas la misma página deja sin encontrar el turno del usuario
+
 ### Requirement: Lo no identificado se pide, no se adivina
 Lo que el descubrimiento no identifique con certeza SHALL nombrarlo y pedirlo por separado con una instrucción de una línea, y un localizador escrito a mano SHALL prevalecer sobre el descubierto.
 
@@ -85,6 +92,10 @@ Lo que el descubrimiento no identifique con certeza SHALL nombrarlo y pedirlo po
 #### Scenario: Página que ofrece iniciar sesión
 - **WHEN** la página abierta ofrece iniciar sesión aunque muestre un cuadro de texto
 - **THEN** ni el descubrimiento ni una medición con localizadores escritos a mano escriben en ella, y la sonda pide iniciar sesión
+
+#### Scenario: Dirección configurada que lleva a la portada de invitado
+- **WHEN** la URL configurada muestra una portada que ofrece iniciar sesión y el paso `login` de la sonda registró que el chat quedó listo en otra ruta del mismo host
+- **THEN** `discover` termina con error sin escribir nada, el mensaje dice que es la portada de invitado y propone esa ruta como `HARNESS_COPILOT_URL`, y el resumen no contiene la dirección
 
 #### Scenario: Un localizador a mano completa el hueco
 - **WHEN** el descubrimiento dejó un hueco y Wilson escribe solo ese localizador en el fichero de candidatos

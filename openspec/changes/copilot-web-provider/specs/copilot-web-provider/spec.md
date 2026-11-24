@@ -28,6 +28,17 @@ Una pregunta en una sesión que aún no tiene referencia remota SHALL abrir una 
 - **WHEN** el usuario pregunta por segunda vez en una sesión que ya tiene referencia remota
 - **THEN** la pregunta llega a la conversación de esa referencia y la referencia de la sesión no cambia
 
+### Requirement: La referencia es el identificador que asigna la plataforma
+El sistema SHALL NOT inventar ni preasignar el identificador de una conversación: SHALL aprenderlo de la URL cuando la plataforma lo asigne, según la forma medida, y SHALL guardar en la sesión solo ese identificador, sin host ni consulta. Si la pregunta falla después de enviar el prompt y antes de conocer el identificador, la solicitud SHALL quedar `uncertain` y la sesión sin referencia.
+
+#### Scenario: Consulta tras el identificador ignorada
+- **WHEN** la página sintética añade una consulta a la URL de la conversación después del identificador
+- **THEN** `sessions.remote_ref` contiene solo el identificador y la consulta no aparece en SQLite, en los logs ni en la salida
+
+#### Scenario: Fallo antes de conocer el identificador
+- **WHEN** la página sintética recibe el prompt pero nunca pone el identificador en la URL y el plazo vence
+- **THEN** la solicitud queda `uncertain`, `remote_ref` sigue vacío, y la pregunta siguiente abre una conversación nueva y avisa de que la anterior pudo quedar huérfana
+
 ### Requirement: Recuperación de la conversación tras reiniciar
 Tras cerrar y volver a abrir el navegador o el proceso, el sistema SHALL reabrir la conversación de la sesión a partir de su referencia y SHALL verificar que es la misma antes de enviar. Si la conversación no se encuentra, el sistema SHALL NOT enviar la pregunta, SHALL registrar la solicitud como `failed` y SHALL dejar la sesión en `closed`. Un fallo transitorio de carga SHALL terminar la solicitud en `timeout` o `failed`, sin envío, sin cerrar la sesión y sin cambiar su referencia.
 

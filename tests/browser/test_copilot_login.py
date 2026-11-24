@@ -9,6 +9,7 @@ import pytest
 from playwright.async_api import async_playwright
 
 import harness.browser.login as login_module
+from harness.browser.login import recorded_ready_path
 from harness.browser.edge import EdgeLauncher
 from harness.browser.profile import PROFILE_MARKER
 from harness.providers.copilot_ui import measurement_path
@@ -65,6 +66,28 @@ class PersonClosesTheWindow(EdgeLauncher):
                 closer.cancel()
 
 
+class PersonOpensTheChat(EdgeLauncher):
+    """Stands in for a person who sees the guest page and opens the chat by hand."""
+
+    chat_url = ""
+
+    @asynccontextmanager
+    async def open(self, **kwargs):
+        async with super().open(**kwargs) as context:
+
+            async def open_chat_when_guest_shows() -> None:
+                page = context.pages[0]
+                await page.locator(".unauth-prompt-input").wait_for(state="visible")
+                await asyncio.sleep(1.0)
+                await page.goto(self.chat_url)
+
+            opener = asyncio.create_task(open_chat_when_guest_shows())
+            try:
+                yield context
+            finally:
+                opener.cancel()
+
+
 async def profile_is_free(profile) -> bool:
     async with async_playwright() as playwright:
         context = await playwright.chromium.launch_persistent_context(
@@ -74,7 +97,9 @@ async def profile_is_free(profile) -> bool:
     return True
 
 
-def test_login_completed_by_hand_on_a_new_profile(cli, login_env, copilot_app, tmp_path, launches):
+def test_login_completed_by_hand_on_a_new_profile(
+    cli, login_env, copilot_app, tmp_path, launches, data_dir
+):
     copilot_app.login_auto_ms = 800  # the "person" signs in after a while
     profile = tmp_path / "edge-profile"
     assert not profile.exists()
@@ -85,6 +110,26 @@ def test_login_completed_by_hand_on_a_new_profile(cli, login_env, copilot_app, t
     assert launches == [profile]
     assert copilot_app.login_events == []
     assert asyncio.run(profile_is_free(profile))  # the browser was closed
+    assert recorded_ready_path(data_dir) == "/app"
+
+
+def test_a_guest_address_is_a_clear_error_with_the_chat_path(
+    cli, login_env, copilot_app, monkeypatch, data_dir
+):
+    """The configured address shows the host's guest page even with a valid session: login
+    says so, names the path where the chat was ready, and never types into either page."""
+    copilot_app.login_auto_ms = 300
+    PersonOpensTheChat.chat_url = copilot_app.url()
+    monkeypatch.setattr(login_module, "EdgeLauncher", PersonOpensTheChat)
+    env = login_env | {"HARNESS_COPILOT_URL": copilot_app.url("/guest")}
+    code, out, err = cli("copilot", "login", **env)
+    assert code == 1, out + err
+    assert "guest page" in err and "Traceback" not in err
+    assert f"set HARNESS_COPILOT_URL={copilot_app.base}/app" in err
+    assert "signed in: the session is saved" in err
+    assert recorded_ready_path(data_dir) == "/app"
+    assert copilot_app.prompt_count == 0
+    assert copilot_app.login_events == []
 
 
 def test_window_closed_without_signing_in(cli, login_env, copilot_app, monkeypatch):

@@ -31,6 +31,9 @@ CANARIES = (
     "ZZ-CANARY-TITLE-7781",
     "ZZ-CANARY-TITLE-7782",
     "ZZ-CANARY-PAGE-TITLE-6120",
+    "ZZ-CANARY-ACCOUNT-3393",
+    "ZZ-CANARY-TITLE-7785",
+    "ZZ-CANARY-PAGE-TITLE-6123",
 )
 SESSION_COOKIE = "synthetic_session=ok"
 MARKER = re.compile(r"ZQX-END-\d+")
@@ -150,7 +153,7 @@ def _handler(app: SyntheticCopilot) -> type[BaseHTTPRequestHandler]:
         def do_GET(self) -> None:  # noqa: N802
             parts = urlsplit(self.path)
             path = parts.path
-            if path == "/app" or re.fullmatch(r"/c/[^/]+|/chat/conversation/[^/]+", path):
+            if path == "/app" or re.fullmatch(r"/c/[^/]+|/chat/conversation/[^/]+|/feed(/thread/[^/]+)?", path):
                 with app._lock:
                     app.page_hits += 1
                 signed_in = SESSION_COOKIE in (self.headers.get("Cookie") or "")
@@ -159,7 +162,11 @@ def _handler(app: SyntheticCopilot) -> type[BaseHTTPRequestHandler]:
                     return
                 variant = parse_qs(parts.query).get("ui", [""])[0]
                 name = f"app-{variant}.html" if re.fullmatch(r"[a-z]+", variant) else "app.html"
+                if path.startswith("/feed"):
+                    name = "app-feed.html"  # the shape that lives under its own path
                 self._page(name if (FIXTURES / name).is_file() else "app.html")
+            elif path == "/guest":
+                self._page("app-signedout.html")  # the host's landing page, for anyone
             elif path == "/login":
                 self._page("login.html")
             elif path == "/structure":

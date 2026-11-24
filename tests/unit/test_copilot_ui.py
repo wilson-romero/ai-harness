@@ -126,3 +126,41 @@ def test_env_example_has_no_real_urls():
     assert "http" not in text
     for name in ("HARNESS_COPILOT_READY_TIMEOUT_S", "HARNESS_COPILOT_MAX_PROMPT_CHARS"):
         assert f"{name}=" in text
+
+
+# -- the conversation reference: an identifier the platform assigns, read and placed back ----
+
+def test_reference_reads_only_the_identifier_and_ignores_the_query():
+    from harness.providers.copilot_ui import ConversationRef
+
+    ref = ConversationRef(kind="path_segment", index=2, prefix=["chat", "conversation"])
+    url = "https://copilot.example/chat/conversation/6f1c2b9e-0a1d-4c55-9d1e-2b7f3a9c1d42?fromcode=x&es=1"
+    assert ref.identifier_in(url) == "6f1c2b9e-0a1d-4c55-9d1e-2b7f3a9c1d42"
+    assert ref.identifier_in("https://copilot.example/chat") is None  # not assigned yet
+    assert ref.identifier_in("https://copilot.example/other/conversation/abc") is None
+
+
+def test_reopen_address_is_built_from_the_identifier_alone():
+    from harness.providers.copilot_ui import ConversationRef
+
+    ref = ConversationRef(kind="path_segment", index=2, prefix=["chat", "conversation"])
+    built = ref.url_for("https://copilot.example/chat", "6f1c2b9e")
+    assert built == "https://copilot.example/chat/conversation/6f1c2b9e"
+    assert ref.identifier_in(built) == "6f1c2b9e"
+    # the configured address's own query is configuration and stays
+    assert ref.url_for("https://copilot.example/chat?x=1", "ab") == (
+        "https://copilot.example/chat/conversation/ab?x=1"
+    )
+    assert ConversationRef(kind="path_segment", index=2).url_for("https://h/chat", "x") is None
+
+
+@pytest.mark.parametrize(
+    "prefix", [["chat"], ["chat", "6f1c2b9e"], ["Tenant", "conversation"]]
+)
+def test_reference_prefix_holds_plain_words_before_the_identifier(prefix):
+    from pydantic import ValidationError
+
+    from harness.providers.copilot_ui import ConversationRef
+
+    with pytest.raises(ValidationError):
+        ConversationRef(kind="path_segment", index=2, prefix=prefix)

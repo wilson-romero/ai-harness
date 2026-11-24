@@ -9,8 +9,10 @@ value), login host names, counts, times and booleans: no URL, account, title or 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Self
+from urllib.parse import parse_qsl, quote, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -18,6 +20,8 @@ from harness.core.errors import HarnessError
 
 if TYPE_CHECKING:
     from playwright.async_api import Locator, Page
+
+_PLAIN_SEGMENT = re.compile(r"[a-z][a-z-]{0,30}")
 
 SCHEMA_VERSION = 1
 MEASUREMENT_DIR = "copilot"
@@ -116,6 +120,9 @@ class ConversationRef(_Strict):
     kind: Literal["path_segment", "query_param"]
     index: int | None = Field(default=None, ge=0)
     param: str | None = None
+    # The fixed path segments before the identifier (`["chat", "conversation"]`): plain
+    # words only, so that a conversation can be reopened from its identifier alone.
+    prefix: list[str] | None = None
 
     @model_validator(mode="after")
     def _one_place(self) -> Self:
@@ -123,7 +130,37 @@ class ConversationRef(_Strict):
             raise ValueError("path_segment needs `index` and query_param must not have one")
         if (self.kind == "query_param") != (self.param is not None):
             raise ValueError("query_param needs `param` and path_segment must not have one")
+        if self.prefix is not None:
+            if self.kind != "path_segment" or len(self.prefix) != self.index:
+                raise ValueError("`prefix` holds the path segments before the identifier")
+            if not all(_PLAIN_SEGMENT.fullmatch(part) for part in self.prefix):
+                raise ValueError("`prefix` holds plain words only")
         return self
+
+    def identifier_in(self, url: str) -> str | None:
+        """The identifier at the measured place of `url`, ignoring any query string when the
+        place is a path segment."""
+        parts = urlsplit(url)
+        if self.kind == "query_param":
+            return dict(parse_qsl(parts.query)).get(self.param or "") or None
+        segments = parts.path.split("/")[1:]
+        if self.index is None or self.index >= len(segments):
+            return None
+        if self.prefix is not None and segments[: self.index] != self.prefix:
+            return None
+        return segments[self.index] or None
+
+    def url_for(self, configured_url: str, identifier: str) -> str | None:
+        """The address that reopens a conversation: the configured scheme and host, the
+        measured fixed segments and the identifier, plus the configured address's own query if
+        it has one (configuration, not conversation data; a conversation URL's query is never
+        read). None when the shape cannot build one."""
+        if self.kind != "path_segment" or self.prefix is None:
+            return None
+        parts = urlsplit(configured_url)
+        path = "/".join(["", *self.prefix, quote(identifier, safe="")])
+        query = f"?{parts.query}" if parts.query else ""
+        return f"{parts.scheme}://{parts.netloc}{path}{query}"
 
 
 class EndSignal(_Strict):

@@ -16,20 +16,20 @@ Un solo camino: **`login` → `measure` → `login-state`**. La sonda encuentra 
 
 Edge instalado con el instalador normal. **No ejecutes `playwright install`**: sobrescribe el Edge del sistema. En la raíz del repo, `uv sync`. Todos los comandos se ejecutan desde la raíz del repo.
 
-Elige una carpeta de datos **fuera del repo** y la URL con la que abres Copilot. `https://copilot.cloud.microsoft/` es la dirección pública de Microsoft 365 Copilot y sirve de ejemplo; si en tu empresa entras por otra, usa esa. La sonda no tiene URL por defecto: así nunca abre una página que no elegiste.
+Elige una carpeta de datos **fuera del repo** y la URL del chat de Copilot. `https://copilot.cloud.microsoft/chat` es la dirección pública del chat de Microsoft 365 Copilot y sirve de ejemplo; si en tu empresa entras por otra, usa esa. **Pon la ruta del chat, no la raíz del host**: la raíz (`https://copilot.cloud.microsoft/`) enseña la portada de invitado, con su propio cuadro de preguntas y un botón de iniciar sesión, aunque la sesión sea válida (comprobado en macOS el 2026-11-24). La sonda no tiene URL por defecto: así nunca abre una página que no elegiste.
 
 PowerShell (Windows):
 
 ```powershell
 $env:HARNESS_DATA_DIR = "$HOME\ai-harness-data"
-$env:HARNESS_COPILOT_URL = 'https://copilot.cloud.microsoft/'
+$env:HARNESS_COPILOT_URL = 'https://copilot.cloud.microsoft/chat'
 ```
 
 POSIX (macOS):
 
 ```sh
 export HARNESS_DATA_DIR="$HOME/ai-harness-data"
-export HARNESS_COPILOT_URL='https://copilot.cloud.microsoft/'
+export HARNESS_COPILOT_URL='https://copilot.cloud.microsoft/chat'
 ```
 
 No actives `DEBUG=pw:api`: Playwright escribiría en la terminal textos de la página.
@@ -42,7 +42,9 @@ uv run python scripts/copilot_probe.py login
 
 (Igual en macOS.) Se abre Edge con el perfil dedicado (`HARNESS_DATA_DIR/edge-profile`). Inicia sesión: cuenta, contraseña, MFA. **Si pregunta «¿Mantener la sesión iniciada?», responde Sí**: si no, la sesión se pierde al cerrar Edge y el paso 2 verá la página de invitado. Cuando veas Copilot listo para escribir, vuelve a la terminal y pulsa **Enter**.
 
-El resumen trae una línea `ready page:` sobre la página donde pulsaste Enter. Si dice `on configured host no`, Copilot quedó listo en otra dirección: pon en `HARNESS_COPILOT_URL` esa dirección (esquema, host y ruta, **sin** identificadores ni lo que va tras `?`) y repite este paso. Si `signed-out hints` no es 0, esa página aún ofrece iniciar sesión.
+El resumen trae una línea `ready page:` sobre la página donde pulsaste Enter, con `ready path`: la primera parte de la ruta (`/chat`), nunca un identificador. Si dice `on configured host no`, Copilot quedó listo en otro host: pon en `HARNESS_COPILOT_URL` esa dirección (esquema, host y ruta, **sin** identificadores ni lo que va tras `?`) y repite este paso. Si `signed-out hints` no es 0, esa página aún ofrece iniciar sesión.
+
+**Si un paso dice «opens Copilot's guest page»**: la URL configurada lleva a la portada de invitado. Si ya iniciaste sesión, el mensaje propone la dirección del chat (`set HARNESS_COPILOT_URL=…/chat`), tomada de la ruta donde Copilot quedó listo en el último `login`; ponla y repite el paso. Si no iniciaste sesión, repite el paso 1. El comando del producto `copilot login` hace la misma comprobación: si Copilot quedó listo en otra ruta, vuelve a abrir la URL configurada y, si es la portada de invitado, termina con ese mensaje (la sesión queda guardada).
 
 Si el resumen dice `P1 controllable: no`, Edge no se deja controlar en tu equipo: para ahí y pégame el resumen. `not measured` significa que lo interrumpiste antes de medirlo: repite el paso.
 

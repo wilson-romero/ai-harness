@@ -1,0 +1,186 @@
+<!doctype html>
+<!--
+  Third synthetic chat shape, for locator discovery. Invented structure, names and canaries;
+  it reproduces traits seen in a real chat page's sanitised structure, not its selectors:
+  - the app lives under a one-word path (/feed) and a conversation under /feed/thread/<id>;
+  - the sent message is shown at once, then replaced by a new element with the same text
+    when the server answers (an optimistic copy), and the prompt's marker is in it;
+  - turns sit in rows of a virtualised feed (`role=feed`, numbered row attributes), the
+    reply deep inside its own wrapper, with a toolbar that appears when it is done;
+  - the editor is a contenteditable span holding a paragraph; Enter sends; the only button
+    next to it is never enabled by typing;
+  - "new chat" is a navigation link to /feed with no attribute of its own, and the brand
+    link goes to /feed too;
+  - aria-busy is set on the feed while a reply streams, and a stop button shows.
+  Query parameter (remembered by the profile, so it holds after the in-app links):
+    lose_first=1  the first Enter after each page load is ignored, as on a page still rendering
+-->
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Chat sintetico ZZ-CANARY-PAGE-TITLE-6123</title>
+<style>
+  body { font-family: sans-serif; display: flex; gap: 1rem; margin: 0; }
+  nav { width: 14rem; padding: .5rem; display: flex; flex-direction: column; gap: .25rem; }
+  .pane { flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+  .row { padding: .25rem; }
+  .bubble { background: #eef; padding: .25rem; }
+  .input-shell { border: 1px solid #999; padding: .25rem; min-height: 3rem; width: 32rem; display: flex; }
+  .input-shell [contenteditable] { outline: none; min-height: 2rem; flex: 1; display: block; }
+</style>
+</head>
+<body>
+<nav class="side-nav" aria-label="Navegacion">
+  <a class="brand-mark" href="/feed" aria-label="Inicio">Z</a>
+  <a class="nav-entry" href="/feed" aria-label="Nuevo chat"><span>Nuevo chat</span></a>
+  <a class="nav-entry" href="/feed/library" aria-label="Biblioteca"><span>Biblioteca</span></a>
+  <div class="profile-chip">ZZ-CANARY-ACCOUNT-3393</div>
+  <a class="nav-entry" href="#" aria-label="ZZ-CANARY-TITLE-7785">ZZ-CANARY-TITLE-7785 informe</a>
+</nav>
+<div class="pane">
+  <div class="scroller" data-scroll-host="true">
+    <div role="feed" aria-label="Conversacion" class="feed-view"></div>
+  </div>
+  <div class="composer-area" data-region="composer">
+    <div class="input-shell">
+      <span role="textbox" contenteditable="true" aria-label="Pregunta lo que quieras"
+            class="rich-input"><p><br></p></span>
+      <span class="input-actions">
+        <button type="button" class="mic-toggle" aria-label="Dictar">m</button>
+      </span>
+    </div>
+  </div>
+</div>
+<script>
+(() => {
+  const feed = document.querySelector('[role="feed"]');
+  const editor = document.querySelector(".rich-input");
+  const actions = document.querySelector(".input-actions");
+  let conversation = null;
+  let busy = false;
+  let rows = 0;
+  try {
+    if (new URLSearchParams(location.search).get("lose_first") === "1") localStorage.setItem("loseFirst", "1");
+  } catch (e) {}
+  let loseNext = (() => { try { return localStorage.getItem("loseFirst") === "1"; } catch (e) { return false; } })();
+  const hex = () => Math.random().toString(16).slice(2, 10);
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  function row() {
+    const r = document.createElement("div");
+    r.dataset.rowIndex = String(rows++);
+    r.dataset.rowKey = hex();
+    r.className = "row";
+    feed.appendChild(r);
+    return r;
+  }
+  function userMessage(container, text) {
+    const article = document.createElement("article");
+    article.className = "turn-human";
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.id = "msg-" + hex();
+    const body = document.createElement("div");
+    body.dataset.part = "message-text";
+    body.textContent = text;
+    bubble.appendChild(body);
+    article.appendChild(bubble);
+    container.appendChild(article);
+    return article;
+  }
+  function botMessage(container) {
+    const outer = document.createElement("div");
+    outer.dataset.part = "bot-wrapper";
+    outer.id = "reply-" + hex();
+    const article = document.createElement("article");
+    article.className = "turn-bot";
+    const content = document.createElement("div");
+    content.className = "turn-content";
+    const rich = document.createElement("div");
+    rich.dataset.part = "rich-reply";
+    const p = document.createElement("p");
+    rich.appendChild(p);
+    content.appendChild(rich);
+    article.appendChild(content);
+    outer.appendChild(article);
+    container.appendChild(outer);
+    return { article, p };
+  }
+  function toolbar(article) {
+    const bar = document.createElement("div");
+    bar.setAttribute("role", "toolbar");
+    bar.className = "turn-tools";
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.dataset.part = "copy-reply";
+    copy.setAttribute("aria-label", "Copiar");
+    copy.textContent = "c";
+    bar.appendChild(copy);
+    article.appendChild(bar);
+  }
+  function editorText() { return editor.innerText.replace(/\n+$/, ""); }
+  async function load() {
+    const match = location.pathname.match(/^\/feed\/thread\/([^/]+)$/);
+    if (!match) return;
+    const response = await fetch("/api/conversation/" + match[1]);
+    if (!response.ok) return;
+    const data = await response.json();
+    conversation = match[1];
+    let r = null;
+    for (const turn of data.turns) {
+      if (turn.role === "user") { r = row(); userMessage(r, turn.text); continue; }
+      const { article, p } = botMessage(r || row());
+      p.textContent = turn.text;
+      toolbar(article);
+    }
+  }
+
+  async function submit() {
+    const prompt = editorText();
+    if (!prompt || busy) return;
+    busy = true;
+    editor.innerHTML = "<p><br></p>";
+    const r = row();
+    const optimistic = userMessage(r, prompt);
+    const stop = document.createElement("button");
+    stop.type = "button";
+    stop.className = "halt-button";
+    stop.setAttribute("aria-label", "Detener");
+    stop.textContent = "x";
+    actions.appendChild(stop);
+    feed.setAttribute("aria-busy", "true");
+    const response = await fetch("/api/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversation, prompt }),
+    });
+    const data = await response.json();
+    conversation = data.conversation;
+    history.replaceState(null, "", "/feed/thread/" + conversation);
+    await sleep(150);
+    optimistic.remove();               // the server's copy replaces the optimistic one
+    userMessage(r, prompt);
+    const { article, p } = botMessage(r);
+    const reply = data.reply;
+    for (let i = 0; i < reply.length; i += 5) {
+      p.textContent = reply.slice(0, i + 5);
+      await sleep(40);
+    }
+    feed.setAttribute("aria-busy", "false");
+    stop.remove();
+    toolbar(article);
+    busy = false;
+  }
+
+  editor.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      if (loseNext) { loseNext = false; return; }  // lost: the prompt stays in the editor
+      submit();
+    }
+  });
+  load();
+})();
+</script>
+</body>
+</html>

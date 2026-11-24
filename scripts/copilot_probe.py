@@ -49,7 +49,13 @@ from playwright.async_api import BrowserContext, Locator, Page  # noqa: E402
 from playwright.async_api import Error as PlaywrightError  # noqa: E402
 
 from harness.browser.edge import EdgeLauncher, edge_version  # noqa: E402
-from harness.browser.page_state import host_of  # noqa: E402
+from harness.browser.login import recorded_ready_path  # noqa: E402
+from harness.browser.page_state import (  # noqa: E402
+    guest_page_advice,
+    host_of,
+    ready_path,
+    signed_out_hints,
+)
 from harness.browser.runner import run_browser  # noqa: E402
 from harness.browser.structure import structure_dump  # noqa: E402
 from harness.config import Settings  # noqa: E402
@@ -93,6 +99,7 @@ SAMPLE_INTERVAL_S = 0.1
 STABLE_WINDOWS_MS = (1000, 2000, 4000)
 SETTLE_MS = 3000  # after the longest window, how long to wait for a late structural signal
 SEND_DEADLINE_S = 300.0
+RESUBMIT_AFTER_MS = 4000  # no turn added and the editor still full: the key press was lost
 TURNS_SETTLE_S = 5.0
 LOGIN_HOST_SETTLE_S = 3.0
 STRUCTURAL = ("stop_hidden", "send_ready", "done_control", "aria_busy")
@@ -198,7 +205,7 @@ def write_json(directory: Path, name: str, data: dict) -> Path:
 
 
 def latest(directory: Path, step: str) -> dict | None:
-    files = sorted(directory.glob(f"probe-{step}-*.json"))
+    files = sorted(directory.glob(f"probe-{step}-[0-9]*.json"))  # not login-state for login
     if not files:
         return None
     return json.loads(files[-1].read_text(encoding="utf-8"))
@@ -214,16 +221,17 @@ def first_page(context: BrowserContext) -> Page:
     return pages[-1]
 
 
-async def wait_ready(page: Page, locators: Locators, copilot_host: str, timeout_s: float) -> None:
+async def wait_ready(page: Page, locators: Locators, probe: Probe) -> None:
     composer = locators.composer.resolve(page).first
-    deadline = time.monotonic() + timeout_s
+    copilot_host = probe.copilot_host
+    deadline = time.monotonic() + probe.settings.copilot_ready_timeout_s
     while time.monotonic() < deadline:
         try:
             if host_of(page.url) == copilot_host and await composer.is_visible() and (
                 await composer.is_enabled()
             ):
-                if await js(page, "signedOutHints"):
-                    raise ProbeFailure(ASK["signed_in"])  # a guest prompt box is not the chat
+                if await signed_out_hints(page):
+                    raise ProbeFailure(probe.guest_advice())  # a guest prompt box is not the chat
                 return
         except PlaywrightError:
             if page.is_closed():
@@ -243,11 +251,16 @@ async def open_new_conversation(page: Page, locators: Locators) -> bool:
         return False
 
 
+LENGTH_JS = (
+    "el => (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' ? el.value : el.textContent)"
+    ".length"
+)
+
+
 async def read_length(composer: Locator) -> int:
-    try:
-        return len(await composer.input_value())
-    except PlaywrightError:
-        return len(await composer.inner_text())
+    """Characters in the editor: a field's value, else the text content, which (unlike the
+    rendered text) gains no line breaks from the paragraphs of a rich editor."""
+    return int(await composer.evaluate(LENGTH_JS))
 
 
 def text_hash(text: str) -> str:
@@ -269,6 +282,9 @@ class Sample:
     send_ready: bool
     done: bool | None
     busy: str | None
+    new_path: bool = False  # the address changed since the prompt was sent (id assigned)
+    resubmitted: bool = False  # set on the last sample: the first key press was lost
+    confirmed: bool = False  # set on the last sample: the prompt left the editor
 
 
 async def sample_send(
@@ -283,14 +299,31 @@ async def sample_send(
     send = locators.send.resolve(page).first if locators.send else None
     stop = locators.stop.resolve(page).first if locators.stop else None
     region = locators.busy_region.resolve(page) if locators.busy_region else None
+    users = locators.user_turn.resolve(page)
     before = await assistant.count()
+    users_before = await users.count()
+    path_before = urlsplit(page.url).path
+    expected = len(prompt) if not filled else await read_length(composer)
     if not filled:
         await composer.fill(prompt)
+        if await read_length(composer) != expected:  # the page reset the editor: once more
+            await composer.fill(prompt)
     started = time.monotonic()
     await submit(composer, send, locators)
     samples: list[Sample] = []
+    resubmitted = confirmed = False
     while True:
         t_ms = (time.monotonic() - started) * 1000
+        if not confirmed:
+            confirmed = await users.count() > users_before or await read_length(composer) == 0
+            if not confirmed and not resubmitted and t_ms >= RESUBMIT_AFTER_MS:
+                # Nothing left the editor and no turn was added: the key press was lost (the
+                # page was still rendering). Pressing again cannot send the prompt twice.
+                if await read_length(composer) == expected:
+                    resubmitted = True
+                    started, samples = time.monotonic(), []
+                    await submit(composer, send, locators)
+                    continue
         turn = digest = content_digest = busy = done = None
         text = ""
         if await assistant.count() > before:
@@ -313,9 +346,13 @@ async def sample_send(
                 send_ready=(send is None or await send.is_visible()) and await composer.is_editable(),
                 done=done,
                 busy=busy if region is None else await region_busy(region),
+                new_path=urlsplit(page.url).path != path_before,
             )
         )
         if settled(samples, locators) or t_ms > SEND_DEADLINE_S * 1000:
+            if samples:
+                samples[-1].resubmitted = resubmitted
+                samples[-1].confirmed = confirmed
             return samples
         await asyncio.sleep(SAMPLE_INTERVAL_S)
 
@@ -416,7 +453,16 @@ def analyse(samples: list[Sample], locators: Locators) -> dict:
             "early": fired is not None and truth is not None and fired < truth,
             "delay_ms": round(fired - truth) if fired is not None and truth is not None else None,
         }
-    return {"truth_ms": round(truth) if truth is not None else None, "signals": signals}
+    path_at = next((s.t_ms for s in samples if s.new_path), None)
+    text_at = next((s.t_ms for s in samples if s.has_text), None)
+    return {
+        "truth_ms": round(truth) if truth is not None else None,
+        "signals": signals,
+        "id_in_url_ms": round(path_at) if path_at is not None else None,
+        "resubmitted": bool(last and last.resubmitted),
+        "sent_confirmed": bool(last and last.confirmed),
+        "first_text_ms": round(text_at) if text_at is not None else None,
+    }
 
 
 def signal_names() -> list[str]:
@@ -455,6 +501,9 @@ def choose_signal(summary: dict) -> tuple[EndSignal | None, int | None]:
 # -- conversation reference (design D6) ----------------------------------------------------------
 
 
+PLAIN_WORD = re.compile(r"[a-z][a-z-]{0,30}")
+
+
 def _segments(url: str) -> list[str]:
     return urlsplit(url).path.split("/")[1:]
 
@@ -471,7 +520,7 @@ def locate_reference(before: list[str], after: list[str]) -> ConversationRef | N
         if all(ID_LIKE.fullmatch(v) for v in values) and len(set(values)) == len(values) and not (
             prior & set(values)
         ):
-            return ConversationRef(kind="path_segment", index=index)
+            return ConversationRef(kind="path_segment", index=index, prefix=fixed_prefix(after, index))
     params = set.intersection(*(set(dict(parse_qsl(urlsplit(u).query))) for u in after))
     for name in sorted(params):
         values = [dict(parse_qsl(urlsplit(u).query))[name] for u in after]
@@ -483,11 +532,18 @@ def locate_reference(before: list[str], after: list[str]) -> ConversationRef | N
     return None
 
 
+def fixed_prefix(urls: list[str], index: int) -> list[str] | None:
+    """The path segments before the identifier when every URL shares them and they are plain
+    words (`chat`, `conversation`); None otherwise. Never an identifier."""
+    prefixes = {tuple(_segments(url)[:index]) for url in urls}
+    if len(prefixes) != 1:
+        return None
+    prefix = list(prefixes.pop())
+    return prefix if all(PLAIN_WORD.fullmatch(part) for part in prefix) else None
+
+
 def extract_reference(url: str, ref: ConversationRef) -> str | None:
-    if ref.kind == "path_segment":
-        segments = _segments(url)
-        return segments[ref.index] if ref.index is not None and ref.index < len(segments) else None
-    return dict(parse_qsl(urlsplit(url).query)).get(ref.param or "")
+    return ref.identifier_in(url)
 
 
 # -- steps --------------------------------------------------------------------------------------
@@ -527,6 +583,14 @@ class Probe:
         if not path.is_file():
             return {}
         return json.loads(path.read_text(encoding="utf-8")).get("locators", {})
+
+    def guest_advice(self) -> str:
+        """What to say when the configured address shows Copilot's guest page. The chat path
+        comes from the probe's last login step, else from the last `copilot login`."""
+        login = latest(self.out_dir, "login") or {}
+        chat_path = login.get("ready_path") or recorded_ready_path(self.settings.data_dir)
+        return (f"{ASK['signed_in']}. If this profile is already signed in: "
+                + guest_page_advice(self.url, chat_path))
 
     def locators(self) -> tuple[Locators | None, list[str]]:
         """Discovered locators with the hand-written ones on top, and what is still missing."""
@@ -613,7 +677,8 @@ async def describe_ready_page(context: BrowserContext, probe: Probe, result: dic
         result["ready_host"] = host_of(page.url)
         result["ready_on_configured_host"] = result["ready_host"] == probe.copilot_host
         result["ready_path_segments"] = len([s for s in _segments(page.url) if s])
-        result["ready_signed_out_hints"] = await js(page, "signedOutHints")
+        result["ready_path"] = ready_path(page.url)  # `/chat`-like shape, or None: never an id
+        result["ready_signed_out_hints"] = await signed_out_hints(page)
     except PlaywrightError:
         pass
 
@@ -638,7 +703,12 @@ async def step_discover(probe: Probe, result: dict) -> None:
         )
     result["discovery"] = found.facts | {"missing": found.missing}
     if "signed_in" in found.missing:
-        raise ProbeFailure(ASK["signed_in"])  # nothing typed, nothing saved
+        raise ProbeFailure(probe.guest_advice())  # nothing typed, nothing saved
+    if found.structure:
+        name = f"discovery-structure-{stamp()}.txt"
+        probe.out_dir.mkdir(parents=True, exist_ok=True)
+        (probe.out_dir / name).write_text("\n".join(found.structure) + "\n", encoding="utf-8")
+        result["discovery"]["structure_file"] = name
     write_json(probe.out_dir, DISCOVERED_FILE, {
         "measured_at": now_iso(),
         "locators": found.locators,
@@ -679,10 +749,11 @@ async def step_measure(probe: Probe, result: dict) -> None:
             result.setdefault("edge_version", edge_version(context))
             page = first_page(context)
             await page.goto(probe.url)
-            await wait_ready(page, locators, probe.copilot_host, timeout)
+            await wait_ready(page, locators, probe)
             startups.append(round((time.monotonic() - started) * 1000))
             if await open_new_conversation(page, locators):
-                await wait_ready(page, locators, probe.copilot_host, timeout)
+                await settle_page(page, probe.copilot_host, probe.settings.copilot_ready_timeout_s)
+                await wait_ready(page, locators, probe)
             before.append(page.url)
             for index, prompt in enumerate(PROMPTS):
                 say(f"  send {index + 1}/{len(PROMPTS)}")
@@ -695,28 +766,43 @@ async def step_measure(probe: Probe, result: dict) -> None:
     ref = locate_reference(before, after)
     result["conversation_ref"] = ref.model_dump(mode="json", exclude_none=True) if ref else None
     reopened, visible = [], result["turns_visible_after_reopen"]
+    built = 0
     for number, url in enumerate(conversations):
         say(f"reopening conversation {number + 1}/{len(conversations)} in a new Edge")
+        # Reopen as the provider will: configured scheme and host + measured fixed segments
+        # + the identifier alone. Only when the shape cannot build an address, the URL itself.
+        identifier = extract_reference(url, ref) if ref else None
+        target = ref.url_for(probe.url, identifier) if ref and identifier else None
+        built += target is not None
         started = time.monotonic()
         async with probe.launcher().open() as context:
             page = first_page(context)
-            await page.goto(url)
-            await wait_ready(page, locators, probe.copilot_host, timeout)
+            await page.goto(target or url)
+            await wait_ready(page, locators, probe)
             startups.append(round((time.monotonic() - started) * 1000))
             visible.append(await settled_count(locators.user_turn.resolve(page), len(PROMPTS)))
             same = ref is not None and extract_reference(page.url, ref) == extract_reference(url, ref)
             reopened.append(same and visible[-1] > 0)
     result["identity_recoverable"] = bool(reopened) and all(reopened) and ref is not None
+    result["reopened_from_identifier"] = built
 
+    startups.append(await measure_sizes(probe, locators, result))
+
+
+async def measure_sizes(probe: Probe, locators: Locators, result: dict) -> int:
+    """P6 in a new conversation: the largest synthetic prompt the editor holds whole and the
+    reply acknowledges. Stops at the first size that fails. Returns the start-up time."""
     say("prompt sizes: opening Edge")
     started = time.monotonic()
     async with probe.launcher().open() as context:
+        result.setdefault("edge_version", edge_version(context))
         page = first_page(context)
         await page.goto(probe.url)
-        await wait_ready(page, locators, probe.copilot_host, timeout)
-        startups.append(round((time.monotonic() - started) * 1000))
+        await wait_ready(page, locators, probe)
+        startup = round((time.monotonic() - started) * 1000)
         if await open_new_conversation(page, locators):
-            await wait_ready(page, locators, probe.copilot_host, timeout)
+            await settle_page(page, probe.copilot_host, probe.settings.copilot_ready_timeout_s)
+            await wait_ready(page, locators, probe)
         composer = locators.composer.resolve(page).first
         for chars in SIZES:
             say(f"  size {chars}")
@@ -731,6 +817,26 @@ async def step_measure(probe: Probe, result: dict) -> None:
             entry["accepted"] = samples[-1].has_marker
             if not entry["accepted"]:
                 break
+    return startup
+
+
+def max_accepted(sizes: list[dict]) -> int | None:
+    accepted = []
+    for entry in sizes:
+        if not entry["accepted"]:
+            break
+        accepted.append(entry["chars"])
+    return max(accepted) if accepted else None
+
+
+async def step_sizes(probe: Probe, result: dict) -> None:
+    """Only P6, with the locators already measured: for when `measure` left it unmeasured,
+    without repeating the 12 timed sends."""
+    locators, missing = probe.locators()
+    if locators is None:
+        raise ProbeFailure(f"no locators for: {', '.join(missing)}; run `probe measure` first")
+    result["sizes"] = []
+    await measure_sizes(probe, locators, result)
 
 
 async def settled_count(locator: Locator, expected: int) -> int:
@@ -845,7 +951,9 @@ async def step_structure(probe: Probe, result: dict) -> None:
             result["stopped"] = "not on the Copilot host (sign-in page?)"
             return
         result["counts"] = await page.evaluate(COUNT_JS)
-        result["signed_out_hints"] = await js(page, "signedOutHints")
+        result["signed_out_hints"] = await signed_out_hints(page)
+        if result["signed_out_hints"]:
+            say(probe.guest_advice())
         result["path_segments"] = len([p for p in _segments(page.url) if p])
         lines = await structure_dump(page)
     name = f"structure-{stamp()}.txt"
@@ -867,12 +975,7 @@ def finish_measure(result: dict) -> None:
     result["stability_window_ms"] = stability
     truths = [s["truth_ms"] for s in result["sends"] if s["truth_ms"] is not None]
     result["longest_response_ms"] = max(truths) if truths else None
-    accepted = []
-    for entry in result["sizes"]:
-        if not entry["accepted"]:
-            break
-        accepted.append(entry["chars"])
-    result["max_prompt_chars"] = max(accepted) if accepted else None
+    result["max_prompt_chars"] = max_accepted(result["sizes"])
     if result["startup_ms"] and result["longest_response_ms"]:
         seconds = max(result["startup_ms"]) / 1000 + 2 * result["longest_response_ms"] / 1000
         result["recommended_timeout_s"] = math.ceil(seconds)
@@ -908,6 +1011,10 @@ def assemble(out_dir: Path) -> tuple[UiMeasurement | None, str]:
     measure, login_state = latest(out_dir, "measure"), latest(out_dir, "login-state")
     if measure is None or "locators" not in measure:
         return None, "no measure result yet"
+    sizes = latest(out_dir, "sizes")
+    max_chars = measure.get("max_prompt_chars")
+    if max_chars is None and sizes and sizes.get("complete"):
+        max_chars = sizes.get("max_prompt_chars")  # measured alone, with the same locators
     login = None
     if login_state and login_state.get("complete"):
         login = LoginShape(
@@ -928,7 +1035,7 @@ def assemble(out_dir: Path) -> tuple[UiMeasurement | None, str]:
         "turns_sent_per_conversation": measure.get("turns_sent_per_conversation"),
         "end_signal": measure.get("end_signal"),
         "stability_window_ms": measure.get("stability_window_ms"),
-        "max_prompt_chars": measure.get("max_prompt_chars"),
+        "max_prompt_chars": max_chars,
         "startup_ms": measure.get("startup_ms", []),
         "longest_response_ms": measure.get("longest_response_ms"),
         "recommended_timeout_s": measure.get("recommended_timeout_s"),
@@ -971,8 +1078,26 @@ def discovery_lines(d: dict) -> list[str]:
         f"  new conversation: candidates {d.get('new_chat_candidates')}, verified "
         f"{yes_no(d.get('new_chat_verified'))}  conversation ref: {shape}",
         "  locator kinds: " + (", ".join(f"{k} {v}" for k, v in kinds.items()) or "none"),
+        f"  user hits per send: {d.get('user_hits')}  user levels: {d.get('user_levels')}  "
+        f"matches per level after send two: {d.get('user_level_counts')}",
+        f"  new conversation tried: {d.get('new_chat_tried')}",
+        f"  conversation id in URL after send: {d.get('id_in_url_after_send_ms')} ms  "
+        f"reply start (stop shown): {d.get('reply_start_after_send_ms')} ms  "
+        f"reply end: {d.get('reply_end_after_send_ms')} ms",
         f"  missing: {', '.join(d.get('missing') or []) or 'nothing'}",
     ]
+
+
+def size_line(result: dict) -> str:
+    def one(entry: dict) -> str:
+        if entry["accepted"]:
+            return f"{entry['chars']}:ok"
+        if entry["editor_chars"] != entry["chars"]:
+            return f"{entry['chars']}:editor {entry['editor_chars']}"
+        return f"{entry['chars']}:no reply"
+
+    sizes = ", ".join(one(entry) for entry in result.get("sizes", []))
+    return f"P6 prompt sizes: {sizes or 'none'}  max accepted: {result.get('max_prompt_chars')}"
 
 
 def yes_no(value: bool | None) -> str:
@@ -1000,6 +1125,7 @@ def print_summary(step: str, result: dict, ui_status: str | None) -> None:
             lines.append(
                 f"ready page: on configured host {yes_no(result['ready_on_configured_host'])}  "
                 f"path segments {result.get('ready_path_segments')}  "
+                f"ready path {result.get('ready_path') or 'not a plain word'}  "
                 f"signed-out hints {result.get('ready_signed_out_hints')}"
             )
     if result.get("discovery"):
@@ -1007,7 +1133,9 @@ def print_summary(step: str, result: dict, ui_status: str | None) -> None:
     if result.get("missing_locators"):
         lines.append(f"locators missing: {', '.join(result['missing_locators'])}")
     if step == "measure":
-        lines.append(f"sends measured: {len(result['sends'])}/{result.get('sends_planned')}")
+        lines.append(f"sends measured: {len(result['sends'])}/{result.get('sends_planned')}  "
+                     f"key press lost and repeated: {sum(1 for s in result['sends'] if s.get('resubmitted'))}  "
+                     f"never left the editor: {sum(1 for s in result['sends'] if not s.get('sent_confirmed', True))}")
         for name, s in (result.get("signals") or {}).items():
             lines.append(
                 f"  {name}: {'VALID' if s['valid'] else 'not valid'} "
@@ -1017,7 +1145,15 @@ def print_summary(step: str, result: dict, ui_status: str | None) -> None:
                      f"stability window: {result.get('stability_window_ms')} ms")
         ref = result.get("conversation_ref")
         lines.append(f"P2 reference in URL: {'yes (' + ref['kind'] + ')' if ref else 'no'}  "
-                     f"identity recoverable: {result.get('identity_recoverable')}")
+                     f"identity recoverable: {result.get('identity_recoverable')}  "
+                     f"reopened from the id alone: {result.get('reopened_from_identifier')}"
+                     f"/{len(result.get('turns_visible_after_reopen') or [])}")
+        firsts = [s for s in result["sends"] if s.get("prompt") == 1]
+        lines.append(
+            "P2 id in URL after first send (ms): "
+            f"{[s.get('id_in_url_ms') for s in firsts]}  first reply text (ms): "
+            f"{[s.get('first_text_ms') for s in firsts]}"
+        )
         lines.append(f"P3 user turns visible after reopen: {result.get('turns_visible_after_reopen')} "
                      f"of {result.get('turns_sent_per_conversation')} sent")
         startups = result.get("startup_ms") or []
@@ -1026,9 +1162,9 @@ def print_summary(step: str, result: dict, ui_status: str | None) -> None:
                          f"max {max(startups)} ms (n={len(startups)})")
         lines.append(f"longest response: {result.get('longest_response_ms')} ms  "
                      f"recommended HARNESS_REQUEST_TIMEOUT_S: {result.get('recommended_timeout_s')}")
-        sizes = ", ".join(f"{s['chars']}:{'ok' if s['accepted'] else 'editor ' + str(s['editor_chars'])}"
-                          for s in result.get("sizes", []))
-        lines.append(f"P6 prompt sizes: {sizes or 'none'}  max accepted: {result.get('max_prompt_chars')}")
+        lines.append(size_line(result))
+    if step == "sizes":
+        lines.append(size_line(result))
     if step == "login-state":
         lines.append(f"P5 empty profile ends as: {result.get('state')}  "
                      f"login hosts seen: {len(result.get('login_hosts') or [])}  "
@@ -1055,6 +1191,7 @@ STEPS: dict[str, Callable] = {
     "login-state": step_login_state,
     "structure": step_structure,
     "discover": step_discover,
+    "sizes": step_sizes,
 }
 
 
@@ -1069,6 +1206,7 @@ def build_parser() -> argparse.ArgumentParser:
     steps.add_parser("login-state", help="what an expired login looks like (empty profile)")
     steps.add_parser("structure", help="sanitised page structure, no text; sends nothing")
     steps.add_parser("discover", help="find the controls by behaviour (two fixed sends)")
+    steps.add_parser("sizes", help="only the prompt sizes (P6), with the measured locators")
     return parser
 
 
@@ -1117,6 +1255,10 @@ def main(argv: list[str] | None = None) -> int:
         result["complete"] = not result["missing"]
         if result["missing"] and missing is not None and code == EXIT_OK:
             say(ask_for(result["missing"], probe.out_dir))
+    elif args.step == "sizes":
+        result["max_prompt_chars"] = max_accepted(result.get("sizes") or [])
+        result["complete"] = result["max_prompt_chars"] is not None
+        result["missing"] = [] if result["complete"] else ["max_prompt_chars"]
     elif args.step == "structure":
         result["complete"] = bool(result.get("structure_file"))
         result["missing"] = [] if result["complete"] else ["structure"]
@@ -1125,7 +1267,7 @@ def main(argv: list[str] | None = None) -> int:
         result["missing"] = [] if result["complete"] else ["login"]
     write_json(probe.out_dir, f"probe-{args.step}-{stamp()}.json", result)
     ui_status = None
-    if args.step in ("measure", "login-state"):
+    if args.step in ("measure", "login-state", "sizes"):
         _, ui_status = assemble(probe.out_dir)
     print_summary(args.step, result, ui_status)
     if code == EXIT_OK and not result["complete"]:

@@ -26,7 +26,11 @@ from typing import Any
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Page
 
+from harness.browser.page_state import SIGNED_OUT_HINTS_JS
+from harness.browser.structure import structure_dump
+
 ECHO_TIMEOUT_S = 15.0
+RETRY_AFTER_S = 4.0
 NEW_CHAT_TIMEOUT_S = 6.0
 WATCH_INTERVAL_MS = 100
 
@@ -78,6 +82,8 @@ INSTALL_JS = r"""
     return parts.join("\n").toLowerCase();
   };
   const SAFE = /^[A-Za-z][A-Za-z_-]{1,40}$/;
+  const PLAIN_PATH = /^\/[a-z][a-z-]{1,30}$/;
+  const appRoot = () => "/" + (location.pathname.split("/").filter(Boolean)[0] || "");
   const STATE_NAME = /state|status|busy|load|active|select|expand|open|visib|hidden|disabl|focus|hover|index|idx|key|time|count|track|bi-|telemetry|clarity|^data-m$|^data-id$|-id$/i;
   const STATE_CLASS = /active|select|disabl|hover|focus|open|close|hidden|visible|load|busy|anim|appear|enter|exit|motion|transition|show|fade|ripple/i;
   const PREF_DATA = new Set(["data-testid", "data-test-id", "data-automation-id", "data-tid", "data-qa"]);
@@ -95,6 +101,12 @@ INSTALL_JS = r"""
       else if (name === "aria-live" || name === "aria-multiline") pref = 3;
       else if (name === "id") pref = 4;
       else if (name === "type" || name === "contenteditable") pref = 5;
+      else if (name === "href" && PLAIN_PATH.test(a.value) && a.value === appRoot()) {
+        // a link to the app's own first path segment (`/chat` of /chat/conversation/<id>):
+        // it comes from the configured address, not from the page's text
+        parts.push({ sel: `[href="${a.value}"]`, pref: 5 });
+        continue;
+      }
       if (pref === null) continue;
       if (name === "contenteditable") { parts.push({ sel: `[contenteditable="${a.value}"]`, pref }); continue; }
       if (!ok(a.value)) continue;
@@ -208,8 +220,9 @@ INSTALL_JS = r"""
   };
 
   // -- where a fixed string shows up: deepest visible elements, outside editors and `exclude` --
-  P.findText = (needle, exclude) => {
+  P.findText = (needle, exclude, without) => {
     const n = norm(needle);
+    const w = without ? norm(without) : null;
     const excluded = (exclude || []).map(get).filter(Boolean);
     const hits = [];
     const descend = (el) => {
@@ -225,7 +238,8 @@ INSTALL_JS = r"""
     const readable = (el) => { const r = el.getBoundingClientRect(); return r.width > 2 && r.height > 2; };
     return hits  // a 1-pixel screen-reader copy is not the turn
       .filter((el) => visible(el) && readable(el) && !el.closest(EDITABLE) &&
-                      !excluded.some((x) => x.contains(el)))
+                      !excluded.some((x) => x.contains(el)) &&
+                      !(w && norm(el.textContent).includes(w)))  // the prompt itself is no reply
       .map(reg);
   };
   // A cheap signature of an element's text: its length and a hash. Never the text.
@@ -253,10 +267,13 @@ INSTALL_JS = r"""
   // -- what appears, disappears and flips while a reply streams --
   P.watchStart = () => {
     if (P.watch) clearInterval(P.watch.timer);
-    const W = P.watch = { t0: performance.now(), items: new Map(), timer: null, ticks: 0 };
+    const W = P.watch = { t0: performance.now(), items: new Map(), timer: null, ticks: 0,
+                          path0: location.pathname, pathChanged: null };
     const tick = () => {
       const now = Math.round(performance.now() - W.t0);
       const first = W.ticks === 0;
+      // when the address changes (the platform assigns the conversation id): a time only
+      if (W.pathChanged === null && location.pathname !== W.path0) W.pathChanged = now;
       W.ticks += 1;
       const present = new Set();
       for (const el of document.querySelectorAll(CONTROL)) {
@@ -300,6 +317,7 @@ INSTALL_JS = r"""
     return true;
   };
   P.watchNow = () => (P.watch ? Math.round(performance.now() - P.watch.t0) : null);
+  P.watchPathChanged = () => (P.watch ? P.watch.pathChanged : null);
   P.watchStop = () => {
     const W = P.watch;
     if (!W) return [];
@@ -328,20 +346,9 @@ INSTALL_JS = r"""
   P.click = (s) => { const el = get(s); if (el) el.click(); return !!el; };
 
   // -- a page that offers to sign in is not the chat: count visible elements marked so --
-  P.signedOutHints = () => {
-    const HINT = /(^|[^a-z])(unauth\w*|sign[-_ ]?in|log[-_ ]?in)([^a-z]|$)/i;
-    let n = 0;
-    for (const el of document.querySelectorAll("*")) {
-      if (!visible(el)) continue;
-      for (const a of el.attributes) {
-        if (!(a.name === "id" || a.name === "class" || a.name.startsWith("data-"))) continue;
-        if (HINT.test(a.value.replace(/([a-z])([A-Z])/g, "$1 $2"))) { n += 1; break; }
-      }
-    }
-    return n;
-  };
+  P.signedOutHints = (%HINTS%);
 }
-""".replace("%INTERVAL%", str(WATCH_INTERVAL_MS))
+""".replace("%INTERVAL%", str(WATCH_INTERVAL_MS)).replace("%HINTS%", SIGNED_OUT_HINTS_JS.strip())
 
 
 @dataclass
@@ -351,6 +358,7 @@ class Discovery:
     locators: dict[str, Any] = field(default_factory=dict)
     facts: dict[str, Any] = field(default_factory=dict)
     missing: list[str] = field(default_factory=list)
+    structure: list[str] = field(default_factory=list)  # sanitised, labelled; after send two
 
 
 # One line per item that discovery may fail to find: what to give the probe instead.
@@ -416,6 +424,7 @@ class Sent:
     echo_ms: int | None
     answer_seen_ms: int | None
     truth_ms: int | None  # watch clock: when the reply, up to its marker, last changed
+    sent_watch_ms: int | None = None  # watch clock: when the prompt was submitted
 
 
 async def editor_empty(page: Page, editor: int) -> bool:
@@ -447,10 +456,17 @@ async def send_and_follow(
         return bool(await js(page, "findText", prompt, [])) or await editor_empty(page, editor)
 
     used = None
+    sent_at = await js(page, "watchNow")
     if method in (None, "enter"):
         await composer.press("Enter")
-        if await wait_for(sent, ECHO_TIMEOUT_S):
+        if await wait_for(sent, RETRY_AFTER_S):
             used = "enter"
+        elif await js(page, "editorLength", editor) == len(prompt):
+            # nothing left the editor: the key press was lost while the page rendered, so a
+            # second press cannot send twice
+            await composer.press("Enter")
+            if await wait_for(sent, ECHO_TIMEOUT_S):
+                used = "enter"
     if used is None and method in (None, "button"):
         target = send_css
         if target is None and enabled_by_typing:
@@ -460,7 +476,7 @@ async def send_and_follow(
             await page.locator(target).first.click(timeout=5000)
             if await wait_for(sent, ECHO_TIMEOUT_S):
                 used = "button"
-    result = Sent(used, [], None, None, None, None)
+    result = Sent(used, [], None, None, None, None, sent_at)
     if used is None:
         return result, enabled_by_typing
 
@@ -472,7 +488,7 @@ async def send_and_follow(
         result.echo_ms = round((time.monotonic() - started) * 1000)
 
     async def answered() -> list[int]:
-        return await js(page, "findText", marker, result.user_hits)
+        return await js(page, "findText", marker, result.user_hits, prompt)
 
     hits = await wait_for(answered, timing.deadline_s, 0.1)
     if not hits:
@@ -489,6 +505,12 @@ async def send_and_follow(
             break
         await asyncio.sleep(0.1)
     result.truth_ms = truth
+    # Pages may replace the elements first seen (an optimistic copy of the message, a reply
+    # rendered again at its end): look again, so that what follows uses live elements.
+    result.user_hits = await js(page, "findText", prompt, [], None) or result.user_hits
+    again = await js(page, "findText", marker, result.user_hits, prompt)
+    if again:
+        result.answer = again[-1]
     return result, enabled_by_typing
 
 
@@ -579,6 +601,7 @@ async def discover(
     first, enabled = await send_and_follow(
         page, editor, composer_css, prompts[0], markers[0], timing, None, None
     )
+    path_changed = await js(page, "watchPathChanged")
     watched = await js(page, "watchStop")
     facts["sends"] = 1 if first.method else 0
     facts["send_with"] = first.method
@@ -633,6 +656,16 @@ async def discover(
     ]
     busy = min(busy_items, key=lambda w: abs(w["busyEnd"] - truth), default=None)
     facts["truth_watch_ms"] = first.truth_ms
+    # When the conversation id reaches the address, against the reply's start and end, all
+    # from the moment the first prompt was submitted (watch clock; times only, no address).
+    sent_at = first.sent_watch_ms or 0
+
+    def since(t: int | None) -> int | None:
+        return None if t is None else max(0, t - sent_at)
+
+    facts["id_in_url_after_send_ms"] = since(path_changed)
+    facts["reply_start_after_send_ms"] = since(stop["appeared"]) if stop else None
+    facts["reply_end_after_send_ms"] = since(first.truth_ms)
     facts["stop_found"] = stop is not None
     facts["busy_found"] = busy is not None
     facts["controls_appeared"] = sum(1 for w in watched if w["appeared"] is not None)
@@ -662,6 +695,21 @@ async def discover(
             if busy and busy["serial"] != chosen:
                 found.locators["busy_region"] = css(busy["selectors"][0])
     facts["done_control_found"] = "response_done_control" in found.locators
+    facts["user_hits"] = [len(first.user_hits), len(second.user_hits)]
+    facts["user_levels"] = len(user_levels)
+    facts["user_level_counts"] = [
+        [await js(page, "count", selector, None) for selector in selectors]
+        for _, selectors in user_options
+    ]
+    labels = {editor: "editor"}
+    for name, hits in (("user-one", first.user_hits), ("user-two", second.user_hits)):
+        labels |= {hit: name for hit in hits}
+    for name, hit in (("answer-one", first.answer), ("answer-two", second.answer)):
+        if hit is not None:
+            labels[hit] = name
+    for name, level in (("user-level", user_levels), ("answer-level", answer_levels)):
+        labels |= {serial: name for serial in level if serial not in labels}
+    found.structure = await structure_dump(page, labels)
     for part in ("user_turn", "assistant_turn"):
         if part not in found.locators:
             found.missing.append(part)
@@ -671,16 +719,21 @@ async def discover(
     facts["new_chat_candidates"] = len(candidates)
     facts["new_chat_verified"] = False
     turns = [found.locators[p]["css"] for p in ("user_turn", "assistant_turn") if p in found.locators]
+    tried = facts["new_chat_tried"] = []
     for candidate in candidates[:3]:
+        attempt = {"by_name": candidate["byName"], "selector": False, "clicked": False}
+        tried.append(attempt)
         try:
             selector = await first_selector(page, candidate["serial"])
         except LookupError:
             continue
+        attempt["selector"] = True
         url_then = page.url
         try:
             await page.locator(selector).first.click(timeout=5000)
         except PlaywrightError:
             continue
+        attempt["clicked"] = True
 
         async def emptied() -> bool:
             counts = [await js(page, "count", t, None) for t in turns]
@@ -691,6 +744,8 @@ async def discover(
             facts["new_chat_verified"] = True
             facts["new_chat_by_name"] = candidate["byName"]
             break
+        attempt["url_changed"] = page.url != url_then
+        attempt["turn_counts"] = [await js(page, "count", t, None) for t in turns]
     if "new_conversation" not in found.locators:
         found.missing.append("new_conversation")
     facts["locator_kinds"] = {

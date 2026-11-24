@@ -21,3 +21,7 @@ class BrowserLaunchFailed(HarnessError):
 
 class NotSignedIn(HarnessError):
     """The login window was closed before Copilot was ready."""
+
+
+class GuestAddress(HarnessError):
+    """Signed in, but the configured address opens Copilot's guest page instead of the chat."""

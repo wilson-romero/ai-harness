@@ -139,7 +139,9 @@ def test_full_probe_run_succeeds(full_run):
 
 
 def test_login_describes_where_copilot_was_ready(full_run):
-    assert "ready page: on configured host yes  path segments 1  signed-out hints 0" in full_run.stdout
+    assert ("ready page: on configured host yes  path segments 1  ready path /app  "
+            "signed-out hints 0") in full_run.stdout
+    assert full_run.result("login")["ready_path"] == "/app"
     assert full_run.result("login")["ready_host"] == "127.0.0.1"  # data directory only
 
 
@@ -201,8 +203,11 @@ def test_reliable_signal_chosen(full_run):
 
 def test_conversation_reopened(full_run):
     measure = full_run.result("measure")
-    assert measure["conversation_ref"] == {"kind": "path_segment", "index": 1}
+    assert measure["conversation_ref"] == {"kind": "path_segment", "index": 1, "prefix": ["c"]}
     assert measure["identity_recoverable"] is True
+    # reopened from the identifier alone: the full URL (with the tenant canary in its query)
+    # was never needed, and the query is in no file
+    assert measure["reopened_from_identifier"] == 3
     assert measure["turns_visible_after_reopen"] == [4, 4, 4]
     assert len(measure["startup_ms"]) == 7
 

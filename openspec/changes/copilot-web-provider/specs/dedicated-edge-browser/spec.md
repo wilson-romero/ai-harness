@@ -32,6 +32,13 @@ El comando `copilot login` SHALL abrir Edge visible con el perfil dedicado en la
 - **WHEN** `copilot login` se ejecuta contra una página de login sintética que registra pulsaciones y clics, y la prueba cierra la ventana
 - **THEN** la página registra cero pulsaciones y cero clics del harness
 
+### Requirement: Portada de invitado en la URL configurada
+Una página del host configurado que ofrece iniciar sesión SHALL NOT contar como lista. `copilot login` SHALL guardar en el directorio de datos solo la forma de la ruta donde Copilot quedó listo (su primer segmento, si es una palabra simple) y, si no es la ruta configurada y la URL configurada lleva a una página que ofrece iniciar sesión, SHALL terminar con código distinto de 0 con un mensaje que diga que la sesión quedó guardada y proponga esa ruta.
+
+#### Scenario: La URL configurada lleva a la portada de invitado
+- **WHEN** la URL configurada es una portada sintética que ofrece iniciar sesión y Wilson abre a mano el chat, donde la página queda lista
+- **THEN** `copilot login` termina con código distinto de 0, dice que la sesión quedó guardada y que la URL lleva a la portada de invitado, propone la ruta del chat como `HARNESS_COPILOT_URL` y no escribe en ninguna de las dos páginas
+
 ### Requirement: Un solo navegador a la vez
 El sistema SHALL tener como máximo un Edge abierto sobre el perfil dedicado en todo el equipo. Una pregunta que encuentra el navegador ocupado por otro proceso SHALL esperar su turno dentro de su plazo, y si el plazo vence esperando SHALL terminar en `timeout` sin envío. `copilot login` con el navegador ocupado SHALL terminar con código distinto de 0 sin esperar.
 
