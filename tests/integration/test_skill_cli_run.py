@@ -98,8 +98,13 @@ def test_non_interactive_run_waits_and_status_after_restart(data_dir, env):
     assert status.returncode == 0
     assert "status: awaiting_approval" in status.stdout
     assert "step: confirm approval attempt 1 awaiting_approval" in status.stdout
-    assert "approval: confirm pending hash" in status.stdout and "expires" in status.stdout
+    approval_id, proposal_hash = query(data_dir, "SELECT approval_id, proposal_hash FROM approvals")[0]
+    assert f"approval: confirm pending id {approval_id} expires" in status.stdout
     assert "Texto resumido" not in status.stdout
+    # 8.2: the code (any part of the hash) is shown only inside the interactive prompt.
+    for text in (result.stdout, result.stderr, status.stdout, status.stderr):
+        assert proposal_hash[:8] not in text
+    assert approval_id in result.stderr
     output = run_main(data_dir, "skill", "status", run_id, "--output", **env)
     assert output.stdout.strip().endswith("(output not stored)")
 

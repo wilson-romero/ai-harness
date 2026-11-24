@@ -127,6 +127,19 @@ def test_non_interactive_run(conn, data_dir, tmp_path):
     assert [a["status"] for a in _approval(conn)] == ["pending"] and effect.written() == []
 
 
+def test_the_code_never_leaves_the_interactive_prompt(conn, data_dir, tmp_path):
+    """8.2: the waiting message and `status` name the approval, never its hash or a prefix."""
+    engine, session, _, _ = _engine(conn, data_dir, tmp_path, FakeTerminal(interactive=False))
+    outcome = _run(engine, session)
+    approval = _approval(conn)[0]
+    code = approval["proposal_hash"][:8]
+    assert approval["approval_id"] in outcome.message and approval["expires_at"] in outcome.message
+    assert code not in outcome.message
+    status = engine.status(outcome.run_id)
+    assert code not in repr(status)
+    assert status["approval"]["approval_id"] == approval["approval_id"]
+
+
 def test_wrong_code(conn, data_dir, tmp_path):
     terminal = FakeTerminal(["s", "y", "00000000"])
     engine, session, effect, _ = _engine(conn, data_dir, tmp_path, terminal)

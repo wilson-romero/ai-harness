@@ -330,7 +330,7 @@ class SkillEngine:
             (run_id,),
         ).fetchall()
         approval = self._conn.execute(
-            "SELECT step_key, status, proposal_hash, expires_at FROM approvals "
+            "SELECT approval_id, step_key, status, expires_at FROM approvals "  # no hash (8.2)
             "WHERE run_id = ? AND status IN ('pending', 'granted')",
             (run_id,),
         ).fetchone()
@@ -536,9 +536,11 @@ class SkillEngine:
         if live["status"] == "pending":
             waiting = RunOutcome(
                 state.run_id, "awaiting_approval",
-                message=f"step {step.id!r} is waiting for a human approval "
-                f"(hash {proposal_hash}, expires {live['expires_at']} UTC); run "
-                f"`skill resume {state.run_id}` in an interactive terminal",
+                # Never the hash or a part of it: the code is shown only next to the content,
+                # inside the interactive prompt (review 8.2).
+                message=f"step {step.id!r} is waiting for a human approval (approval "
+                f"{live['approval_id']}, {live['status']}, expires {live['expires_at']} UTC); "
+                f"run `skill resume {state.run_id}` in an interactive terminal",
             )
             if not self._terminal.is_interactive():
                 self._set_awaiting(state, row)

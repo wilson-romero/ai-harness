@@ -166,7 +166,7 @@ def _status(engine: SkillEngine, run_id: str, with_output: bool) -> int:
     approval = info["approval"]
     if approval:
         print(f"approval: {approval['step_key']} {approval['status']} "
-              f"hash {approval['proposal_hash']} expires {approval['expires_at']}")
+              f"id {approval['approval_id']} expires {approval['expires_at']}")
     if with_output:
         output = engine.final_output(run_id)
         print(output if output is not None else "(output not stored)")
