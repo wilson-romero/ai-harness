@@ -57,6 +57,30 @@ Se garantiza:
 
 **No** se garantiza que haya una persona delante. Un proceso que corre con tu misma cuenta y maneja una pseudoterminal puede leer la propuesta y escribir el código: puede hacerse pasar por ti. Si alguien o algo controla tu cuenta, las aprobaciones no lo detienen. Un canal más fuerte (un diálogo del sistema operativo, un segundo dispositivo) es una decisión abierta antes del efecto que escribe en el vault.
 
+## Servidores MCP
+
+Lo que el harness garantiza con un servidor MCP:
+
+- Solo arranca los servidores de tu lista local. Usa la orden exacta que escribiste, sin shell.
+- El servidor recibe solo las variables de entorno nombradas en la lista y las básicas para arrancar un proceso.
+- El servidor recibe solo los argumentos declarados.
+- Toda herramienta que escribe se deniega en este corte.
+- El harness no tiene ninguna superficie de entrada: no abre puertos ni sockets de escucha, y solo habla con sus servidores por los tubos que él mismo crea. Lo comprueban dos tests:
+  - uno con un audit hook sobre `socket.bind` durante un `mcp call`;
+  - uno estructural sobre `harness/mcp/`.
+
+  La autorización de clientes (SEC-09) llegará con el servidor MCP propio, en un corte posterior. Hoy no hay ningún cliente que autorizar.
+- Lo que devuelve un servidor (resultados, descripciones, nombres, errores) se trata como datos no confiables:
+  - se mide antes de leerlo;
+  - se sanea y se redacta antes de imprimirlo o auditarlo;
+  - nunca se guarda.
+
+Lo que **no** garantiza:
+
+- Un servidor de terceros corre con los permisos de tu usuario y puede hacer cualquier cosa dentro de su proceso: leer tus ficheros, abrir conexiones o lanzar otros procesos. El harness decide qué arranca, qué le pasa, cuánto espera y qué deja salir, pero no lo encierra. Añade a la lista solo servidores en los que confías.
+- En macOS y Linux, un servidor que sale solo al cerrarse su entrada puede dejar vivos los procesos que lanzó.
+- La marca de recursión (`AI_HARNESS_MCP_CHILD`) evita encadenamientos accidentales. No detiene a un servidor malicioso que la borre.
+
 ## Si algo se filtra
 
 Un secreto publicado se da por comprometido aunque se borre el commit: primero se **revoca o rota**, después se limpia el historial. Para avisar de un problema de seguridad, usa los *security advisories* privados de GitHub en este repositorio, no un issue público.
