@@ -69,6 +69,12 @@ def validate_project_slug(raw: str) -> str:
     return raw
 
 
+def is_safe_name(raw: str) -> bool:
+    """A plain file or folder name that means the same on every platform (no separators,
+    no `..`, no trailing dot or space, not a reserved Windows device name)."""
+    return _is_valid_slug(raw)
+
+
 def _is_valid_slug(raw: str) -> bool:
     if not _PROJECT_RE.fullmatch(raw) or raw in (".", ".."):
         return False

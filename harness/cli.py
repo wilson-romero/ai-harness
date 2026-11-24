@@ -33,6 +33,7 @@ from harness.memory.search import (
     validate_limit,
 )
 from harness.providers.registry import provider_factory
+from harness.skills.commands import add_skill_parser, run_skill_command
 from harness.storage.database import open_database
 
 EXIT_OK = 0
@@ -81,6 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
         "maintain", help="report what a maintenance pass would find, without changing anything"
     )
     maintain.add_argument("--dry-run", action="store_true", help="report only (required)")
+    add_skill_parser(commands)
     return parser
 
 
@@ -116,6 +118,8 @@ def _run(args: argparse.Namespace) -> int:
     settings = Settings.from_env(os.environ)
     if args.command == "memory":
         return _memory(args)
+    if args.command == "skill":
+        return run_skill_command(args)
     memory: MemorySettings | None = None
     memory_error: MemoryNotConfigured | None = None
     with_project = args.command == "ask" and args.project is not None

@@ -49,7 +49,7 @@ def read_text_limited(path: Path, *, max_bytes: int, what: str) -> str:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
         raise InvalidInput(f"{what} is not valid UTF-8") from None
-    return text.removeprefix("﻿").replace("\r\n", "\n").replace("\r", "\n")
+    return text.removeprefix("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
 
 
 class _Refused(Exception):
