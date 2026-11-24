@@ -90,6 +90,7 @@ Solo los bloques entre `---- copilot probe summary (paste only this) ----` y `--
 | `... is not an ai-harness Edge profile` | `HARNESS_EDGE_PROFILE` apunta a una carpeta que no es del harness. |
 | `... could be committed` | `HARNESS_DATA_DIR` está dentro de un repo Git y no ignorado. Cámbialo. |
 | `the Copilot page was not ready in time` | Sesión caducada: paso 1. |
+| Edge se abre pero cada pestaña muestra un error de página («Vaya…», código de error del proceso), o `could not be started` al lanzar | El harness lanza Edge **con su sandbox activado** (antes Playwright lo desactivaba y Edge avisaba de una opción no admitida). Comprobado solo en macOS: en Windows una política de la empresa o un antivirus podrían impedir el sandbox. No lo desactives tú: para ahí y pégame el resumen o el mensaje. |
 | La interfaz de Copilot cambió y `measure` falla | `uv run python scripts/copilot_probe.py discover` vuelve a encontrar los controles (2 envíos). |
 
 Para diagnosticar sin enviar nada, `uv run python scripts/copilot_probe.py structure` guarda en `HARNESS_DATA_DIR/copilot/structure-*.txt` la estructura de la página **sin ningún texto** (etiquetas, roles, atributos con valores sustituidos por su longitud) y en el resumen cuenta editores, botones, diálogos y marcas de página sin sesión.

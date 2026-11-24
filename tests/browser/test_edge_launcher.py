@@ -70,6 +70,17 @@ async def test_installed_edge_opens_a_synthetic_page_and_reads_its_title(launche
     assert launcher.contexts == []
 
 
+async def test_edge_runs_with_its_sandbox_on(launcher):
+    """Playwright starts Chromium-family browsers with `--no-sandbox` unless told otherwise.
+    The browser's own version page reports the command line it was started with."""
+    async with launcher.open() as context:
+        page = context.pages[0]
+        await page.goto("edge://version")
+        switches = (await page.locator("#command_line").inner_text()).split()
+    assert any(s.startswith("--remote-debugging-pipe") for s in switches)  # it is ours
+    assert "--no-sandbox" not in switches
+
+
 async def test_unknown_channel_fails_with_a_controlled_error(tmp_path):
     broken = EdgeLauncher(
         tmp_path / "data", tmp_path / "edge-profile", headless=True, channel="msedge-nonexistent"

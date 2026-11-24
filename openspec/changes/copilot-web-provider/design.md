@@ -97,6 +97,20 @@ Nadie en esta planificación ha visto la UI real. Cada premisa tiene la tarea qu
   - **Conectarse con `connect_over_cdp` a un Edge abierto por Wilson con puerto de depuración:** cualquier proceso local podría manejar la sesión corporativa por ese puerto, y es la vía más fácil para acabar tocando el Edge personal.
 - **Impacto:** spec `dedicated-edge-browser` («Solo se liberan recursos propios»). Si P7 mide más de **20 s** de mediana hasta editor listo, se reabre esta decisión con Wilson antes de la tarea 4.1.
 - Confirmada por Wilson el 2026-11-24 como punto de partida.
+- **Revisada el 2026-11-24 (tarea 8.8): sandbox de Edge activado.** Corrección de seguridad.
+  - **Qué:** el único lanzador (`harness/browser/edge.py`, que usan la sonda, `copilot login` y el futuro proveedor) pasa `chromium_sandbox=True` a `launch_persistent_context`. Playwright, por defecto, lanza la familia Chromium con `--no-sandbox` (documentación de Playwright para Python: `chromium_sandbox`, «Enable Chromium sandboxing. Defaults to `false`»). Wilson vio por eso el aviso de Edge sobre una opción de línea de comandos no admitida.
+  - **Por qué:** este Edge tiene una sesión corporativa iniciada y muestra una página remota. Sin sandbox, un fallo explotable en el renderizador da acceso directo al proceso del usuario y a su perfil. El sandbox es la configuración normal de Edge, y la que debe tener un navegador con esa sesión. No hacía falta `ignore_default_args`: la opción quita `--no-sandbox` por sí sola.
+  - **Coste:** ninguno medido en macOS. El arranque, `login`, `structure` y las pruebas `edge` (sin ventana) se comportan igual, y la sesión iniciada se conservó. En Windows **no está comprobado**: una política corporativa o un antivirus pueden impedir que los procesos del sandbox arranquen. En ese caso la pestaña no carga o Edge no se abre, y el runbook dice qué hacer. No se vuelve a `--no-sandbox` sin decisión de Wilson.
+  - **Comprobación:** `test_edge_runs_with_its_sandbox_on` lee la línea de comandos en la propia página `edge://version` del Edge lanzado, sin código por plataforma, y exige que no tenga `--no-sandbox`. Control negativo: con `CHROMIUM_SANDBOX = False` el test falla.
+  - **Otras opciones que Playwright sigue pasando** (revisadas el 2026-11-24 en `edge://version`; no se quita ninguna sin decisión):
+    - **Rebajan la seguridad:**
+      - `--password-store=basic` y `--use-mock-keychain` (macOS): las cookies del perfil, y con ellas la sesión, se cifran con una clave fija en vez de con el llavero del sistema. Quien lea el directorio del perfil puede descifrarlas. Quitarlas invalida la sesión guardada (hay que volver a iniciar sesión) y puede hacer que macOS pida acceso al llavero; se deja como decisión pendiente para Wilson. En Windows no aplican: el cifrado usa DPAPI.
+      - `--disable-background-networking` y `--disable-component-update`: Edge no actualiza en segundo plano listas como las de protección contra sitios peligrosos.
+      - `--disable-popup-blocking`: permite ventanas emergentes.
+      - `HttpsUpgrades` y `HttpsFirstBalancedModeAutoEnable`, dentro de `--disable-features`: no convierte enlaces `http` en `https` (Copilot ya es `https`).
+      - `--enable-unsafe-swiftshader`: WebGL por software como respaldo.
+    - **No rebajan la seguridad:** `--remote-debugging-pipe` (el canal de control es una tubería, no un puerto de red) y `--disable-extensions`. Tampoco el resto: desactivan el primer arranque, la sincronización, las métricas, los informes de fallos y el estrangulamiento de pestañas en segundo plano, o ajustan la apariencia.
+    - **Aviso visible:** solo se observó el de `--no-sandbox`. `--disable-infobars` oculta además la barra de «controlado por software automatizado»; ese aviso sería aceptable, pero lo quita Playwright, no el harness.
 
 ### D4 · Perfil dedicado con marca y un único navegador a la vez
 

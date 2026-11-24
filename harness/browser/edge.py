@@ -24,6 +24,7 @@ from harness.storage.locks import NamedLock
 BROWSER_LOCK = "browser"
 EDGE_CHANNEL = "msedge"
 LAUNCH_TIMEOUT_MS = 60_000
+CHROMIUM_SANDBOX = True  # never `--no-sandbox` (design D3, revised 2026-11-24)
 CLOSE_TIMEOUT_S = 10.0
 LOCK_POLL_S = 0.25
 # Measured (P8, macOS arm64, Edge 158): a second launch on a profile already open fails at
@@ -93,6 +94,10 @@ class EdgeLauncher:
                 channel=self.channel,
                 headless=self.headless,
                 timeout=LAUNCH_TIMEOUT_MS,
+                # Playwright turns Chromium's sandbox off by default (`--no-sandbox`). This
+                # browser holds a signed-in corporate session and renders a remote page: keep
+                # the sandbox on, as a normal Edge does.
+                chromium_sandbox=CHROMIUM_SANDBOX,
             )
         except PlaywrightError as exc:
             raise launch_error(exc, profile) from None
