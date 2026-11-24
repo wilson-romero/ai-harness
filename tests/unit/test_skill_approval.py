@@ -361,6 +361,123 @@ def test_apply_receives_exactly_the_hashed_proposal(conn, data_dir, tmp_path):
     assert effect.prepared == 1
 
 
+class TargetEffect(WriteEffect):
+    """A test effect that writes to a target chosen by the test."""
+
+    scope = "test.target"
+
+    def __init__(self, folder, target):
+        super().__init__(folder)
+        self.target = target
+        self.targets: list[str] = []
+
+    def prepare(self, context, validated):
+        from harness.skills.effects import Prepared
+
+        return Prepared(content=validated, target=self.target, effect_ref=None)
+
+    def apply(self, context, proposal):
+        self.targets.append(proposal.target)
+        super().apply(context, proposal)
+
+
+def _with_target(conn, data_dir, tmp_path, target, terminal, answer=GOOD_ECHO):
+    root = copy_skills(tmp_path)
+    with_effect(root, "demo-echo", "test.target")
+    effect = TargetEffect(tmp_path / "efecto", target)
+    engine, sessions, _ = build(
+        conn, data_dir, root=root, terminal=terminal, effects={"test.target": effect},
+        provider=ScriptedProvider({"tarea: demo-echo/draft": answer}))
+    return engine, sessions.create_session("Demo"), effect
+
+
+def _shown(terminal, label):
+    return next(l for l in terminal.shown[0].splitlines()
+                if l.strip().startswith(label)).split(label, 1)[1].strip()
+
+
+def _shown_content(terminal):
+    return terminal.shown[0].split("-" * 72 + "\n", 1)[1].rsplit("\n" + "-" * 72, 1)[0]
+
+
+@pytest.mark.parametrize("target", [
+    "Decisiones/a‮b.md",  # bidirectional override (Cf)
+    "Decisiones/a​b.md",  # zero-width space (Cf)
+    "Decisiones/a️b.md",  # variation selector (Mn, default ignorable)
+    "Decisiones/aㅤb.md",  # Hangul filler (Lo, default ignorable)
+    "Decisiones/a\x1bb.md",  # escape (Cc)
+    "Decisiones/café.md",  # not NFC
+])
+def test_a_target_that_cannot_be_shown_as_it_is_hashed_is_refused(
+    conn, data_dir, tmp_path, target
+):
+    """8.4: shown, hashed and applied target are one string; one that cannot be is refused."""
+    terminal = ApprovingTerminal()
+    engine, session, effect = _with_target(conn, data_dir, tmp_path, target, terminal)
+    outcome = _run(engine, session)
+    assert outcome.status == "failed" and terminal.questions == 0
+    assert conn.execute("SELECT error_code FROM skill_steps WHERE step_key = 'confirm'"
+                        ).fetchone()[0] == "invalid_target"
+    assert _approval(conn) == [] and effect.written() == []
+
+
+def test_the_target_shown_is_the_target_applied(conn, data_dir, tmp_path):
+    terminal = ApprovingTerminal()
+    engine, session, effect = _with_target(conn, data_dir, tmp_path, "Decisiones/café.md",
+                                           terminal)
+    assert _run(engine, session).status == "completed"
+    assert effect.targets == [_shown(terminal, "target:")] == ["Decisiones/café.md"]
+
+
+def test_invisible_characters_are_escaped_in_what_is_approved(conn, data_dir, tmp_path):
+    """8.5: what is shown is what is approved, with invisible characters made visible."""
+    answer = (GOOD_ECHO + "\nSigno ❤️ selector \U000E0100 relleno ㅤ"
+              " unión ͏ fin")
+    terminal = ApprovingTerminal()
+    engine, session, effect = _with_target(conn, data_dir, tmp_path, "Decisiones/a.md",
+                                           terminal, answer=answer)
+    assert _run(engine, session).status == "completed"
+    shown = _shown_content(terminal)
+    for char in ("️", "\U000E0100", "ㅤ", "͏"):
+        assert char not in shown
+    for escaped in ("❤<U+FE0F>", "<U+E0100>", "<U+3164>", "<U+034F>"):
+        assert escaped in shown
+    assert [p.read_bytes().decode("utf-8") for p in effect.written()] == [shown]
+    stored = conn.execute("SELECT output_sha256 FROM skill_steps WHERE step_key = 'confirm'"
+                          ).fetchone()[0]
+    assert hashlib.sha256(shown.encode("utf-8")).hexdigest() == stored
+
+
+def test_an_invisible_character_does_not_split_a_credential_out_of_redaction():
+    from tests.conftest import SECRET_SAMPLES
+
+    secret = SECRET_SAMPLES["anthropic"]
+    split = secret[:6] + "️" + secret[6:]
+    content = normalise_content(f"clave {split} fin")
+    assert "[REDACTED:anthropic]" in content and secret[6:] not in content
+
+
+def test_the_invisible_set_is_derived_from_unicodedata():
+    """8.5: categories from `unicodedata`, plus the listed default-ignorable code points."""
+    from harness.skills.approvals import INVISIBLE_CATEGORIES, INVISIBLE_RANGES, is_invisible
+
+    assert INVISIBLE_CATEGORIES == {"Cc", "Cf", "Cs", "Co", "Cn"}
+    for first, last in INVISIBLE_RANGES:  # the list holds only what the categories miss
+        for code in range(first, last + 1):
+            assert unicodedata.category(chr(code)) not in INVISIBLE_CATEGORIES
+            assert is_invisible(chr(code))
+    for char in ("­", "​", "⁠", "﻿", "\U000E0001", "", "⁥"):
+        assert is_invisible(char)
+    for char in ("a", "é", " ", "❤", "\n"):
+        assert not is_invisible(char)
+
+
+def test_the_memory_sanitiser_keeps_its_behaviour():
+    from harness.memory.safe_text import safe_text
+
+    assert safe_text("a️bㅤc").text == "a️bㅤc"
+
+
 def test_the_run_is_running_while_the_effect_runs(conn, data_dir, tmp_path):
     """8.1: consuming the approval puts the run in `running` in the same transaction."""
     seen = []

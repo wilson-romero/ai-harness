@@ -34,6 +34,7 @@ from harness.skills.approvals import (
     decide,
     normalise_content,
     render_for_terminal,
+    valid_target,
 )
 from harness.skills.checks import check, parse_fields
 from harness.skills.config import DEFAULT_APPROVAL_TTL_S
@@ -88,11 +89,13 @@ class _Run:
 
 @dataclass(frozen=True)
 class _Proposed:
-    """One `prepare`: the proposal (None if too large), where it goes and what it came from."""
+    """One `prepare`: the proposal (None, with `error`, if it cannot be approved), where it goes
+    and what it came from."""
 
     proposal: Proposal | None
     effect_ref: str | None
     source: str
+    error: str | None = None
 
 
 def utc_iso(moment: datetime) -> str:
@@ -483,9 +486,13 @@ class SkillEngine:
         effect = self._effects[step.effect]
         source = self._output(state, step.of)
         prepared = effect.prepare(self._effect_context(state, step), source)
+        if prepared.target is not None and not valid_target(prepared.target):
+            # A target is never cleaned for display: shown, hashed and applied are one string,
+            # so one that cannot be shown as it is is refused (review 8.4).
+            return _Proposed(None, prepared.effect_ref, source, "invalid_target")
         content = normalise_content(prepared.content)
         if len(content.encode("utf-8")) > MAX_CONTENT_BYTES:
-            return _Proposed(None, prepared.effect_ref, source)
+            return _Proposed(None, prepared.effect_ref, source, "limit:proposal_bytes")
         proposal = Proposal(
             scope=effect.scope,
             session_id=str(state.session.session_id),
@@ -504,6 +511,13 @@ class SkillEngine:
     ) -> RunOutcome | None:
         proposed = self._propose(state, step)
         proposal = proposed.proposal
+        if proposed.error == "invalid_target":
+            with transaction(self._conn):
+                self._set_step(row, "failed", error_code="invalid_target", finished=True)
+                self._finish_run_locked(state.run_id, state.session, "failed", "invalid_target")
+            return RunOutcome(state.run_id, "failed",
+                              message=f"step {step.id!r}: the effect's target contains invisible "
+                              "or non-normalised characters; nothing was asked or applied")
         if proposal is None:
             return self._stop(state, step.id, row, "limit:proposal_bytes", limit="proposal_bytes")
         proposal_hash = proposal.sha256
