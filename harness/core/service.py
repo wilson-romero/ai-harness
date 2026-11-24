@@ -201,13 +201,44 @@ class SessionService:
         finally:
             lock.release()
 
+    def require_session(self, raw_session_id: str) -> Session:
+        return self._require_session(raw_session_id)
+
+    def provider_for(self, session: Session) -> LLMProvider:
+        """The provider of a session, after checking the configured one exists."""
+        self._provider_factory(self._default_provider)
+        return self._provider_factory(session.provider)
+
+    async def ask_with_lock_held(
+        self,
+        session_id: UUID,
+        provider: LLMProvider,
+        prompt: str,
+        context: ProjectContext | None = None,
+        *,
+        stored_text: str,
+        timeout_s: float,
+    ) -> LLMResponse:
+        """A question from a caller that already holds the session lock (skill-engine D7).
+
+        Same states, deadline and no-resend rules as `ask`. `stored_text` is what the history
+        keeps as the question (when the provider is synthetic) instead of `prompt`.
+        """
+        return await self._ask_locked(
+            session_id, provider, prompt, context, stored_text=stored_text, timeout_s=timeout_s
+        )
+
     async def _ask_locked(
         self,
         session_id: UUID,
         provider: LLMProvider,
         prompt: str,
         context: ProjectContext | None = None,
+        *,
+        stored_text: str | None = None,
+        timeout_s: float | None = None,
     ) -> LLMResponse:
+        deadline_s = self._timeout_s if timeout_s is None else timeout_s
         session = repo.get_session(self._conn, session_id)
         assert session is not None
         warnings: tuple[str, ...] = ()
@@ -221,9 +252,10 @@ class SessionService:
         # stored, and only when the provider's content is synthetic (D7).
         sent_text = compose_prompt(context, prompt) if context is not None else prompt
         request = LLMRequest(
-            request_id=uuid7(), session_id=session_id, prompt=sent_text, timeout_s=self._timeout_s
+            request_id=uuid7(), session_id=session_id, prompt=sent_text, timeout_s=deadline_s
         )
         store_content = provider.synthetic_content
+        question = prompt if stored_text is None else stored_text
         with transaction(self._conn):
             repo.insert_request(self._conn, request.request_id, session_id)
             repo.insert_message(
@@ -231,7 +263,7 @@ class SessionService:
                 session_id=session_id,
                 request_id=request.request_id,
                 role="user",
-                content=prompt if store_content else None,
+                content=question if store_content else None,
             )
             if context is not None:
                 for note in context.included:
@@ -306,7 +338,7 @@ class SessionService:
             )
 
         try:
-            async with asyncio.timeout(self._timeout_s):
+            async with asyncio.timeout(deadline_s):
                 text = await provider.ask(request, on_sent)
         except TimeoutError:
             if sent:

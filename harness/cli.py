@@ -34,6 +34,7 @@ from harness.memory.search import (
 )
 from harness.providers.registry import provider_factory
 from harness.skills.commands import add_skill_parser, run_skill_command
+from harness.skills.engine import recover_runs
 from harness.storage.database import open_database
 
 EXIT_OK = 0
@@ -141,6 +142,7 @@ def _run(args: argparse.Namespace) -> int:
             settings.request_timeout_s,
         )
         service.recover()
+        recover_runs(conn, settings.data_dir)
         if args.command == "session" and args.session_command == "create":
             session = service.create_session(args.name, args.project)
             print(session.session_id)
