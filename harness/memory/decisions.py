@@ -140,10 +140,14 @@ def temp_name_for(run_id: str, step: str) -> str:
 
 
 def _escape_line(line: str) -> str:
-    """Model text cannot open a section or draw a rule that reads as a frontmatter fence."""
+    """Model text cannot open a section, draw a rule that reads as a frontmatter fence, or
+    imitate the `--- nota: …` header that `memory context` puts before each note."""
     line = neutralise_delimiters(line)
     stripped = line.strip()
-    if stripped.startswith("#") or (len(stripped) >= 3 and set(stripped) <= set("-=*_")):
+    if (
+        stripped.startswith(("#", "---"))
+        or (len(stripped) >= 3 and set(stripped) <= set("-=*_"))
+    ):
         return "\\" + line
     return line
 

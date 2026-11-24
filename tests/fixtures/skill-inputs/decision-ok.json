@@ -1,0 +1,16 @@
+{
+  "title": "Cola gestionada para los eventos de pedidos",
+  "context": "El servicio sintético de pedidos publica un evento por pedido aceptado. El equipo no opera infraestructura propia de mensajería.",
+  "decision": "Los eventos de pedidos se publican en una cola gestionada.",
+  "alternatives": [
+    "Bus propio sobre la base de datos.",
+    "Tabla de eventos leída por sondeo."
+  ],
+  "consequences": [
+    "No hay infraestructura de mensajería que operar.",
+    "El coste depende del volumen de eventos."
+  ],
+  "assumptions": [
+    "El volumen no supera 200 pedidos por minuto este año."
+  ]
+}
