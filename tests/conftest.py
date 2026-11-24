@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -26,12 +28,92 @@ HARNESS_VARS = [
     "HARNESS_REQUEST_TIMEOUT_S",
     "HARNESS_MOCK_BEHAVIOR",
     "HARNESS_MOCK_DELAY_MS",
+    "HARNESS_VAULT_ROOT",
+    "HARNESS_PROFILE",
+    "HARNESS_MEMORY_CONTEXT_MAX_BYTES",
+    # Read by the work-profile sync check; a developer machine may define them.
+    "OneDrive",
+    "OneDriveCommercial",
+    "OneDriveConsumer",
 ]
+VAULT_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "vault-synthetic"
+
+# Credentials of each known format, assembled at run time so that no versioned file contains
+# one. Keys are the redaction kinds.
+SECRET_SAMPLES = {
+    "anthropic": "sk-" + "ant-" + "api03-" + "Q" * 40,
+    "openai": "sk-" + "proj-" + "R" * 40,
+    "github": "gh" + "p_" + "A" * 36,
+    "gitlab": "gl" + "pat-" + "B" * 20,
+    "aws": "AK" + "IA" + "C" * 16,
+    "google": "AI" + "za" + "D" * 35,
+    "slack": "xo" + "xb-" + "1234567890-abcdefghij",
+    "digitalocean": "do" + "p_v1_" + "e" * 64,
+    "stripe": "sk" + "_live_" + "F" * 24,
+    "jwt": "ey" + "J" + "a" * 20 + ".ey" + "J" + "b" * 20 + "." + "c" * 20,
+}
+# The other shape of two kinds that have two patterns each.
+EXTRA_SECRET_SAMPLES = {
+    "openai": "sk-" + "G" * 48,
+    "github": "github" + "_pat_" + "H" * 22 + "_" + "J" * 59,
+}
+PRIVATE_KEY_SAMPLE = "\n".join(
+    [
+        "-----BEGIN " + "RSA PRIVATE KEY-----",
+        "K" * 64,
+        "L" * 64,
+        "-----END " + "RSA PRIVATE KEY-----",
+    ]
+)
 
 
 @pytest.fixture
 def data_dir(tmp_path: Path) -> Path:
     return tmp_path / "data"
+
+
+@pytest.fixture
+def vault(tmp_path: Path) -> Path:
+    """A private copy of the synthetic vault. Tests may add links, secrets and defects to it."""
+    root = tmp_path / "vault-copy"
+    shutil.copytree(VAULT_FIXTURE, root)
+    return root
+
+
+def write_note(root: Path, relative: str, body: str, **fields: str) -> Path:
+    """Write a note with a valid frontmatter block into a vault copy."""
+    header = {"type": "nota", "created": "2026-11-01", "updated": "2026-11-01", **fields}
+    lines = ["---", *(f"{key}: {value}" for key, value in header.items()), "---", body, ""]
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def make_symlink(link: Path, target: Path) -> None:
+    """Create a symbolic link, or skip with a visible reason where the OS does not allow it."""
+    try:
+        link.symlink_to(target, target_is_directory=target.is_dir())
+    except OSError as exc:  # e.g. Windows without developer mode or the privilege
+        pytest.skip(f"cannot create symbolic links here: {exc}")
+
+
+def fingerprint(root: Path) -> dict[str, tuple]:
+    """Relative path -> (kind, size, mtime_ns, sha256 or link target) of every entry under root."""
+    prints: dict[str, tuple] = {}
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for name in sorted(dirnames + filenames):
+            path = Path(dirpath, name)
+            info = path.lstat()
+            relative = path.relative_to(root).as_posix()
+            if path.is_symlink():
+                prints[relative] = ("link", info.st_size, info.st_mtime_ns, os.readlink(path))
+            elif path.is_dir():
+                prints[relative] = ("dir", 0, info.st_mtime_ns, "")
+            else:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                prints[relative] = ("file", info.st_size, info.st_mtime_ns, digest)
+    return prints
 
 
 @pytest.fixture

@@ -23,3 +23,27 @@ class SessionBusy(HarnessError):
 
 class UnknownProvider(HarnessError):
     pass
+
+
+class MemoryNotConfigured(HarnessError):
+    """The vault root, profile or memory limits are missing or invalid."""
+
+
+class InvalidProject(HarnessError):
+    pass
+
+
+class ProjectNotFound(HarnessError):
+    pass
+
+
+class ProfileBindingMismatch(HarnessError):
+    """The data directory is bound to another profile or vault."""
+
+
+class SyncedLocationRefused(HarnessError):
+    """A work vault or data directory sits where it would leave the machine."""
+
+
+class NotImplementedInThisBuild(HarnessError):
+    pass
