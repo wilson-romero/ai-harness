@@ -7,14 +7,18 @@ from collections.abc import Callable
 from harness.config import Settings
 from harness.core.errors import UnknownProvider
 from harness.providers.base import LLMProvider
-from harness.providers.mock import MockProvider
+from harness.providers.mock import MockProvider, load_responses
 
 ProviderFactory = Callable[[str], LLMProvider]
 
 
 def provider_factory(settings: Settings) -> ProviderFactory:
     builders: dict[str, Callable[[], LLMProvider]] = {
-        "mock": lambda: MockProvider(settings.mock_behavior, settings.mock_delay_ms),
+        "mock": lambda: MockProvider(
+            settings.mock_behavior,
+            settings.mock_delay_ms,
+            load_responses(settings.mock_responses) if settings.mock_responses else None,
+        ),
     }
 
     def build(name: str) -> LLMProvider:
