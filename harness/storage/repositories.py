@@ -128,3 +128,34 @@ def insert_audit(
             utc_now(),
         ),
     )
+
+
+def get_memory_binding(conn: sqlite3.Connection) -> tuple[str, str] | None:
+    """The (profile, vault_root) this data directory is bound to, if any."""
+    row = conn.execute("SELECT profile, vault_root FROM memory_binding").fetchone()
+    return (row["profile"], row["vault_root"]) if row else None
+
+
+def insert_memory_binding(conn: sqlite3.Connection, profile: str, vault_root: str) -> None:
+    conn.execute(
+        "INSERT INTO memory_binding (binding_id, profile, vault_root, created_at)"
+        " VALUES (1, ?, ?, ?)",
+        (profile, vault_root, utc_now()),
+    )
+
+
+def insert_request_context(
+    conn: sqlite3.Connection,
+    *,
+    request_id: UUID,
+    note_path: str,
+    sha256: str,
+    size_bytes: int,
+    truncated: bool,
+) -> None:
+    """Record that a note went out with a request. Path and hash only, never the text."""
+    conn.execute(
+        "INSERT INTO request_context (request_id, note_path, sha256, bytes, truncated)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (str(request_id), note_path, sha256, size_bytes, int(truncated)),
+    )

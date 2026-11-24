@@ -1,5 +1,8 @@
+import sqlite3
 from datetime import UTC, datetime
 from uuid import uuid7
+
+import pytest
 
 from harness.core.contracts import RequestStatus, Session, SessionStatus
 from harness.storage import repositories as repo
@@ -25,7 +28,8 @@ def test_first_run_creates_the_schema(conn):
     tables = {
         row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
-    assert tables == {"sessions", "requests", "messages", "audit_events", "schema_migrations"}
+    session_core = {"sessions", "requests", "messages", "audit_events", "schema_migrations"}
+    assert tables == session_core | {"memory_binding", "request_context"}
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
 
@@ -35,8 +39,11 @@ def test_migrating_twice_changes_nothing(data_dir):
     first.close()
 
     second = connect(data_dir)
+    before = second.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
     assert migrate(second) == []
-    assert second.execute("SELECT count(*) FROM schema_migrations").fetchone()[0] == 1
+    after = second.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
+    assert [tuple(r) for r in after] == [tuple(r) for r in before]
+    assert [r["version"] for r in after] == [1, 2]
     assert repo.get_session(second, session.session_id) == session
     second.close()
 
@@ -93,3 +100,27 @@ def test_audit_round_trip(conn):
     row = conn.execute("SELECT * FROM audit_events").fetchone()
     assert (row["event_type"], row["outcome"], row["actor"]) == ("session.created", "ok", "cli")
     assert row["session_id"] == str(session.session_id) and row["request_id"] is None
+
+
+def test_memory_binding_holds_a_single_row(conn):
+    with transaction(conn):
+        repo.insert_memory_binding(conn, "work", "/vault-a")
+    with pytest.raises(sqlite3.IntegrityError):
+        with transaction(conn):
+            repo.insert_memory_binding(conn, "work", "/vault-b")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE memory_binding SET profile = 'casa'")
+    assert repo.get_memory_binding(conn) == ("work", "/vault-a")
+
+
+def test_request_context_needs_an_existing_request(conn):
+    with pytest.raises(sqlite3.IntegrityError):
+        with transaction(conn):
+            repo.insert_request_context(
+                conn,
+                request_id=uuid7(),
+                note_path="projects/demo-alpha/_project.md",
+                sha256="0" * 64,
+                size_bytes=10,
+                truncated=False,
+            )
