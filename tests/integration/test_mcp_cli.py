@@ -21,6 +21,7 @@ from harness.mcp.client import BASE_ENV_NAMES, RECURSION_MARKER
 from harness.storage.database import DATABASE_NAME
 from tests.conftest import SECRET_SAMPLES
 from tests.mcp_support import (
+    DEFAULT_TOOLS,
     REPO_ROOT,
     Server,
     child_env,
@@ -78,7 +79,7 @@ def mcp(cli, ws, monkeypatch):
 
     def run(*args: str, **env: str):
         started = time.monotonic()
-        code, out, err = cli("mcp", *args, HARNESS_MCP_CONFIG=str(ws.config), **env)
+        code, out, err = cli("mcp", *args, **({"HARNESS_MCP_CONFIG": str(ws.config)} | env))
         return code, out, err, time.monotonic() - started
 
     return run
@@ -167,6 +168,23 @@ def test_allowed_call(mcp, ws, data_dir):
     row = rows(data_dir)[0]
     assert (row["decision"], row["status"], row["server_stopped"]) == ("allowed", "completed", 1)
     assert server.stopped()
+
+
+def test_a_server_written_with_the_official_sdk(mcp, ws, tmp_path):
+    """Interoperability: the bounded transport and handshake against SDK 2.3.0's own server."""
+    sdk_server = Path(__file__).parents[1] / "fixtures" / "mcp" / "sdk_server.py"
+    config = write_config(tmp_path / "sdk.local.json", {"sdk": {
+        "command": [sys.executable, str(sdk_server)], "startup_timeout_s": 30,
+        "call_timeout_s": 10, "tools": {"get_project_metadata": {
+            "operation": "read", "arguments": {"project": DEFAULT_TOOLS["get_project_metadata"]
+                                               ["arguments"]["project"]}}},
+    }})
+    code, out, err, _ = mcp("call", "sdk", "get_project_metadata", "--args", ALPHA,
+                            HARNESS_MCP_CONFIG=str(config))
+    assert code == 0, err
+    assert json.loads(out)["name"] == "Demo Alpha (SDK)"
+    code, out, err, _ = mcp("tools", "sdk", HARNESS_MCP_CONFIG=str(config))
+    assert code == 0 and "get_project_metadata\tread\tallowed" in out, err
 
 
 def test_the_tool_reports_an_error(mcp, ws, data_dir):
