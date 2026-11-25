@@ -79,16 +79,51 @@ Premisas **sin medir**, cada una con su tarea:
 
 ### D6 · Un solo bucle de eventos y la lectura de línea fuera de él
 
-- **Qué:** la conversación corre dentro de un único `asyncio.run`; la lectura de la línea se hace en un hilo auxiliar para no bloquear el bucle. La forma exacta de entregar Ctrl+C (a la pregunta en curso, o a la espera de línea) se fija tras la sonda de la tarea 1.2, que mide P1 en las dos plataformas con un guion de quince líneas.
-- **Por qué:** un proveedor con recursos abiertos (Playwright) vive ligado a un bucle de eventos: no se puede crear un bucle nuevo por pregunta.
+**Revisada el 2026-11-25** tras la sonda de la tarea 1.2: la redacción original dejaba abierta «la forma exacta de entregar Ctrl+C»; ahora queda fijada con lo medido en macOS y con lo que dice la documentación para Windows.
+
+- **Qué:** la conversación corre dentro de un único `asyncio.run`; la lectura de la línea se hace en un hilo auxiliar (un hilo `daemon` por línea pedida, como mucho uno vivo) para no bloquear el bucle. Ctrl+C se recibe con un manejador propio instalado con `signal.signal(SIGINT, …)` **antes** de `asyncio.run` y restaurado al salir; el manejador nunca lanza una excepción. Lo que hace depende solo del estado que la conversación lleva en el hilo principal, nunca de en qué hilo o llamada cayó la señal:
+  - si hay una lectura esperando (la espera de línea o el aviso de aprobación), deja una marca de interrupción en la cola de esa lectura (`queue.SimpleQueue.put`, la única operación de cola que la documentación declara reentrante);
+  - si no, pide al bucle, con `loop.call_soon_threadsafe` (lo mismo que hace el manejador de `asyncio.Runner`), que cancele la tarea en curso (la pregunta o el comando).
+  Una lectura que una interrupción deja pendiente sigue siendo la única; la línea que llegue después la recibe quien la esté esperando entonces. Un fin de entrada que llega a una lectura durante la cual hubo una interrupción no se toma como fin de entrada.
+- **Por qué:** un proveedor con recursos abiertos (Playwright) vive ligado a un bucle de eventos: no se puede crear un bucle nuevo por pregunta. Y la sonda y la documentación dicen que la señal llega siempre al hilo principal, que el hilo que lee no se entera y que su lectura sigue abierta: decidir por el estado del hilo principal es lo único que da la misma conducta en las dos plataformas.
+- **Sonda (tarea 1.2).** `scripts/probe_interrupt.py`, fuera del producto, solo biblioteca estándar: un `asyncio.run` con el manejador anterior y tres fases: (a) una tarea pendiente, (b) una línea leída con `input()` en un hilo auxiliar mientras el bucle espera, (c) el hilo del bucle bloqueado esperando la línea que lee otro hilo (el caso del aviso de aprobación). En macOS se ejecuta con `--drive`: el guion se lanza a sí mismo como proceso hijo sobre una pseudoterminal y escribe Ctrl+C (`\x03`) en ella, que es lo que hace el teclado: la disciplina de línea de la terminal genera SIGINT para el proceso.
+
+  | Caso | macOS arm64, Python 3.14.8 (medido el 2026-11-25) | Windows (sin medir — lo ejecuta Wilson) |
+  |---|---|---|
+  | (a) Ctrl+C con una tarea pendiente | el manejador corre en el hilo principal; la tarea queda cancelada y el bucle sigue vivo | sin medir |
+  | (b) Ctrl+C con `input()` bloqueado en un hilo auxiliar | el manejador corre en el hilo principal; el hilo lector **sigue bloqueado**; lo escrito a medias antes de Ctrl+C se descarta; la línea siguiente (`after`) llega entera a esa misma lectura | sin medir |
+  | (c) Ctrl+C con el hilo del bucle esperando en `SimpleQueue.get(timeout=0.1)` | el manejador corre en el hilo principal y su marca despierta la espera en el acto; el hilo lector sigue bloqueado y entrega la línea siguiente (`end`) | sin medir |
+  | Qué ve una persona | `^C` al final de la línea, y luego las líneas del programa; el proceso no termina (salida 0 al final de la sonda) | sin medir |
+
+  Recibo: `uv run python scripts/probe_interrupt.py --drive` → líneas `probe: task: cancelled; the loop is still running`, `probe: wait: the reader thread is still blocked after the interrupt`, `probe: wait: reader outcome line 'after'`, `probe: prompt: first outcome interrupt`, `probe: prompt: reader outcome line 'end'`, `probe: exit 0`, `drive: child exit status 0`.
+
+- **Windows, según la documentación y el código de CPython 3.14 (consultado el 2026-11-25), sin medir:**
+  - `signal` (docs.python.org/3.14/library/signal.html): «Python signal handlers are always executed in the main Python thread of the main interpreter, even if the signal was received in another thread»; en Windows `signal()` admite `SIGINT`. Que el manejador no lance nada evita el «out of thin air» que la misma página describe.
+  - `asyncio` (asyncio-platforms.html): en Windows `loop.add_signal_handler()` no existe; por eso se usa `signal.signal`. `asyncio-runner.html` («Handling Keyboard Interruption»): `Runner.run()` instala su propio manejador, que cancela la tarea principal; según `Lib/asyncio/runners.py` (3.14, línea 113) solo lo instala si el manejador vigente es `signal.default_int_handler`, de modo que uno propio instalado antes se respeta.
+  - `ProactorEventLoop` (`Lib/asyncio/proactor_events.py`, 3.14, línea 675) llama a `signal.set_wakeup_fd` en el hilo principal: Ctrl+C despierta el bucle aunque esté esperando E/S. `call_soon_threadsafe` escribe además en el mismo canal.
+  - `input()` en la consola de Windows (`Parser/myreadline.c`, 3.14, `_PyOS_WindowsConsoleReadline`): con Ctrl+C, `ReadConsoleW` termina sin datos; el hilo comprueba las señales (en un hilo que no es el principal no hay nada que ejecutar) y **vuelve a empezar la lectura** («The console cancelled the read and flushed its input buffer, but no exception was raised. Start the read over»): la misma conducta medida en macOS en (b). Hay una rama (`n_read == -1`) que devolvería una línea vacía, que `input()` convierte en `EOFError`: por eso un fin de entrada con una interrupción en medio no cierra la conversación.
+  - `threading` (threading.html): «Changed in version 3.14: Lock acquisition can now be interrupted by signals on Windows»; aun así la espera de (c) usa `get(timeout=0.1)` en bucle, que no depende de ese cambio.
+  - `queue` (queue.html): `SimpleQueue.put` es reentrante («a put() or get() call can be interrupted by another put() call in the same thread without deadlocking»), que es justo lo que hace el manejador cuando la señal cae dentro de un `get`.
+  Conclusión: la documentación permite distinguir de forma portable «interrumpir la pregunta» de «interrumpir la espera», porque la distinción la hace el estado del hilo principal y no la lectura. La implementación del grupo 4 sigue adelante; la fila de Windows la confirma Wilson (tarea 7.5).
+- **Comando para Wilson en Windows (PowerShell, en la raíz del repositorio):**
+
+  ```powershell
+  git fetch origin; git checkout feature/interactive-shell; uv run python --version; uv run python scripts/probe_interrupt.py
+  ```
+
+  Seguir las líneas `READY`: pulsar Ctrl+C cuando lo pida; en `READY wait`, escribir unas letras sin Intro y pulsar Ctrl+C; cuando pida `after` o `end`, escribirlo y pulsar Intro. Pegar de vuelta la versión de Python y **todas** las líneas que empiezan por `probe:` (no contienen datos de la empresa ni rutas).
 - **Alternativas rechazadas:**
   - `asyncio.run` por pregunta: incompatible con D5.
   - Leer la línea en el hilo principal y correr el bucle en otro: las señales llegan al hilo principal, y la cancelación de la pregunta tendría que cruzar hilos.
-- **Impacto:** spec (Interrumpir una pregunta no cierra la conversación). Si la sonda muestra que en Windows no se puede distinguir de forma fiable «interrumpir la pregunta» de «interrumpir la espera», se reabre esta decisión con Wilson antes de implementar el grupo 4.
+  - `loop.add_signal_handler`: no existe en Windows.
+  - Dejar el manejador de `asyncio.Runner`: cancela la tarea principal (la conversación entera), no la pregunta.
+  - Un manejador que lance una excepción (como `KeyboardInterrupt`) para cortar la lectura: puede aparecer en cualquier instrucción del hilo principal, también dentro del motor de Skills o de una transacción.
+  - Un hilo lector permanente que lea por adelantado: una línea escrita mientras corre un Skill acabaría contestando el aviso de aprobación que aparece después. Se lee solo cuando alguien espera una línea.
+- **Impacto:** spec (Interrumpir una pregunta no cierra la conversación). Tareas 4.1 y 4.2. La espera del aviso de aprobación usa la misma lectura (D8).
 
 ### D7 · Interrupción: cancela la pregunta, nunca la conversación
 
-- **Qué:** Ctrl+C durante una pregunta cancela esa tarea; el servicio registra `uncertain` o `failed` según `on_sent`, como ya hace, y el bucle vuelve a esperar. Ctrl+C en la espera imprime cómo salir y sigue. Se sale con `/exit` o con fin de entrada.
+- **Qué:** Ctrl+C durante una pregunta cancela esa tarea; el servicio registra `uncertain` o `failed` según `on_sent`, como ya hace, y el bucle vuelve a esperar. Ctrl+C en la espera imprime cómo salir y sigue. Se sale con `/exit` o con fin de entrada. **Añadido el 2026-11-25 (sonda 1.2):** Ctrl+C durante `/skill` cancela el comando igual que en `skill run` (el estado de la ejecución queda para `skill resume`, fuera de la conversación o en otra sesión); Ctrl+C en el aviso de aprobación cuenta como «sin decidir»: la ejecución queda `awaiting_approval`, nada se aplica y la conversación sigue.
 - **Por qué:** es el comportamiento de las herramientas de referencia y reutiliza la regla que ya existe para la interrupción.
 - **Alternativas rechazadas:**
   - Dos Ctrl+C seguidos para salir: depende de tiempos y es difícil de probar sin reloj.
