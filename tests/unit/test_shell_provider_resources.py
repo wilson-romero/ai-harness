@@ -1,8 +1,11 @@
 """Provider resources that live as long as a conversation (interactive-shell D5, task 4.3;
 spec llm-provider «Recursos del proveedor con vida de conversación»)."""
 
+import asyncio
+
 from harness.providers.base import close_resources, open_resources
 from harness.providers.mock import MockProvider
+from harness.shell.conversation import INTERRUPTED_EXIT
 from tests.conftest import RecordingProvider
 from tests.shell_support import CountingProvider, ScriptedTerminal, make_conversation, statuses
 
@@ -58,6 +61,57 @@ async def test_closed_when_the_loop_ends_with_an_error(conn, data_dir):
     except RuntimeError:
         pass
     assert (provider.opens, provider.closes) == (1, 1)
+
+
+class _Hanging(CountingProvider):
+    """A provider whose opening or closing never ends; Ctrl+C arrives while it hangs."""
+
+    def __init__(self, where: str) -> None:
+        super().__init__()
+        self.where = where
+        self.conversation = None
+
+    async def _hang(self) -> None:
+        self.conversation.interrupt()  # what the SIGINT handler calls
+        await asyncio.sleep(3600)
+
+    async def open_resources(self) -> None:
+        self.opens += 1
+        if self.where == "open":
+            await self._hang()
+
+    async def close_resources(self) -> None:
+        self.closes += 1
+        if self.where == "close":
+            await self._hang()
+
+
+async def test_ctrl_c_stops_an_opening_that_never_ends(conn, data_dir):
+    """Review 2026-11-25: Ctrl+C while the provider opens ends the conversation cleanly:
+    nothing asked, the provider closed, the session free."""
+    provider = _Hanging("open")
+    terminal = ScriptedTerminal(["no debería leerse", "/exit"])
+    conversation, service, _ = make_conversation(conn, data_dir, terminal, provider)
+    provider.conversation = conversation
+    assert await asyncio.wait_for(conversation.run(), 10) == INTERRUPTED_EXIT
+    assert (provider.opens, provider.closes) == (1, 1)
+    assert terminal.reads == 0 and provider.calls == 0 and statuses(conn) == []
+    assert any(line.startswith("interrupted: the provider was still opening")
+               for line in terminal.shown)
+    (session_id,) = [row[0] for row in conn.execute("SELECT session_id FROM sessions")]
+    _, lock = service.take_session(session_id)  # free again
+    lock.release()
+
+
+async def test_ctrl_c_stops_a_closing_that_never_ends(conn, data_dir):
+    provider = _Hanging("close")
+    terminal = ScriptedTerminal(["uno", "/exit"])
+    conversation, _, _ = make_conversation(conn, data_dir, terminal, provider)
+    provider.conversation = conversation
+    assert await asyncio.wait_for(conversation.run(), 10) == 0
+    assert statuses(conn) == ["completed"]
+    assert any(line.startswith("interrupted: closing the provider was stopped")
+               for line in terminal.shown)
 
 
 async def test_a_provider_without_resources_works_the_same():

@@ -22,7 +22,7 @@ import shutil
 import sqlite3
 import stat
 import unicodedata
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -62,6 +62,7 @@ PROMPT = "> "
 FOREIGN_PREFIX = "| "  # no harness line starts with "|"
 CONTINUATION_PREFIX = "|+"  # a row that continues the line above it (cut to the terminal width)
 MIN_COLUMNS = 20
+INTERRUPTED_EXIT = 130  # Ctrl+C stopped the provider's opening: the usual code of an interrupt
 MAX_QUESTION_BYTES = 64 * 1024
 MAX_SHOWN_CHARS = 256 * 1024  # of one foreign text; the rest is counted, not shown
 MAX_FILE_BYTES = MAX_INPUT_BYTES
@@ -307,17 +308,43 @@ class Conversation:
             self._switch_to(self._take_existing(session_id))
         else:
             self._switch_to(self._take_new(project, name))
+        code = 0
         try:
-            await open_resources(self._deps.provider)
             try:
-                self._header()
-                await self._lines()
+                # Ctrl+C stops the opening (review 2026-11-25): a provider that never finishes
+                # opening would otherwise leave no way out. Nothing has been asked yet, so the
+                # first Ctrl+C is enough; the conversation then closes what was opened and ends.
+                if await self._interruptible(open_resources(self._deps.provider)):
+                    self._header()
+                    await self._lines()
+                else:
+                    self._say("interrupted: the provider was still opening; nothing was asked. "
+                              "Leaving the conversation")
+                    code = INTERRUPTED_EXIT
             finally:
-                await close_resources(self._deps.provider)
+                if not await self._interruptible(close_resources(self._deps.provider)):
+                    self._say("interrupted: closing the provider was stopped; it may have left "
+                              "resources open (a browser window, a process)")
         finally:
             self._release()
             self._loop = None
-        return 0
+        return code
+
+    async def _interruptible(self, step: Awaitable[None]) -> bool:
+        """Run `step` as the current action, which Ctrl+C cancels: False if it was."""
+        task = asyncio.ensure_future(step)
+        self._current = task
+        try:
+            await asyncio.wait({task})
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+        finally:
+            self._current = None
+        if task.cancelled():
+            return False
+        task.result()  # an error of the step goes on
+        return True
 
     async def _lines(self) -> None:
         while True:
