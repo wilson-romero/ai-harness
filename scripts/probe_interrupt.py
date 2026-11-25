@@ -2,7 +2,9 @@
 
 How does Ctrl+C reach a process that runs one `asyncio` loop, (a) while a task is pending and
 (b) while a line read is blocked in a helper thread, (c) while the loop thread itself waits for
-a line read by a helper thread (the approval prompt)? The handler is installed with
+a line read by a helper thread (the approval prompt), (d) while the conversation's own wait,
+`ConsoleTerminal.read_line`, waits (added 2026-11-25: the order of the end of the read and the
+handler, and whether the wait ends as an interruption)? The handler is installed with
 `signal.signal`, the one API that exists on both platforms (`loop.add_signal_handler` does not
 exist on Windows).
 
@@ -98,6 +100,63 @@ async def main() -> None:
         say("READY end: type   end   and press Enter")
         outcome = answers.get()
     say(f"prompt: reader outcome {outcome[0]} {outcome[1]!r}")
+    events.clear()
+
+    # (d) the conversation's own wait, `ConsoleTerminal.read_line`, with the handler the
+    # conversation installs (review 2026-11-25). Which comes first after Ctrl+C: the end of the
+    # read (an EOFError or a KeyboardInterrupt in the reader thread) or the handler? And does
+    # the wait end as an interruption (the conversation goes on) or as the end of input?
+    await real_wait()
+
+
+async def real_wait() -> None:
+    global on_interrupt
+    import builtins
+    import time
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from harness.shell.terminal import EOF_GRACE_S, ConsoleTerminal, WaitInterrupted
+
+    started = time.monotonic()
+    real_input = builtins.input
+
+    def stamp() -> str:
+        return f"{(time.monotonic() - started) * 1000:.1f} ms"
+
+    def traced_input(*args):
+        try:
+            line = real_input(*args)
+        except BaseException as exc:
+            events.append(f"reader ended with {type(exc).__name__} at {stamp()}")
+            raise
+        events.append(f"reader got a line at {stamp()}")
+        return line
+
+    terminal = ConsoleTerminal()
+
+    def conversation_handler() -> None:
+        events.append(f"handler at {stamp()}")
+        terminal.interrupt_wait()
+
+    builtins.input = traced_input
+    on_interrupt = conversation_handler
+    try:
+        say(f"READY real: press Ctrl+C now (do not type anything); grace {EOF_GRACE_S} s")
+        for _ in range(2):
+            try:
+                line = await terminal.read_line("probe-real> ")
+                say(f"real: read_line returned {line!r}"
+                    + (" (taken as the end of input)" if line is None else ""))
+                break
+            except WaitInterrupted:
+                say("real: read_line raised WaitInterrupted (the conversation goes on)")
+                say("events: " + "; ".join(events))
+                events.clear()
+                say("READY again: type   after   and press Enter")
+        say("events: " + "; ".join(events))
+    finally:
+        builtins.input = real_input
 
 
 def drive() -> int:
@@ -111,7 +170,8 @@ def drive() -> int:
         os.execv(sys.executable, [sys.executable, __file__])
     buffer = b""
     answers = {b"READY task": b"\x03", b"READY wait": b"half typed\x03", b"READY line": b"after\r",
-               b"READY prompt": b"\x03", b"READY end": b"end\r"}
+               b"READY prompt": b"\x03", b"READY end": b"end\r", b"READY real:": b"\x03",
+               b"READY again:": b"after\r"}
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         try:

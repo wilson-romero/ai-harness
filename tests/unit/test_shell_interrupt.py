@@ -129,8 +129,8 @@ class FakeInput:
             while not self.given:
                 self.ready.wait()
             item = self.given.pop(0)
-        if item is EOFError:
-            raise EOFError
+        if isinstance(item, type) and issubclass(item, BaseException):
+            raise item
         return item  # type: ignore[return-value]
 
     def give(self, item: object) -> None:
@@ -139,8 +139,13 @@ class FakeInput:
             self.ready.notify_all()
 
 
-async def _until(condition) -> None:
+async def _until(condition, timeout_s: float = 10.0) -> None:
+    """Yield to the loop until `condition` holds; a test that waits for what never comes fails
+    instead of spinning (review 2026-11-25). The deadline is a guard, not the synchronisation."""
+    deadline = time.monotonic() + timeout_s
     while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError("the condition never held")
         await asyncio.sleep(0)
 
 
@@ -184,6 +189,55 @@ async def test_console_end_of_input_after_an_interrupt_is_not_the_end(monkeypatc
     await _until(lambda: fake.calls == 3)
     fake.give(EOFError)
     assert await fake_end is None  # a real end of input still ends
+
+
+async def test_console_keyboard_interrupt_in_the_reader_thread_reads_again(monkeypatch, capsys):
+    """Review 2026-11-25: a KeyboardInterrupt raised in the helper thread (plausible on
+    Windows) once left `_reading` true forever, so no read started again and the wait hung."""
+    fake = FakeInput()
+    monkeypatch.setattr(builtins, "input", fake)
+    terminal = ConsoleTerminal()
+    waiting = asyncio.ensure_future(terminal.read_line("> "))
+    await _until(lambda: fake.calls == 1)
+    fake.give(KeyboardInterrupt)
+    await _until(lambda: fake.calls == 2)
+    fake.give("sigue")
+    assert await asyncio.wait_for(waiting, 10) == "sigue"
+
+
+async def test_console_end_of_input_then_ctrl_c_is_an_interruption(monkeypatch, capsys):
+    """Review 2026-11-25: a console may end the read (end of input) before the SIGINT handler
+    runs. An interruption that arrives after that end, within the grace, is an interruption:
+    the conversation does not end."""
+    monkeypatch.setattr("harness.shell.terminal.EOF_GRACE_S", 30.0)
+    fake = FakeInput()
+    monkeypatch.setattr(builtins, "input", fake)
+    terminal = ConsoleTerminal()
+    waiting = asyncio.ensure_future(terminal.read_line("> "))
+    await _until(lambda: fake.calls == 1)
+    fake.give(EOFError)
+    await _until(lambda: not terminal._reading or waiting.done())  # the end has been taken
+    assert terminal.interrupt_wait() is True  # the handler, late
+    try:
+        await asyncio.wait_for(waiting, 10)
+        raise AssertionError("the late interruption was taken as the end of input")
+    except WaitInterrupted:
+        pass
+    again = asyncio.ensure_future(terminal.read_line("> "))
+    await _until(lambda: fake.calls == 2)
+    fake.give("sigue")
+    assert await asyncio.wait_for(again, 10) == "sigue"
+
+
+async def test_console_end_of_input_alone_still_ends_after_the_grace(monkeypatch, capsys):
+    monkeypatch.setattr("harness.shell.terminal.EOF_GRACE_S", 0.01)
+    fake = FakeInput()
+    monkeypatch.setattr(builtins, "input", fake)
+    terminal = ConsoleTerminal()
+    waiting = asyncio.ensure_future(terminal.read_line("> "))
+    await _until(lambda: fake.calls == 1)
+    fake.give(EOFError)
+    assert await asyncio.wait_for(waiting, 10) is None
 
 
 async def test_console_approval_prompt_interrupted_is_undecided(monkeypatch, capsys):

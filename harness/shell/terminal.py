@@ -8,6 +8,7 @@ as thin as possible and everything else is tested through the interface.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import getpass
 import queue
 import sys
@@ -67,6 +68,7 @@ class ConversationTerminal(Terminal, Protocol):
 
 _INTERRUPT = ("interrupt", None)
 _POLL_S = 0.1
+EOF_GRACE_S = 0.25
 
 
 class ConsoleTerminal(TtyTerminal):
@@ -74,10 +76,18 @@ class ConsoleTerminal(TtyTerminal):
 
     A line is read in a helper thread only when someone waits for one, and at most one read is
     alive: a read that an interruption leaves waiting stays the only one, and its line goes to
-    whoever waits next. Nothing reads ahead, so a line typed while a skill runs cannot answer
-    the approval prompt that comes after it. The SIGINT handler only puts a mark in the queue
-    (`SimpleQueue.put` is reentrant) and never raises. An end of input that reaches a read
-    during which an interruption arrived is not taken as the end of input (D6, Windows).
+    whoever waits next. The program reads nothing ahead, but the terminal does: what a person
+    types while nobody waits (while a skill runs, say) stays in the terminal's own buffer and
+    is the next line read, whoever reads it, the approval prompt included. Such a line cannot
+    approve (the code comes from a hash not yet shown when it was typed), but it can answer the
+    prompt otherwise (design D9, limit of type-ahead, revised 2026-11-25). Emptying that buffer
+    would need platform code, which the conversation does not have.
+
+    The SIGINT handler only puts a mark in the queue (`SimpleQueue.put` is reentrant) and never
+    raises. An end of input that reaches a read during which an interruption arrived is not
+    taken as the end of input; nor is one followed by an interruption within EOF_GRACE_S, the
+    order in which a console may deliver them (D6, Windows). A `KeyboardInterrupt` raised in
+    the helper thread ends that read only: the next waiter reads again.
 
     Not testable portably (it needs a real terminal): covered by the end-to-end test on a
     pseudo-terminal where one exists and by the manual demo (task 7.6).
@@ -102,12 +112,18 @@ class ConsoleTerminal(TtyTerminal):
         threading.Thread(target=self._read, name="conversation-line", daemon=True).start()
 
     def _read(self) -> None:
+        """Always leaves one item, whatever ends the read: otherwise `_reading` would stay
+        true and no read would ever start again (review 2026-11-25)."""
+        item: tuple[str, str | None] = ("eof", None)
         try:
-            item: tuple[str, str | None] = ("line", input())
-        except Exception:  # noqa: BLE001 - end of input, or a stdin that cannot be read
+            item = ("line", input())
+        except KeyboardInterrupt:
+            item = ("again", None)  # the read was interrupted, not ended: read again
+        except BaseException:  # noqa: BLE001 - end of input, or a stdin that cannot be read
             item = ("eof", None)
-        self._queue.put(item)
-        self._notify()
+        finally:
+            self._queue.put(item)
+            self._notify()
 
     def _notify(self) -> None:
         loop, wake = self._loop, self._wake
@@ -155,9 +171,27 @@ class ConsoleTerminal(TtyTerminal):
         self._reading = False
         if kind == "line":
             return text
-        if self._interrupted_read:
+        if kind == "again" or self._interrupted_read:
             return False  # see the class docstring: not the end of input
         return None
+
+    async def _interrupt_follows(self) -> bool:
+        """After an end of input: whether an interruption arrives within EOF_GRACE_S."""
+        assert self._wake is not None
+        self._wake.clear()
+        if self._queue.empty():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._wake.wait(), EOF_GRACE_S)
+        interrupted = False
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                return interrupted
+            if item == _INTERRUPT:
+                interrupted = True
+            else:
+                self._held.append(item)
 
     async def read_line(self, prompt: str) -> str | None:
         self._loop = asyncio.get_running_loop()
@@ -178,6 +212,9 @@ class ConsoleTerminal(TtyTerminal):
                     print(flush=True)
                     raise WaitInterrupted
                 settled = self._settle(item)
+                if settled is None and await self._interrupt_follows():
+                    print(flush=True)
+                    raise WaitInterrupted
                 if settled is not False:
                     return settled  # type: ignore[return-value]
         finally:
