@@ -140,7 +140,7 @@ async def test_reference_of_an_unexpected_shape_is_not_stored(conn, make_service
 async def test_warnings_reach_the_response_cleaned(make_service):
     service, _, sid = scripted(make_service, warn="turn\x1b[31m count‮")
     response = await service.ask(sid, "q")
-    assert response.warnings == ("turn[31m count",)
+    assert response.warnings == ("turn count",)  # the whole escape sequence goes
 
 
 async def test_question_in_a_closed_session_is_refused_without_a_request(conn, make_service):

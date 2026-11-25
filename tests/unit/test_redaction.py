@@ -5,7 +5,7 @@ Every sample credential is assembled at run time in `tests/conftest.py`.
 
 import pytest
 
-from harness.memory.redaction import PATTERNS, redact, secret_kinds
+from harness.text.redaction import PATTERNS, redact, secret_kinds
 from tests.conftest import (
     EXTRA_SECRET_SAMPLES,
     PRIVATE_KEY_SAMPLE,

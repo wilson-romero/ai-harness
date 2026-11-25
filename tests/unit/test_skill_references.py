@@ -38,4 +38,4 @@ def test_string_list_is_inserted_as_lines():
 def test_controls_are_removed_from_values():
     prompt = render("{{inputs.x}}", {"inputs.x": "a\x1b[31mb‮c\r\nd"}, NONCE)
     assert "\x1b" not in prompt and "‮" not in prompt and "\r" not in prompt
-    assert "a[31mbc\nd" in prompt
+    assert "abc\nd" in prompt  # the whole escape sequence goes (review of 2026-11-24)

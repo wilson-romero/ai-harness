@@ -22,7 +22,7 @@ from harness.memory.notes import (
     project_section,
 )
 from harness.memory.paths import PROJECTS_DIR, SkippedRead, resolve_project, walk_vault
-from harness.memory.safe_text import neutralise_delimiters, safe_line, safe_text
+from harness.text.safe_text import neutralise_delimiters, safe_line, safe_text
 
 NOTE_MAX_BYTES = 3000
 # A note that does not fit whole in what is left of its section's share is cut to fit if at

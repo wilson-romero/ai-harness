@@ -172,6 +172,135 @@ Si una pregunta vence después de enviarse, o el proceso muere a mitad, el paso 
 
 Nombre, versión y hash del Skill, estados, intentos, fechas y, de las entradas, solo su SHA-256 y su tamaño (`inputs_manifest`): **nunca** su contenido. Como pregunta de la sesión se guarda una marca `[skill <nombre>/<paso> intento <n>]`, nunca el prompt compuesto. La salida de cada paso se guarda solo con un proveedor sintético (el Mock); con cualquier otro, solo su SHA-256 y su tamaño, y una ejecución interrumpida no se puede reanudar. La propuesta no se guarda: se recalcula. La auditoría lleva la ejecución, el paso, el hash y el resultado, sin texto.
 
+## Herramientas MCP
+
+El harness puede hablar con servidores MCP locales por stdio, usando el SDK oficial (`mcp==2.3.0`). Tiene tres reglas:
+
+- **Solo arranca los servidores que tú escribes en una lista local.**
+- Solo llama a las herramientas que esa lista declara, y solo con los argumentos que declara.
+- En este corte **deniega toda herramienta que escribe**.
+
+```powershell
+$env:HARNESS_MCP_CONFIG = "C:\ruta\fuera\del\repo\mcp.local.json"   # ruta absoluta
+uv run python main.py mcp list
+uv run python main.py mcp tools synthetic
+uv run python main.py mcp call synthetic get_project_metadata --args '{\"project\": \"demo-alpha\"}'
+```
+
+En macOS o Linux se usa `export HARNESS_MCP_CONFIG=/ruta/absoluta/mcp.local.json` y `--args '{"project": "demo-alpha"}'`. En PowerShell 7.3 o posterior, las comillas internas no necesitan `\`.
+
+- `mcp list` lee la lista sin arrancar nada. Muestra cada servidor con `external` y su número de herramientas, y cada herramienta con su operación. Nunca muestra la orden de arranque ni rutas. Sin `HARNESS_MCP_CONFIG`, dice `No MCP servers configured.` y termina con 0.
+- `mcp tools SERVIDOR` arranca el servidor, le pide sus herramientas y lo cierra. Escribe una línea por herramienta con:
+  - el nombre;
+  - la operación declarada, o `-`;
+  - el estado: `allowed`, `denied:<motivo>` o `absent` (declarada, pero el servidor no la ofrece);
+  - la descripción del servidor, saneada y cortada a 120 caracteres.
+- `mcp call SERVIDOR HERRAMIENTA [--args JSON]` hace, en orden:
+  1. comprueba la política;
+  2. arranca el servidor;
+  3. comprueba que el servidor ofrece la herramienta con un esquema compatible;
+  4. hace **una** llamada;
+  5. cierra el servidor.
+
+  El resultado saneado va por stdout, y **cada línea empieza por `| `** (una línea vacía es `|`). Así ninguna línea de una herramienta puede pasar por una línea del harness; para quedarte con el resultado tal cual, quita los dos primeros caracteres de cada línea. El mensaje de error de una herramienta va por stderr con el mismo prefijo. El resumen va por stderr: `call: <servidor>/<herramienta> <estado> in <ms> ms, <bytes> bytes, <n> credential(s) redacted`.
+- Códigos de salida:
+  - 0: llamada completada.
+  - 1: llamada denegada, error de la herramienta o del servidor, o plazo vencido.
+  - 2: error de uso; `--args` no es JSON, no es un objeto o pasa de 16 KiB.
+  - 130: interrumpida con Ctrl+C.
+
+### La lista local
+
+La escribes y la editas tú, a mano; el harness solo la lee. Vive **fuera del repositorio**, porque contiene rutas locales. Si la ruta está dentro de un árbol de Git y no está ignorada, el harness la rechaza. En macOS y Linux también rechaza una lista (o el enlace que la nombra, o la carpeta que contiene a cualquiera de los dos) que sea de otro usuario o que el grupo u otros puedan escribir: deja la lista con `chmod 600` y su carpeta sin escritura para otros. En Windows no se comprueban las ACL: protege la carpeta tú. Este ejemplo usa el servidor sintético de los tests:
+
+```json
+{
+  "format": "ai-harness/mcp/1",
+  "servers": {
+    "synthetic": {
+      "command": ["C:\\ruta\\al\\repo\\.venv\\Scripts\\python.exe", "C:\\ruta\\al\\repo\\tests\\fixtures\\mcp\\synthetic_server.py", "--state", "C:\\ruta\\temporal\\estado"],
+      "env": [],
+      "startup_timeout_s": 20,
+      "call_timeout_s": 30,
+      "tools": {
+        "get_project_metadata": {
+          "operation": "read",
+          "max_result_bytes": 65536,
+          "arguments": {
+            "project": {"type": "string", "max_length": 64, "pattern": "[a-z0-9][a-z0-9-]*", "required": true}
+          }
+        },
+        "set_project_metadata": {"operation": "write", "arguments": {"project": {"type": "string", "max_length": 64}}}
+      }
+    }
+  }
+}
+```
+
+- `command` es una lista, y su primer elemento es una ruta **absoluta**. No hay shell ni búsqueda en `PATH`. Lo que pase por `--args` nunca llega a la orden de arranque.
+- `env` lista **nombres** de variables. El servidor recibe esas variables con el valor que tienen en tu sesión. Recibe también las que cualquier proceso necesita para arrancar, copiadas solo si existen en tu sesión. La lista es la misma en todos los sistemas; las de Windows solo existen allí:
+  - de macOS y Linux: `PATH`, `HOME`, `LOGNAME`, `SHELL`, `TERM`, `USER`, `TMPDIR`;
+  - de Windows: `SYSTEMROOT`, `WINDIR`, `COMSPEC`, `PATH`, `PATHEXT`, `TEMP`, `TMP`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `HOMEDRIVE`, `HOMEPATH`, `SYSTEMDRIVE`, `USERNAME`, `PROCESSOR_ARCHITECTURE`.
+
+  Además recibe `AI_HARNESS_MCP_CHILD=1` (la marca de recursión). No recibe ninguna otra, tampoco las `HARNESS_*`.
+- Tipos de argumento:
+  - `string`, con `max_length` obligatorio y `pattern` opcional;
+  - `integer`, con `minimum` y `maximum`;
+  - `boolean`;
+  - `enum`.
+
+  Un argumento que no está declarado se deniega.
+- Los plazos van de 1 a 300 s. `max_result_bytes` va de 1 KiB a 1 MiB, y por defecto es 64 KiB. Un campo desconocido o un valor fuera de rango hace fallar la lista entera, y el error nombra el campo.
+
+### Qué se deniega
+
+Antes de arrancar nada, el harness comprueba estos motivos:
+
+- `server_not_allowed`, `tool_not_allowed`;
+- `argument_not_allowed`, `argument_missing`, `argument_invalid`;
+- `write_requires_approval`;
+- los de uso: `args_not_json`, `args_not_object`, `args_too_large`.
+
+Después de preguntar al servidor, comprueba dos más:
+
+- `tool_absent`: el servidor no ofrece la herramienta.
+- `schema_mismatch`: el esquema del servidor no tiene un argumento declarado, o exige uno que no está declarado.
+- `annotation_conflict`: la lista declara la herramienta `read`, pero el servidor la anota con `readOnlyHint: false` o `destructiveHint: true`.
+
+Lo que el servidor dice de sí mismo (descripción, esquema, anotaciones) solo puede restringir, nunca permitir. De los esquemas del servidor solo se comparan formas (nombres, `required`, tipos); nunca se evalúa un `pattern`, un `format` ni nada parecido que mande el servidor. Un `mcp` lanzado desde dentro de un servidor se niega con `recursion`.
+
+### Plazos y procesos
+
+La conversación con el servidor no corre en el proceso del harness, sino en un **proceso de sesión** (`python -m harness.mcp.worker`) que el harness arranca en su propio grupo de procesos (macOS y Linux) o Job Object (Windows). El servidor arranca dentro de ese grupo. El harness conserva la política, la auditoría y la última palabra:
+
+1. al acabar la conversación, o al vencer su plazo, **siempre** termina el árbol entero del proceso de sesión: el servidor y lo que este haya lanzado en su grupo (SIGTERM, 2 s, SIGKILL; en Windows, el Job Object);
+2. anota en la auditoría si vio terminar el árbol (`server_stopped`);
+3. atiende Ctrl+C en cualquier momento: termina el árbol y sale con 130.
+
+Dentro del proceso de sesión, el cierre del servidor es: cerrar su entrada, esperar 2 s, matarlo, esperar 2 s.
+
+El plazo de arranque cubre la negociación y la lista de herramientas. El plazo de llamada cubre la llamada. **Garantía**: `mcp tools` y `mcp call` terminan en menos de arranque + llamada + 15 s, haga lo que haga el servidor o el proceso de sesión (aunque se cuelgue en código C sin soltar el intérprete). Al vencer, el error es `timeout` y la llamada queda como `timeout` en la auditoría.
+
+Una respuesta que pasa de `max_result_bytes` se corta mientras llega: el error es `result_too_large` y no se imprime nada del resultado. Una línea que no es JSON-RPC termina la sesión con `protocol_error`.
+
+Un servidor que escribe en stderr más de 64 MiB en una sesión se detiene con `stderr_too_large`. Un error JSON-RPC que el propio servidor envía es `server_error`; una conexión que se cierra es `server_exited`.
+
+Límite: un proceso que el servidor lance en **otra sesión o grupo** (`setsid`, un demonio) o fuera del Job Object escapa a ese cierre, y el harness no lo ve: la auditoría dirá igualmente `server_stopped = 1`.
+
+### Qué se guarda
+
+- La tabla `tool_calls` de SQLite guarda:
+  - servidor, herramienta y operación;
+  - decisión y motivo;
+  - un HMAC-SHA-256 de los argumentos, con una clave aleatoria local (`HARNESS_DATA_DIR/keys/mcp-args.key`, solo legible por su dueño, nunca se imprime), y su tamaño;
+  - estado, código de error y si el servidor quedó parado;
+  - bytes del resultado y duración.
+
+  **Nunca** guarda los argumentos ni el resultado.
+- El stderr del servidor va a `HARNESS_DATA_DIR/logs/mcp/<servidor>.stderr.log`, nunca a la terminal. Se guarda sin sanear, porque es lo que escribió el servidor. Cada sesión guarda como mucho 1 MiB; del resto solo se anota cuántos bytes se descartaron. Antes de cada sesión, un fichero de más de 1 MiB pasa a `.1` (que sustituye al anterior), así que los dos ficheros de un servidor no pasan de unos 4 MiB. En macOS y Linux la carpeta es `0700` y los ficheros `0600`.
+- Una llamada `running` cuyo comando ya no existe (se cortó la luz, se mató el proceso) se marca `failed`/`interrupted` en el siguiente `mcp call`. "Ya no existe" lo dice un bloqueo que el comando mantiene mientras vive, no la antigüedad de la fila.
+- Todo lo que se imprime (resultado, descripciones, nombres y errores del servidor) sale sin caracteres de control, de formato ni secuencias de escape. Las credenciales conocidas salen como `[REDACTED:<tipo>]`. Imágenes y audio se sustituyen por `[<tipo> withheld: N bytes of base64]`, y los recursos por `[<tipo> withheld]`.
+
 ## Configuración
 
 Por variables de entorno (ver `.env.example`):
@@ -192,6 +321,7 @@ Por variables de entorno (ver `.env.example`):
 | `HARNESS_SKILLS_DIR` | `skills/` del repo | Ruta **absoluta** de la raíz de Skills. |
 | `HARNESS_APPROVAL_TTL_S` | `900` | Caducidad de una aprobación, en segundos (de 60 a 3600). |
 | `HARNESS_MOCK_RESPONSES` | (vacía) | Ruta absoluta de un JSON (objeto texto → respuesta, hasta 1 MiB) con respuestas guionizadas del Mock: responde con la primera clave, en orden alfabético, contenida en el prompt. Solo para pruebas y demos. |
+| `HARNESS_MCP_CONFIG` | (vacía) | Ruta **absoluta** de la lista local de servidores MCP, fuera del repositorio. Sin ella no hay servidores. |
 
 ## Estados de una solicitud
 
@@ -223,4 +353,4 @@ Solo una pregunta a la vez por sesión: una segunda pregunta mientras la primera
 - Sin código condicionado por plataforma fuera de Enterprise Architect: lo que pasa en macOS es lo que corre en Windows.
 - Copilot Web (Corte 2): perfil dedicado de Edge, login manual, sonda y uso real en [`docs/runbook/copilot.md`](docs/runbook/copilot.md).
 - Puerta local antes de un merge: `scripts/verify.sh` sobre el árbol limpio.
-- Demos, iguales en macOS y Windows (PowerShell incluido): `uv run python scripts/demo_session_core.py` (Corte 1) y `uv run python scripts/demo_project_memory.py` (Corte 3) y `uv run python scripts/demo_skill_engine.py` (Corte 4, motor de Skills) y `uv run python scripts/demo_copilot_provider.py` (Corte 2, proveedor de Copilot contra el chat sintético). Terminan en `demo: PASS`.
+- Demos, iguales en macOS y Windows (PowerShell incluido): `uv run python scripts/demo_session_core.py` (Corte 1), `uv run python scripts/demo_copilot_provider.py` (Corte 2, proveedor de Copilot contra el chat sintético), `uv run python scripts/demo_project_memory.py` (Corte 3), `uv run python scripts/demo_skill_engine.py` (Corte 4, motor de Skills) y `uv run python scripts/demo_mcp_gateway.py` (Corte 5, pasarela MCP). Terminan en `demo: PASS`.

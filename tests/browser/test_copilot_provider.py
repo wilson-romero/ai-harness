@@ -397,6 +397,8 @@ def test_hostile_reply_is_printed_without_control_or_invisible_characters(cli, e
     assert "HOSTILE" in out and "END" in out
     for bad in ("\x1b", "\x07", "\x08", "\x00", "‮", "‬", "​"):
         assert bad not in out, repr(bad)
+    # Whole escape sequences go, not only their ESC: no leftover `[2J` or window title.
+    assert "[2J" not in out and "ZZ-TITLE" not in out
 
 
 def test_huge_reply_is_read_up_to_the_cap(cli, env, app):

@@ -473,7 +473,7 @@ def test_the_invisible_set_is_derived_from_unicodedata():
 
 
 def test_the_memory_sanitiser_keeps_its_behaviour():
-    from harness.memory.safe_text import safe_text
+    from harness.text.safe_text import safe_text
 
     assert safe_text("a️bㅤc").text == "a️bㅤc"
 

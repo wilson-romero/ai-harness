@@ -30,7 +30,7 @@ from harness.core.errors import (
 )
 from harness.memory.context import ProjectContext, compose_prompt
 from harness.memory.paths import validate_project_slug
-from harness.memory.safe_text import terminal_safe
+from harness.text.safe_text import safe_foreign_line
 from harness.providers.base import (
     AuthenticationRequired,
     LLMProvider,
@@ -386,7 +386,7 @@ class SessionService:
 
             @staticmethod
             def warn(text: str) -> None:
-                warnings.append(terminal_safe(text))
+                warnings.append(safe_foreign_line(text).text)
 
         started = time.monotonic()
 

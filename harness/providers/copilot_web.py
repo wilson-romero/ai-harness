@@ -44,7 +44,7 @@ from harness.browser.page_state import (
 from harness.config import Settings
 from harness.core.contracts import LLMRequest
 from harness.core.errors import HarnessError, InvalidInput
-from harness.memory.safe_text import strip_controls
+from harness.text.safe_text import safe_foreign_text
 from harness.providers.base import (
     AuthenticationRequired,
     ProviderError,
@@ -95,9 +95,10 @@ def editor_length(text: str) -> int:
 
 
 def clean_reply(text: str) -> str:
-    """Untrusted page text made safe to print: no control, escape or invisible characters
-    (line breaks kept), no surrounding blank space."""
-    return strip_controls(text).strip()
+    """Untrusted page text made safe to print: whole terminal escape sequences, control,
+    bidirectional and invisible characters removed (line breaks kept), credentials of known
+    formats redacted, no surrounding blank space."""
+    return safe_foreign_text(text).text.strip()
 
 
 def _digest(text: str) -> str:

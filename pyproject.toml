@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Local architecture copilot: Copilot Web, MCP, Skills, memory and Enterprise Architect"
 requires-python = ">=3.14,<3.15"
 dependencies = [
+    "mcp==2.3.0",
     "playwright>=1.65.2",
     "pydantic>=2.14.4",
 ]
