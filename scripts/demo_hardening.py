@@ -48,14 +48,15 @@ def demo() -> list[str]:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as work:
         copy = Path(work) / "sec-matrix.md"
 
-        step("(c) a cited test renamed in a copy: the check says NO")
+        step("(c) the citation of a test renamed in a copy of the matrix (the test is "
+             "untouched): the check says NO")
         check(RENAMED in text, f"the matrix no longer cites {RENAMED}")
         copy.write_text(text.replace(RENAMED, RENAMED + "_renamed"), encoding="utf-8",
                         newline="\n")
         problems, _, _ = checker.run(copy, ROOT, collected)
         print("\n".join(problems))
         check(any(p.startswith("SEC-12: test not collected") for p in problems),
-              "a renamed test was not reported")
+              "a citation of a test that does not exist was not reported")
 
         step("(d) a state outside the closed list in a copy: the check says NO")
         copy.write_text(text.replace("**Estado:** cubierto", "**Estado:** casi", 1),
@@ -65,7 +66,15 @@ def demo() -> list[str]:
         check(any("unknown state 'casi'" in p for p in problems),
               "an unknown state was not reported")
 
-        step("(e) the same matrix with CRLF line endings still passes")
+        step("(e) a state changed in a copy but not in sec-states.json: the check says NO")
+        copy.write_text(text.replace("**Estado:** parcial", "**Estado:** cubierto", 1),
+                        encoding="utf-8", newline="\n")
+        problems, _, _ = checker.run(copy, ROOT, collected)
+        print("\n".join(problems))
+        check(any("differs from the pinned 'parcial'" in p for p in problems),
+              "a state flipped without its pin was not reported")
+
+        step("(f) the same matrix with CRLF line endings still passes")
         copy.write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
         problems, rows_seen, _ = checker.run(copy, ROOT, collected)
         check(not problems and rows_seen == 15, f"CRLF changed the result: {problems}")

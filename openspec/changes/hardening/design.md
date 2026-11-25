@@ -34,7 +34,8 @@ Ver `proposal.md` para el porqué. Estado del que parte (medido el 2026-11-25 so
   - Comprobar solo que el fichero de test existe: un test renombrado pasaría.
 - **Límite escrito:** la comprobación garantiza que lo citado existe, no que pruebe lo que dice la matriz; eso lo garantiza la revisión del documento y el control negativo citado.
 - **Revisado en la implementación (2026-11-25):** cada campo va en negrita (`**Estado:** parcial`) para que el documento se lea bien en GitHub, y se añaden tres campos: `Propiedad` (la propiedad en una frase), `Windows` (qué se ha ejecutado allí y qué no) y `Motivo` (obligatorio en `pendiente de merge`, `no cubierto` y `BLOCKED`). Un requisito se cita como `` `ruta de la spec` · Nombre del requisito ``. La misma ejecución de `pytest --collect-only` comprueba también los identificadores citados en `docs/security/known-debt.md`, y el script comprueba que los enlaces relativos de `README.md`, `SECURITY.md` y los documentos de `docs/security/` apuntan a un fichero que existe; así no hacen falta tests aparte que vuelvan a recoger la batería. Cuando se escriba la guía de diagnóstico (aplazada, ver D4), se añade a esas dos listas.
-- **Impacto:** `scripts/check_sec_matrix.py`, `scripts/verify.sh`, tests del script; tareas 1.1–1.4.
+- **Revisado tras la revisión independiente (2026-11-25):** la comprobación cerraba menos de lo que decía. Ahora también falla si un test se cita dos veces en una fila; si un identificador con caso (`fichero::test[caso]`) no se recoge tal cual (sin caso sigue valiendo cualquiera de los casos de la función); si un identificador que aparece en cualquier parte de la matriz (tabla de mutaciones, controles negativos, límites) no se recoge; si un test citado está marcado `skip` o `xfail`, o se puede omitir (`skipif`, `pytest.skip` en el test, en un ayudante o en una fixture del módulo o de `tests/*.py`) y el campo `Windows` de la fila no dice que se omite; y si el estado de una fila no es el fijado en `docs/security/sec-states.json`, de modo que cambiar un estado exige dos ediciones. Límites escritos que una comprobación no puede cerrar con honradez: sustituir los tests de una fila por otros que existen pero no prueban la propiedad pasa; borrar casos de un test citado por su función pasa mientras quede uno; una omisión decidida por código fuera del módulo y de `tests/*.py`, o una marca puesta con `pytest.param(..., marks=...)`, no se detecta. Cambiar un estado en la matriz y en el fichero de estados a la vez pasa: el fichero solo hace visible el cambio en dos sitios del diff.
+- **Impacto:** `scripts/check_sec_matrix.py`, `scripts/verify.sh`, `docs/security/sec-states.json`, tests del script; tareas 1.1–1.5.
 
 ### D3 · Matriz de partida (lo que existe en `develop` el 2026-11-25)
 
@@ -97,9 +98,14 @@ Los identificadores de esta tabla se comprobaron el 2026-11-25 contra la salida 
 
 Sin migración. Vuelta atrás: revertir el change y quitar la línea de `verify.sh`.
 
-## Decisiones pendientes de Wilson (antes de implementar)
+## Decisiones de Wilson
 
-1. ¿Aceptas que la copia y restauración de `HARNESS_DATA_DIR`, la retención de SQLite y la rotación de logs queden aplazadas (proyecto educativo)? (Ya indicado por ti el 2026-11-25; se pide confirmar la lista.)
-2. Deuda 2: ¿se quitan `--password-store=basic` y `--use-mock-keychain` (obliga a iniciar sesión de nuevo y puede pedir el llavero) o se aceptan?
+Decididas el 2026-11-25:
+
+1. **Aplazar** la copia y restauración de `HARNESS_DATA_DIR`, la retención de SQLite y la rotación de logs (proyecto educativo), y **reducir este change** a la matriz SEC con su comprobación, la deuda conocida y la corrección de frases de `README.md` y `SECURITY.md`; el runbook y la guía de diagnóstico se aplazan también (la interfaz conversacional va antes; ver D4).
+2. Deuda 2: **se mantienen** `--password-store=basic` y `--use-mock-keychain` en el perfil dedicado de Edge, para no perder la sesión iniciada; se revisa cuando la sesión caduque. El texto que lo sostiene vive en el change `copilot-web-provider`, que no está mergeado en `develop`.
+
+Pendientes:
+
 3. Deuda 6: ¿se redacta el stderr de los servidores MCP antes de guardarlo o se acepta guardarlo crudo con `0600`?
 4. Deuda 9: ¿harás la medición sobre el vault real o se cierra como no aplicable en un proyecto que solo usa prompts sintéticos?

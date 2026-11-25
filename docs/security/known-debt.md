@@ -15,7 +15,7 @@ Decisiones posibles: **aceptado** (se convive con ello, escrito), **arreglar** (
 
 - **Qué:** en `feature/copilot-web-provider` (sin mergear), Edge se lanza con opciones que hacen que las cookies del perfil dedicado se cifren con una clave fija en lugar de la del llavero del sistema.
 - **Riesgo:** quien copie la carpeta del perfil (`HARNESS_DATA_DIR`) puede usar la sesión iniciada de Copilot sin la contraseña ni el MFA.
-- **Decisión:** Wilson decidió el 2026-11-25 mantenerlo para no perder la sesión iniciada; se revisa cuando la sesión caduque. **Pendiente de merge:** no está en `develop`.
+- **Decisión:** Wilson decidió el 2026-11-25 mantenerlo para no perder la sesión iniciada; se revisa cuando la sesión caduque. **Pendiente de merge:** no está en `develop`; el texto que describe y sostiene estas opciones vive en el change `copilot-web-provider`, que no está mergeado.
 - **Dueño:** Wilson.
 
 ## 3. Windows: lo que no se ha ejecutado o solo en parte
