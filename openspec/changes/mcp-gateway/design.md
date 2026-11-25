@@ -120,6 +120,16 @@ Todas comprobadas el 2026-11-24, en la Mac (arm64, CPython 3.14.8, uv 0.13.1), s
   - Dejar el stderr del servidor en la terminal (el valor por defecto del SDK): mezclaría contenido no saneado con la salida del harness.
 - **Impacto:** spec `mcp-client` (Descubrir herramientas, Llamar a una herramienta); tareas 3.1 y 3.2.
 - *Revisada el 2026-11-24:* el arranque no usa `stdio_client` sino el transporte acotado de D1 con el mismo `errlog`; lo demás de esta decisión se mantiene.
+- *Revisada el 2026-11-25 (el log del servidor se guarda redactado):*
+  - **Qué:** lo que el servidor escribe en stderr pasa por la redacción de SEC-01 antes de llegar a su log (`harness.text.redaction.LineRedactor`, escrito por `transport.StderrLog`). Se redacta por línea completa: el trozo sin salto de línea espera en un búfer. El búfer está acotado: una línea que pasa de 64 KiB sin salto se redacta y se escribe salvo sus últimos 8 KiB, que esperan al trozo siguiente; un servidor que nunca escribe un salto no hace crecer la memoria. Una clave PEM ocupa varias líneas: desde una línea BEGIN sin su END, todo se descarta hasta la línea END (o hasta el final del stream), igual que `redact` enmascara el bloque entero. Los bytes que no son UTF-8 pasan sin cambios (`surrogateescape`) y nunca lanzan. El tope de 1 MiB por sesión cuenta lo que se escribe; al alcanzarlo no se alimenta más el redactor y lo que retiene se descarta, y la línea final dice cuántos bytes del stderr no están en el log. El log sigue abriéndose con `O_BINARY` donde existe.
+  - **Por qué:** el log se guardaba tal cual, y el stderr de un servidor puede llevar un token (una traza con la cabecera de una petición, una variable de entorno impresa). SEC-01 vale para todo lo que el sistema guarda, no solo para lo que imprime. Redactar cada trozo tal como llega dejaría pasar un token partido entre dos lecturas del tubo: el test de integración lo demuestra (control negativo).
+  - **Alternativas rechazadas:**
+    - Redactar cada trozo leído del tubo: un token partido entre dos lecturas no casa con ningún patrón y se guarda entero.
+    - Guardar el stderr completo en memoria y redactarlo al cerrar: si el harness mata el árbol por plazo, el log se pierde justo cuando hace falta; y retiene hasta 1 MiB por sesión.
+    - Descartar la línea que pasa del límite sin escribirla: un servidor que escribe sin saltos dejaría el log vacío, y el escenario «stderr ruidoso por debajo del corte» exige el primer MiB.
+    - No guardar el stderr: se pierde la única pista de por qué un servidor falla al arrancar.
+  - **Límite que no se arregla:** una credencial de más de 8 KiB dentro de una línea de más de 64 KiB puede quedar partida por el corte y su comienzo llegar al log. Ningún formato de SEC-01 lo alcanza salvo un JWT enorme. Una credencial de formato desconocido pasa como en el resto del producto.
+  - **Impacto:** spec `secret-redaction` de este change (requisito nuevo «Stderr del servidor guardado enmascarado», con dos escenarios); `SECURITY.md` y README («Qué se guarda»); tarea 6.16.
 
 ### D4 · Plazos duros y ciclo de vida del subproceso (SEC-10)
 
@@ -276,7 +286,7 @@ Todas comprobadas el 2026-11-24, en la Mac (arm64, CPython 3.14.8, uv 0.13.1), s
 - [Un servidor que sale solo deja vivos a sus hijos en POSIX] → limitación documentada del SDK (D4); README. El servidor de EA no lanza hijos.
 - [Cambio de conducta del SDK al subir de versión] → versión fijada con `==`; los tests de ciclo de vida (grupo 3) son el oráculo al subirla.
 - [`os._exit` como última barrera deja la auditoría con la fila en `abandoned` y sin `finished_at`] → aceptado: es el estado verdadero; la recuperación de D11 la cierra en el siguiente comando.
-- [El stderr del servidor en `logs/mcp/` puede tener contenido real] → vive en `HARNESS_DATA_DIR`, ignorado por Git y por el guard público (`logs/*`, `*.log`); el README lo dice.
+- [El stderr del servidor en `logs/mcp/` puede tener contenido real] → vive en `HARNESS_DATA_DIR`, ignorado por Git y por el guard público (`logs/*`, `*.log`); el README lo dice. *Revisada el 2026-11-25:* además, se guarda redactado (D3).
 - [Un servidor de terceros corre con los permisos del usuario y puede hacer cualquier cosa en su proceso] → no se arregla: el harness decide qué arranca (lista local), qué le pasa (argumentos declarados, entorno acotado), cuánto espera y qué deja salir. Se escribe en `SECURITY.md`.
 - [La lista local en una carpeta de OneDrive que bloquea el fichero] → solo se lee; un error de lectura es un error controlado. No medido.
 - [Colisión de número de migración con `skill-engine`] → número libre al integrar; `test_migrating_twice_changes_nothing` lo detecta.

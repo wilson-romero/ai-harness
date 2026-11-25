@@ -45,3 +45,14 @@ Todo texto devuelto por una herramienta MCP que el sistema imprime, incluidos lo
 #### Scenario: Recuento de sustituciones de un resultado
 - **WHEN** el resultado de una herramienta contiene dos credenciales de formato conocido
 - **THEN** stderr indica que se enmascararon dos y la salida estándar no contiene ninguna de ellas
+
+### Requirement: Stderr del servidor guardado enmascarado
+El stderr de un servidor MCP que el sistema guarda en su log SHALL tener cada credencial de formato conocido sustituida por `[REDACTED:<tipo>]` antes de escribirse, aunque llegue partida en varias lecturas (añadido el 2026-11-25, D3).
+
+#### Scenario: Credencial partida en el stderr del servidor
+- **WHEN** un servidor MCP escribe en stderr una línea con un token de GitHub en dos escrituras separadas, cortada por la mitad del token
+- **THEN** su log contiene `[REDACTED:github]` y ninguna de las dos mitades del token
+
+#### Scenario: Clave privada en el stderr del servidor
+- **WHEN** el stderr de un servidor MCP contiene un bloque de clave privada PEM completo, leído en trozos de cualquier tamaño
+- **THEN** su log contiene `[REDACTED:private-key]` en lugar de todo el bloque y el texto que lo sigue sin cambios

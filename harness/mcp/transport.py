@@ -13,9 +13,10 @@ This transport runs inside the session process (`harness.mcp.worker`, design D4 
 outside, so the server and anything it starts in that group end with it, without a platform
 branch here. Inside, the shutdown is: close stdin, wait 2 s, kill the server, wait 2 s.
 
-The server's stderr is read through a pipe: the first `STDERR_KEEP_BYTES` go to its log, the
-rest is counted and dropped, and past `STDERR_KILL_BYTES` the session is ended with the fault
-`stderr_too_large` (independent review of 2026-11-24, finding 2).
+The server's stderr is read through a pipe and redacted line by line before it reaches its
+log (`StderrLog`, revised 2026-11-25): at most `STDERR_KEEP_BYTES` of redacted text go to the
+log, the rest is counted and dropped, and past `STDERR_KILL_BYTES` the session is ended with
+the fault `stderr_too_large` (independent review of 2026-11-24, finding 2).
 """
 
 from __future__ import annotations
@@ -30,6 +31,8 @@ import anyio.lowlevel
 import mcp_types as types
 from mcp.client.stdio import _drain_stdout, _get_executable_command
 from mcp.shared.message import SessionMessage
+
+from harness.text.redaction import LineRedactor
 
 # The rest of an oversized message is counted (not kept) up to this size or for this long, to
 # report its size; past either bound it is reported as "at least" what was seen.
@@ -148,32 +151,20 @@ async def bounded_stdio(
             pass  # shutdown closed a stream under the read; the session sees the closure
 
     async def stderr_reader() -> None:
-        """Keep the first bytes in the log, count the rest, stop a server that floods it."""
+        """Keep the first bytes in the log, redacted; count the rest; stop a server that floods."""
         assert process.stderr is not None
-        kept = 0
+        log = StderrLog(errlog)
         try:
             async for chunk in process.stderr:
                 state.stderr_bytes += len(chunk)
-                if errlog is not None and kept < STDERR_KEEP_BYTES:
-                    part = chunk[: STDERR_KEEP_BYTES - kept]
-                    kept += len(part)
-                    try:
-                        os.write(errlog, part)
-                    except OSError:
-                        pass
+                log.feed(chunk)
                 if state.stderr_bytes > STDERR_KILL_BYTES:
                     state.report("stderr_too_large", state.stderr_bytes, False)
                     return
         except (anyio.ClosedResourceError, anyio.BrokenResourceError, OSError):
             pass
         finally:
-            dropped = state.stderr_bytes - kept
-            if errlog is not None and dropped > 0:
-                try:
-                    os.write(errlog, f"\n[ai-harness: {dropped} more bytes of stderr were "
-                                     "dropped]\n".encode("ascii"))
-                except OSError:
-                    pass
+            log.close(state.stderr_bytes)
 
     async def stdin_writer() -> None:
         assert process.stdin is not None
@@ -221,6 +212,56 @@ async def bounded_stdio(
                 await shutdown()
             group.cancel_scope.cancel()
     await anyio.lowlevel.cancel_shielded_checkpoint()
+
+
+class StderrLog:
+    """The server's stderr as its log keeps it: redacted, and at most `STDERR_KEEP_BYTES`.
+
+    Text goes through `LineRedactor` (SEC-01), so a credential split across two reads is
+    still masked, and a line is written only once it is complete or once the redactor's bound
+    releases it. The cap counts what is written; once it is reached nothing more is fed to the
+    redactor, and what it still holds is dropped. The closing line says how many bytes of the
+    server's stderr are not in the log. `errlog` None: everything is dropped, nothing written.
+    """
+
+    def __init__(self, errlog: int | None) -> None:
+        self._errlog = errlog
+        self._room = STDERR_KEEP_BYTES
+        self._kept = 0  # bytes of the server's stderr whose (redacted) text is in the log
+        self._redactor = LineRedactor()
+
+    def feed(self, chunk: bytes) -> None:
+        if self._errlog is not None and self._room > 0:
+            self._write(self._redactor.feed(chunk))
+
+    def close(self, total: int) -> None:
+        """The stream ended (or was abandoned) after `total` bytes."""
+        if self._errlog is None:
+            return
+        if self._room > 0:
+            self._write(self._redactor.finish())
+        dropped = total - self._kept
+        if dropped > 0:
+            self._append(f"\n[ai-harness: {dropped} more bytes of stderr were "
+                         "dropped]\n".encode("ascii"))
+
+    def _write(self, pieces: list[tuple[int, bytes]]) -> None:
+        for raw_bytes, output in pieces:
+            if self._room <= 0:
+                return
+            part = output[: self._room]
+            self._room -= len(part)
+            # A piece cut by the cap: exact when redaction did not change it (the usual case).
+            self._kept += raw_bytes if len(part) == len(output) else min(raw_bytes, len(part))
+            self._append(part)
+
+    def _append(self, data: bytes) -> None:
+        if not data:
+            return
+        try:
+            os.write(self._errlog, data)  # type: ignore[arg-type]
+        except OSError:
+            pass
 
 
 async def _close(stream: object) -> None:

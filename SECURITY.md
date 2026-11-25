@@ -89,7 +89,7 @@ Lo que el harness garantiza con un servidor MCP:
   - se mide antes de leerlo (también su stderr: se guarda 1 MiB por sesión y pasado 64 MiB se detiene el servidor);
   - nunca se interpreta: el harness no evalúa ningún patrón, formato ni esquema que mande el servidor, y el SDK no valida resultados en el proceso del harness;
   - se sanea y se redacta antes de imprimirlo o auditarlo;
-  - nunca se guarda.
+  - sus resultados, descripciones y errores nunca se guardan. Lo único del servidor que se guarda es su stderr, en `HARNESS_DATA_DIR/logs/mcp/` (1 MiB por sesión), y se guarda con las credenciales de formato conocido ya sustituidas por `[REDACTED:<tipo>]`, línea a línea, aunque un token llegue partido en dos lecturas (revisado el 2026-11-25). Lo que no cubre: una credencial de formato desconocido, y una de más de 8 KiB dentro de una línea de más de 64 KiB sin salto, que puede quedar partida y dejar su comienzo en el log. El resto del texto se guarda como lo escribió el servidor, sin sanear caracteres de control.
 
 Lo que **no** garantiza:
 

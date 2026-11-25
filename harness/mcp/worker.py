@@ -205,11 +205,16 @@ async def _list_tools(client: Client) -> dict[str, dict[str, Any]]:
 
 
 def _open_errlog(path: str | None) -> int | None:
-    """The server's log, appended to; created readable by its owner only. None: dropped."""
+    """The server's log, appended to; created readable by its owner only. None: dropped.
+
+    What reaches it is redacted first (`transport.StderrLog`, revised 2026-11-25).
+    """
     if not path:
         return None
     try:
-        return os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        # O_BINARY: the log keeps the server's exact bytes, also on Windows.
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
+        return os.open(path, flags, 0o600)
     except OSError:
         return None
 

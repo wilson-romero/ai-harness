@@ -33,6 +33,8 @@ MODES = (
     "destructive", "forge-output", "paged", "result-over-64k", "line-over-limit",
     # added on 2026-11-25: stderr floods whose outcome does not depend on timing
     "stderr-noisy", "stderr-after-answer",
+    # added on 2026-11-25: a credential on stderr, split across two writes
+    "stderr-split-secret",
 )
 # A pattern with catastrophic backtracking and the subject that triggers it: a regex engine
 # that runs it never finishes (seconds per extra character, exponential).
@@ -175,6 +177,8 @@ class Server:
         if self.mode == "chatty-stderr":
             sys.stderr.write(STDERR_CANARY + "\n")
             sys.stderr.flush()
+        if self.mode == "stderr-split-secret":
+            self.split_secret()
         if self.mode in ("grandchild", "grandchild-escapes"):
             self.start_grandchild(escape=self.mode == "grandchild-escapes")
         stdin = sys.stdin.buffer
@@ -323,6 +327,17 @@ class Server:
             self.text(request_id, json.dumps(sys.argv[1:], ensure_ascii=False))
         else:
             self.text(request_id, f"herramienta sintetica {name} llamada", is_error=False)
+
+    def split_secret(self) -> None:
+        """A synthetic token on stderr in two separate writes, cut in its middle; then the
+        canary, so the test can tell the line was logged at all."""
+        token = github_token()
+        line = f"token {token} {STDERR_CANARY}\n".encode("ascii")
+        cut = line.index(token.encode("ascii")) + len(token) // 2
+        for part in (line[:cut], line[cut:]):
+            sys.stderr.buffer.write(part)
+            sys.stderr.buffer.flush()
+            time.sleep(0.2)  # makes two reads likely; the unit tests prove the split exactly
 
     def flood_stderr(self, mebibytes: int) -> None:
         """Write to stderr in the calling thread: nothing else happens until it is written."""

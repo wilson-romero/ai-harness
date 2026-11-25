@@ -125,6 +125,18 @@ def test_the_servers_stderr_goes_to_its_log_not_to_the_terminal(mcp, ws, data_di
     assert server.stopped()
 
 
+def test_a_credential_split_across_two_stderr_writes_is_redacted_in_the_log(mcp, ws, data_dir):
+    """SEC-01 on the server's log (revised 2026-11-25): the token arrives in two writes."""
+    server = ws.server("stderr-split-secret")
+    code, _, err, _ = mcp("tools", "synthetic")
+    assert code == 0, err
+    log = (data_dir / "logs" / "mcp" / "synthetic.stderr.log").read_text(encoding="utf-8")
+    assert "CANARIO-STDERR-SINTETICO" in log  # the line was logged at all
+    assert "[REDACTED:github]" in log
+    assert "S" * 18 not in log  # neither half of the token
+    assert server.stopped()
+
+
 def test_a_declared_tool_the_server_lacks_is_denied_without_sending(mcp, ws, data_dir):
     server = ws.server()
     code, _, err, _ = mcp("call", "synthetic", "archive_project", "--args", ALPHA)
