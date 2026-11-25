@@ -113,8 +113,9 @@ class SyntheticCopilot:
             return conversation, reply
 
 
-async def wait_until(condition, timeout_s: float = 10.0, what: str = "condition") -> None:
-    """Poll a synchronous condition from async test code."""
+async def wait_until(condition, timeout_s: float = 60.0, what: str = "condition") -> None:
+    """Poll a synchronous condition from async test code. The limit only bounds a failing
+    test; a passing one returns as soon as the condition holds, so it is generous."""
     deadline = time.monotonic() + timeout_s
     while not condition():
         if time.monotonic() > deadline:

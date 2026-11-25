@@ -341,16 +341,27 @@ async def sample_send(
                     started, samples = time.monotonic(), []
                     await submit(composer, send, locators)
                     continue
+        # Signals first, text last. The reads follow one another, and the page keeps writing
+        # in between. A reply only grows, so text read after a signal is at least as complete
+        # as it was when the signal was read: a signal can never look early because the text
+        # was read first and the page finished in between (seen once under load: `send_ready`
+        # marked early in a full test run, 2026-11-25). A signal that is early by less than the
+        # few milliseconds between the reads can pass unnoticed; the provider's stability
+        # window covers that.
         turn = digest = content_digest = busy = done = None
         text = ""
+        stop_visible = await stop.is_visible() if stop else None
+        send_ready = (send is None or await send.is_visible()) and await composer.is_editable()
+        busy = await region_busy(region) if region is not None else None
         if await assistant.count() > before:
             turn = assistant.nth(before)
-            text = await turn.inner_text()  # read first: a signal seen after it is not early
-            digest = text_hash(text)
-            content_digest = text_hash(content_up_to(text, marker))
-            busy = await turn.get_attribute("aria-busy") if region is None else None
+            if region is None:
+                busy = await turn.get_attribute("aria-busy")
             if locators.response_done_control:
                 done = await locators.response_done_control.resolve(turn).count() > 0
+            text = await turn.inner_text()
+            digest = text_hash(text)
+            content_digest = text_hash(content_up_to(text, marker))
         samples.append(
             Sample(
                 t_ms=t_ms,
@@ -359,10 +370,10 @@ async def sample_send(
                 content_digest=content_digest,
                 has_text=bool(text.strip()),
                 has_marker=marker in text,
-                stop_visible=await stop.is_visible() if stop else None,
-                send_ready=(send is None or await send.is_visible()) and await composer.is_editable(),
+                stop_visible=stop_visible,
+                send_ready=send_ready,
                 done=done,
-                busy=busy if region is None else await region_busy(region),
+                busy=busy,
                 new_path=urlsplit(page.url).path != path_before,
             )
         )

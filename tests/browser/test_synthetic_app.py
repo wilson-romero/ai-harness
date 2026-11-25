@@ -68,12 +68,13 @@ async def test_forgotten_or_missing_conversation_opens_a_new_one(page, copilot_a
 
 
 async def test_done_control_can_be_made_to_appear_early(page, copilot_app):
-    await page.goto(copilot_app.url(early="done_control", pause_ms="1500"))
+    await page.goto(copilot_app.url(early="done_control", pause_ms="5000"))
     await send(page, "early ZQX-END-2")
     assistant = page.locator("#synthetic-thread .turn.assistant")
     await expect(assistant.locator(".synthetic-copy")).to_have_count(1)
+    # The page pauses 5 s after the signal: far longer than this read can lag on a busy machine.
     assert "ZQX-END-2" not in await assistant.inner_text()  # the signal came before the end
-    await expect(assistant).to_contain_text("ZQX-END-2")
+    await expect(assistant).to_contain_text("ZQX-END-2", timeout=30_000)
 
 
 async def test_reply_that_never_finishes(page, copilot_app):

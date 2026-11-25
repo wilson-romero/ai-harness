@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from contextlib import redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
@@ -232,7 +233,10 @@ def quick(tmp_path, monkeypatch, copilot_app):
 
 def test_premature_signal_is_discarded(quick, copilot_app, monkeypatch):
     probe, data = quick
-    url = copilot_app.url(early="done_control", pause_ms="900", forget="1")
+    # The page pauses 1.2 s: well above the shortest window (0.3 s) and well below the
+    # longest (3 s), so load on the machine cannot move the pause across either.
+    monkeypatch.setattr(probe, "STABLE_WINDOWS_MS", (300, 600, 3000))
+    url = copilot_app.url(early="done_control", pause_ms="1200", forget="1")
     monkeypatch.setenv("HARNESS_COPILOT_URL", url)
     probe.main(["measure"])
     measure = json.loads(sorted((data / "copilot").glob("probe-measure-*.json"))[-1].read_text())
@@ -240,7 +244,7 @@ def test_premature_signal_is_discarded(quick, copilot_app, monkeypatch):
     assert signals["done_control"]["valid"] is False
     assert signals["done_control"]["early"] == 4  # every send, counted
     assert signals["text_stable_300"]["valid"] is False and signals["text_stable_300"]["early"] > 0
-    assert signals["text_stable_1200"]["valid"] is True
+    assert signals["text_stable_3000"]["valid"] is True
     assert signals["stop_hidden"]["valid"] is True
     assert measure["end_signal"]["name"] != "done_control"
 
@@ -459,3 +463,25 @@ def test_structure_step_stops_on_a_sign_in_page(quick, copilot_app, monkeypatch)
     assert "on Copilot host: no" in out.getvalue()
     assert not list((data / "copilot").glob("structure-*.txt"))
     assert copilot_app.login_events == []
+
+
+def test_a_signal_read_while_the_page_finishes_is_not_early(quick, copilot_app, monkeypatch):
+    """Reads in one sample follow one another while the page keeps writing. Here the probe
+    is made slow between reading the text and judging it (0.3 s), far longer than the 40 ms
+    between the reply's last words and its end signals: a signal read after the page finished
+    must not be judged against text read before it. Seen once in a loaded full run, where
+    `send_ready` was marked early on the synthetic page that never fires it early."""
+    probe, data = quick
+    original = probe.content_up_to
+
+    def slow(text, marker):
+        time.sleep(0.3)  # the browser keeps going; only the probe waits
+        return original(text, marker)
+
+    monkeypatch.setattr(probe, "content_up_to", slow)
+    monkeypatch.setenv("HARNESS_COPILOT_URL", copilot_app.url(forget="1"))
+    assert probe.main(["measure"]) == 0
+    measure = json.loads(sorted((data / "copilot").glob("probe-measure-*.json"))[-1].read_text())
+    for name in ("stop_hidden", "send_ready", "done_control", "aria_busy"):
+        assert measure["signals"][name]["early"] == 0, name
+        assert measure["signals"][name]["valid"] is True, name

@@ -279,7 +279,7 @@ def test_failure_before_the_identifier_is_uncertain_and_the_next_opens_a_new_one
     url = app.url("/app", never_finish="1", id_never="1")
     code, _, err = cli(
         "ask", session_id, "pregunta",
-        **env | {"HARNESS_COPILOT_URL": url, "HARNESS_REQUEST_TIMEOUT_S": "10"},
+        **env | {"HARNESS_COPILOT_URL": url, "HARNESS_REQUEST_TIMEOUT_S": "20"},
     )
     assert code == 1 and "uncertain" in err
     assert session_row(data_dir, session_id) == ("uncertain", None)
@@ -373,10 +373,12 @@ def test_page_that_does_not_load_keeps_the_session(cli, env, data_dir, app):
 
 
 def test_reply_written_in_parts_is_returned_whole(cli, env, data_dir, app):
-    """The page shows its done control halfway and pauses; the stability guard waits."""
-    write_ui(data_dir, end_signal={"name": "done_control"})
+    """The page shows its done control halfway and pauses; the stability guard waits. The
+    pause (0.3 s) is far below the window (2 s), so a slow machine cannot stretch one into
+    the other."""
+    write_ui(data_dir, end_signal={"name": "done_control"}, stability_window_ms=2000)
     session_id = new_session(cli, env)
-    url = app.url("/app", early="done_control", pause_ms="150")
+    url = app.url("/app", early="done_control", pause_ms="300")
     code, out, err = cli("ask", session_id, "partes ZQX-END-7", **env | {"HARNESS_COPILOT_URL": url})
     assert code == 0, err
     # The second half of the reply arrived (the synthetic turn also holds its "Copy" button).
@@ -461,7 +463,7 @@ async def test_browser_closed_during_the_reply_is_uncertain(harness, app):
 
 
 async def test_nothing_is_left_open_after_a_deadline(harness, app):
-    h = harness(HARNESS_COPILOT_URL=app.url("/app", never_finish="1"), HARNESS_REQUEST_TIMEOUT_S="10")
+    h = harness(HARNESS_COPILOT_URL=app.url("/app", never_finish="1"), HARNESS_REQUEST_TIMEOUT_S="20")
     session = h.service.create_session("S")
     response = await h.service.ask(str(session.session_id), "pregunta")
     assert response.status == "uncertain"
@@ -478,7 +480,7 @@ def test_reply_that_never_ends_is_uncertain_and_never_resent(cli, env, data_dir,
     url = app.url("/app", never_finish="1")
     code, _, err = cli(
         "ask", session_id, "segunda",
-        **env | {"HARNESS_COPILOT_URL": url, "HARNESS_REQUEST_TIMEOUT_S": "10"},
+        **env | {"HARNESS_COPILOT_URL": url, "HARNESS_REQUEST_TIMEOUT_S": "20"},
     )
     assert code == 1 and "uncertain" in err
     assert app.prompt_count == 2
