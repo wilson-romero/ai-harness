@@ -42,6 +42,9 @@ WRITER_PRIMITIVES = frozenset({
     "os.mkdir", ".mkdir()",
 })
 EXEMPTIONS = {WRITER: WRITER_PRIMITIVES}
+# The sanitising and redaction it uses moved to a neutral package (mcp-gateway D7); the same
+# allowlist still applies to them.
+TEXT_PACKAGE = REPO_ROOT / "harness" / "text"
 
 ALLOWED_MODULES = {
     "__future__",
@@ -60,7 +63,7 @@ ALLOWED_MODULES = {
     "unicodedata",
     "harness.core.errors",
 }
-ALLOWED_PREFIXES = ("harness.memory.",)
+ALLOWED_PREFIXES = ("harness.memory.", "harness.text.")
 READ_FLAGS = {"O_RDONLY", "O_NONBLOCK", "O_BINARY", "O_NOINHERIT", "O_CLOEXEC"}
 OS_ALLOWED = {"walk", "listdir", "open", "fstat", "read", "close", "path", *READ_FLAGS}
 OS_PATH_ALLOWED = {"samefile"}
@@ -206,7 +209,9 @@ def _reason(problem: str) -> str:
 
 def offenders_in(package: Path, exemptions: dict[str, frozenset[str]]) -> list[str]:
     offenders = []
-    for path in sorted(package.rglob("*.py")):
+    paths = [*package.rglob("*.py"), *TEXT_PACKAGE.rglob("*.py")]
+    assert any(p.parent == TEXT_PACKAGE for p in paths)
+    for path in sorted(paths):
         relative = path.relative_to(REPO_ROOT).as_posix()
         allowed = exemptions.get(relative, frozenset())
         offenders += [f"{relative}:{p}" for p in check_source(path.read_text(encoding="utf-8"))

@@ -24,7 +24,7 @@ from harness.core.errors import HarnessError, InvalidInput
 from harness.core.strict_json import loads_strict
 from harness.memory.notes import parse_frontmatter
 from harness.memory.paths import SkippedRead, VaultFile, is_safe_name, read_vault_file
-from harness.memory.safe_text import safe_line, terminal_safe
+from harness.text.safe_text import safe_line, terminal_safe
 
 SKILL_FILE = "SKILL.md"
 WORKFLOW_FILE = "workflow.json"

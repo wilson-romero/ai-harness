@@ -40,7 +40,7 @@ from harness.memory.decisions import (
 )
 from harness.memory.notes import parse_frontmatter
 from harness.memory.paths import resolve_project
-from harness.memory.safe_text import safe_line
+from harness.text.safe_text import safe_line
 from harness.skills.approvals import Proposal, normalise_content
 from harness.skills.checks import parse_fields
 from harness.skills.effects import (

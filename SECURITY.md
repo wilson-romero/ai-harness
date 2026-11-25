@@ -72,6 +72,32 @@ El harness lee el vault y no lo copia, sube ni sincroniza. Escribe en él **una 
 
 Los límites (sistemas de ficheros sin enlaces duros, otros programas que escriben en el vault a la vez, cortes de luz) están en el README, en [Skills de arquitectura](README.md#skills-de-arquitectura).
 
+## Servidores MCP
+
+Lo que el harness garantiza con un servidor MCP:
+
+- Solo arranca los servidores de tu lista local. Usa la orden exacta que escribiste, sin shell.
+- El servidor recibe solo las variables de entorno nombradas en la lista y las básicas para arrancar un proceso.
+- El servidor recibe solo los argumentos declarados.
+- Toda herramienta que escribe se deniega en este corte.
+- El harness no tiene ninguna superficie de entrada: no abre puertos ni sockets de escucha, y solo habla con sus servidores por los tubos que él mismo crea. Lo comprueban dos tests:
+  - uno con un audit hook sobre la creación de cada socket (`socket.__new__`) y cada `socket.bind`, en el proceso del harness y en su proceso de sesión, durante un `mcp call`;
+  - uno estructural sobre `harness/mcp/`.
+
+  La autorización de clientes (SEC-09) llegará con el servidor MCP propio, en un corte posterior. Hoy no hay ningún cliente que autorizar.
+- Lo que devuelve un servidor (resultados, descripciones, nombres, errores) se trata como datos no confiables:
+  - se mide antes de leerlo (también su stderr: se guarda 1 MiB por sesión y pasado 64 MiB se detiene el servidor);
+  - nunca se interpreta: el harness no evalúa ningún patrón, formato ni esquema que mande el servidor, y el SDK no valida resultados en el proceso del harness;
+  - se sanea y se redacta antes de imprimirlo o auditarlo;
+  - nunca se guarda.
+
+Lo que **no** garantiza:
+
+- Un servidor de terceros corre con los permisos de tu usuario y puede hacer cualquier cosa dentro de su proceso: leer tus ficheros, abrir conexiones o lanzar otros procesos. El harness decide qué arranca, qué le pasa, cuánto espera y qué deja salir, pero no lo encierra. Añade a la lista solo servidores en los que confías.
+- El harness termina siempre el árbol del proceso de sesión (grupo de procesos o Job Object), que incluye al servidor y a lo que este lance. Un proceso que el servidor lance en otra sesión o grupo (`setsid`, un demonio) o fuera del Job Object escapa, y el harness no lo ve.
+- La lista local se rechaza si otro usuario, el grupo u otros pueden escribirla en macOS y Linux. En Windows no se comprueban las ACL.
+- La marca de recursión (`AI_HARNESS_MCP_CHILD`) evita encadenamientos accidentales. No detiene a un servidor malicioso que la borre.
+
 ## Si algo se filtra
 
 Un secreto publicado se da por comprometido aunque se borre el commit: primero se **revoca o rota**, después se limpia el historial. Para avisar de un problema de seguridad, usa los *security advisories* privados de GitHub en este repositorio, no un issue público.

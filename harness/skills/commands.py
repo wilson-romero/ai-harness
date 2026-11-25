@@ -30,7 +30,7 @@ from harness.skills.definition import (
     validate_skill_name,
 )
 from harness.skills.effects import default_effects
-from harness.memory.safe_text import safe_line, safe_text, terminal_safe
+from harness.text.safe_text import safe_line, safe_text, terminal_safe
 
 EXIT_OK = 0
 EXIT_ERROR = 1

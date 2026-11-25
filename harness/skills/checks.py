@@ -16,7 +16,7 @@ from typing import Any
 
 from harness.core.errors import InvalidInput
 from harness.core.strict_json import loads_strict
-from harness.memory.safe_text import safe_text
+from harness.text.safe_text import safe_text
 from harness.skills.definition import FieldSpec, ValidateStep
 
 _SLUG_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")

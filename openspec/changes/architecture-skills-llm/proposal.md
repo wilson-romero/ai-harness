@@ -48,7 +48,7 @@ Corte **4 · Skills sin herramientas** de `docs/plan/2026-11-24-ai-harness-corte
 - Skills nuevos: `skills/hls-review/` y `skills/architecture-memory/` (`SKILL.md`, `workflow.json`, `templates/*.md`), genéricos y en español.
 - Código nuevo: `harness/memory/decisions.py` (identificador, render, escritura confinada y reconciliación) y el efecto `vault.save_decision` en `harness/skills/effects.py`.
 - Código modificado: `tests/security/test_memory_no_writes.py` deja de buscar escrituras en **un** fichero nombrado (`harness/memory/decisions.py`) y sigue exigiendo que ningún comando `memory …` cambie la huella del vault; `harness/memory/paths.py` expone la validación de nombre de fichero que ya usa para proyectos.
-- Almacenamiento: ninguna migración nueva; usa `skill_steps.effect_ref` y `prepared_at` de la `003`.
+- Almacenamiento: usa `skill_steps.effect_ref` y `prepared_at` de la `003`. *Revisado el 2026-11-25:* una migración, `005_effect_bindings.sql` (`skill_runs.effect_bindings`), para ligar la ejecución a su vault (hallazgo 3 de la revisión independiente).
 - Dependencias: ninguna nueva.
 - Configuración: ninguna variable nueva; usa `HARNESS_VAULT_ROOT` y las de `skill-engine`.
 - Fixtures: documentos y fuentes sintéticos y respuestas guionizadas en `tests/fixtures/`. `tests/fixtures/vault-synthetic/` **no cambia** (los tests de `project-memory` dependen de su contenido exacto): las notas de duplicado y de conflicto las crea cada test en su copia temporal.

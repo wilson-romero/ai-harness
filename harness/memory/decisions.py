@@ -31,7 +31,7 @@ from harness.memory.paths import (
     read_vault_file,
     validate_project_slug,
 )
-from harness.memory.safe_text import neutralise_delimiters
+from harness.text.safe_text import neutralise_delimiters
 
 DECISIONS_DIR = "Decisiones"
 ID_DOMAIN = "ai-harness/decision/v1\n"

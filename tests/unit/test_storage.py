@@ -29,7 +29,9 @@ def test_first_run_creates_the_schema(conn):
         row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
     session_core = {"sessions", "requests", "messages", "audit_events", "schema_migrations"}
-    assert tables == session_core | {"request_context", "skill_runs", "skill_steps", "approvals"}
+    assert tables == session_core | {
+        "request_context", "skill_runs", "skill_steps", "approvals", "tool_calls"
+    }
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
 
@@ -43,7 +45,7 @@ def test_migrating_twice_changes_nothing(data_dir):
     assert migrate(second) == []
     after = second.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
     assert [tuple(r) for r in after] == [tuple(r) for r in before]
-    assert [r["version"] for r in after] == [1, 2, 3, 4]
+    assert [r["version"] for r in after] == [1, 2, 3, 4, 5]
     assert repo.get_session(second, session.session_id) == session
     second.close()
 
