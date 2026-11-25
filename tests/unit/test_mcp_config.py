@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -178,3 +179,59 @@ def test_a_file_swapped_after_the_check_is_not_read(cli, tmp_path, state, monkey
     monkeypatch.setattr(config_module, "ensure_not_versionable", swap)
     code, out, err = cli("mcp", "list", HARNESS_MCP_CONFIG=str(path))
     assert code == 1 and "changed while it was read" in err
+
+
+# -- who can write the allowlist (independent review of 2026-11-24, finding 5) ------------------
+
+POSIX_OWNERS = pytest.mark.skipif(
+    not hasattr(os, "getuid"), reason="file owners and mode bits are not checked on this system"
+)
+
+
+@POSIX_OWNERS
+@pytest.mark.parametrize("mode", [0o666, 0o620, 0o602])
+def test_an_allowlist_others_can_write_is_refused(cli, tmp_path, state, mode):
+    path = _config(tmp_path, state)
+    path.chmod(mode)
+    code, _, err = cli("mcp", "list", HARNESS_MCP_CONFIG=str(path))
+    assert code == 1 and "writable by other users" in err, err
+
+
+@POSIX_OWNERS
+def test_an_allowlist_in_a_directory_others_can_write_is_refused(cli, tmp_path, state):
+    shared = tmp_path / "compartida"
+    shared.mkdir()
+    path = write_config(shared / "mcp.json", {"synthetic": server_entry(state.state)})
+    path.chmod(0o600)
+    shared.chmod(0o777)
+    try:
+        code, _, err = cli("mcp", "list", HARNESS_MCP_CONFIG=str(path))
+    finally:
+        shared.chmod(0o700)
+    assert code == 1 and "writable by other users" in err, err
+
+
+@POSIX_OWNERS
+def test_a_link_from_a_directory_others_can_write_is_refused(cli, tmp_path, state):
+    """The review's reproduction: the file itself is private, the link to it is not."""
+    path = _config(tmp_path, state)
+    path.chmod(0o600)
+    shared = tmp_path / "abierta"
+    shared.mkdir()
+    link = shared / "mcp.json"
+    link.symlink_to(path)
+    shared.chmod(0o777)
+    try:
+        code, _, err = cli("mcp", "list", HARNESS_MCP_CONFIG=str(link))
+    finally:
+        shared.chmod(0o700)
+    assert code == 1 and "writable by other users" in err, err
+
+
+@POSIX_OWNERS
+def test_a_private_allowlist_is_accepted(cli, tmp_path, state):
+    path = _config(tmp_path, state)
+    path.chmod(0o600)
+    tmp_path.chmod(0o700)
+    code, _, err = cli("mcp", "list", HARNESS_MCP_CONFIG=str(path))
+    assert code == 0, err

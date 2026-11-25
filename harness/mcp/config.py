@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -155,6 +156,7 @@ def load_config(env: Mapping[str, str]) -> LoadedConfig:
     path = Path(raw)
     if not path.is_absolute():
         raise ConfigError(f"{CONFIG_ENV} must be an absolute path")
+    _check_writers(path)
     text = _read_checked(path.resolve())
     try:
         data = loads_strict(text, max_bytes=MAX_CONFIG_BYTES, what="the MCP configuration")
@@ -164,6 +166,38 @@ def load_config(env: Mapping[str, str]) -> LoadedConfig:
         return LoadedConfig(McpConfig.model_validate(data))
     except ValidationError as exc:
         raise ConfigError(f"invalid MCP configuration: {_first_error(exc)}") from None
+
+
+def _check_writers(path: Path) -> None:
+    """Refuse an allowlist that someone else could change (independent review, 2026-11-24).
+
+    The allowlist decides which programs run, so the file, the link that names it (if any)
+    and the directories that hold them must belong to the person (or to the system) and not be
+    writable by the group or by others. Checked where the system has owners and mode bits
+    (`os.getuid` exists); on Windows the ACL is not checked, as the README says.
+    """
+    if not hasattr(os, "getuid"):
+        return
+    owners = {os.getuid(), 0}
+    try:
+        checked = [(os.lstat(path), "file"), (os.stat(path.parent), "directory")]
+        target = path.resolve()
+        if target != path:
+            checked += [(os.stat(target), "file"), (os.stat(target.parent), "directory")]
+    except OSError:
+        raise ConfigError("the MCP configuration file cannot be read") from None
+    for info, kind in checked:
+        if stat.S_ISLNK(info.st_mode):
+            if info.st_uid not in owners:
+                raise ConfigError("the MCP configuration is a link owned by another user")
+            continue
+        if info.st_uid not in owners:
+            raise ConfigError(f"the MCP configuration {kind} belongs to another user")
+        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise ConfigError(
+                f"the MCP configuration {kind} is writable by other users; "
+                "make it writable only by you (chmod go-w)"
+            )
 
 
 def _read_checked(path: Path) -> str:
