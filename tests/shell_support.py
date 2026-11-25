@@ -152,6 +152,7 @@ def make_conversation(
     timeout_s: float = 5.0,
     context_max_bytes: int = CONTEXT_DEFAULT_BYTES,
     engine_options: Mapping | None = None,
+    columns: int = 10_000,  # a terminal this wide never cuts a line; the cut is tested apart
 ) -> tuple[Conversation, SessionService, object]:
     provider = provider if provider is not None else CountingProvider()
 
@@ -178,6 +179,7 @@ def make_conversation(
         skills=lambda: SkillSettings(skills_dir=skills_dir or FIXTURES, approval_ttl_s=900),
         effects=effects,
         engine_options=engine_options,
+        columns=lambda: columns,
     ))
     return conversation, service, provider
 

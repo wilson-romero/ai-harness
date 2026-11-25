@@ -8,16 +8,20 @@ command is never sent to the provider.
 
 Output (D9): every line of text from outside the harness (provider answers, history, memory
 notes, skill outputs) is size-limited, cleaned and redacted with `harness.text`, and printed
-behind FOREIGN_PREFIX, which no line of the harness starts with. The approval prompt is the
-engine's own, unchanged.
+behind FOREIGN_PREFIX, which no line of the harness starts with; the content of an approval
+notice too (its header and the question are the engine's, unchanged). Every printed line is cut
+into rows narrower than the terminal, the rows after the first behind CONTINUATION_PREFIX, so
+that the terminal's own wrapping never starts a row with foreign text.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import sqlite3
 import stat
+import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -41,6 +45,7 @@ from harness.memory.search import DEFAULT_LIMIT, parse_query, search_vault
 from harness.providers.base import LLMProvider, close_resources, open_resources
 from harness.shell.parser import Command, Empty, LineError, Question, parse_line
 from harness.shell.terminal import ConversationTerminal, WaitInterrupted
+from harness.skills.approvals import APPROVAL_RULE, Proposal, approval_header
 from harness.skills.config import SkillSettings
 from harness.skills.definition import skills_root
 from harness.skills.effects import Effect, default_effects
@@ -55,6 +60,8 @@ from harness.text.safe_text import (
 
 PROMPT = "> "
 FOREIGN_PREFIX = "| "  # no harness line starts with "|"
+CONTINUATION_PREFIX = "|+"  # a row that continues the line above it (cut to the terminal width)
+MIN_COLUMNS = 20
 MAX_QUESTION_BYTES = 64 * 1024
 MAX_SHOWN_CHARS = 256 * 1024  # of one foreign text; the rest is counted, not shown
 MAX_FILE_BYTES = MAX_INPUT_BYTES
@@ -87,6 +94,11 @@ Ctrl+C interrupts a question in progress; it is never resent. Ctrl+C at the appr
 leaves the approval undecided."""
 
 
+def terminal_columns() -> int:
+    """The width of the terminal now; 80 when it cannot be known."""
+    return shutil.get_terminal_size((80, 24)).columns
+
+
 @dataclass
 class ConversationDeps:
     """What a conversation uses from outside; tests replace any of it."""
@@ -101,18 +113,59 @@ class ConversationDeps:
     skills: Callable[[], SkillSettings]
     effects: Mapping[str, Effect] | None = None
     engine_options: Mapping[str, object] | None = None  # extra SkillEngine options (tests)
+    columns: Callable[[], int] = terminal_columns  # asked before each output
 
 
-def foreign_lines(text: str) -> tuple[list[str], int]:
-    """Text from outside the harness as printable lines, and how many characters were left out.
+def _char_columns(char: str) -> int:
+    """Columns a character takes at a terminal: 0 for combining and format characters, 2 for
+    wide and full-width ones, 8 for a tab (the most it can take), 1 otherwise. Ambiguous-width
+    characters count 1, as Western terminals show them (a limit, design D9)."""
+    if char == "\t":
+        return 8
+    if unicodedata.combining(char) or unicodedata.category(char) in ("Mn", "Me", "Cf"):
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+
+
+def wrap_rows(line: str, columns: int | None, first: str = "") -> list[str]:
+    """`line` as terminal rows, each narrower than the terminal (review 2026-11-25).
+
+    The terminal would wrap a longer line by itself, and the part it moves to the next row
+    would start that row with whatever the text says there: a foreign line could start a row
+    without its prefix. So every row is cut here, below `columns`: the first row starts with
+    `first`, every other with CONTINUATION_PREFIX. `columns` None: no cut. Linear.
+    """
+    if columns is None:
+        return [first + line]
+    limit = max(columns, MIN_COLUMNS) - 1  # never the last column: some terminals wrap there
+    rows: list[str] = []
+    current, used, start = [first], len(first), len(first)
+    for char in line:
+        width = _char_columns(char)
+        if used + width > limit and used > start:
+            rows.append("".join(current))
+            current, used = [CONTINUATION_PREFIX], len(CONTINUATION_PREFIX)
+            start = used
+        current.append(char)
+        used += width
+    rows.append("".join(current))
+    return rows
+
+
+def foreign_lines(text: str, columns: int | None = None) -> tuple[list[str], int]:
+    """Text from outside the harness as printable rows, and how many characters were left out.
 
     Bounded first (MAX_SHOWN_CHARS), then cleaned and redacted (`safe_foreign_text`: no escape
-    sequences, controls or invisible format characters), then every line is prefixed. Linear.
+    sequences, controls or invisible format characters), then every line is prefixed and cut
+    into rows narrower than `columns` (`wrap_rows`). Linear.
     """
     hidden = max(0, len(text) - MAX_SHOWN_CHARS)
     shown = text[:MAX_SHOWN_CHARS] if hidden else text
     clean = safe_foreign_text(shown).text
-    return [FOREIGN_PREFIX + line for line in clean.split("\n")], hidden
+    rows: list[str] = []
+    for line in clean.split("\n"):
+        rows += wrap_rows(line, columns, FOREIGN_PREFIX)
+    return rows, hidden
 
 
 def read_text_file(raw_path: str, max_bytes: int = MAX_FILE_BYTES) -> tuple[str, str]:
@@ -192,15 +245,36 @@ class Conversation:
     # -- output ---------------------------------------------------------------------------------
 
     def _say(self, text: str) -> None:
-        """A harness line (or lines). Never starts with FOREIGN_PREFIX."""
-        lines = [line if not line.startswith("|") else " " + line for line in text.split("\n")]
-        self._terminal.show("\n".join(lines))
+        """A harness line (or lines). Its first row never starts with `|`; a row that continues
+        it starts with CONTINUATION_PREFIX."""
+        self._terminal.show("\n".join(self._harness_rows(text.split("\n"))))
+
+    def _harness_rows(self, lines: list[str]) -> list[str]:
+        columns = self._deps.columns()
+        rows: list[str] = []
+        for line in lines:
+            rows += wrap_rows(" " + line if line.startswith("|") else line, columns)
+        return rows
 
     def _foreign(self, text: str) -> None:
-        lines, hidden = foreign_lines(text)
+        lines, hidden = foreign_lines(text, self._deps.columns())
         self._terminal.show("\n".join(lines))
         if hidden:
             self._say(f"[{hidden} more character(s) not shown]")
+
+    def _render_approval(self, proposal: Proposal, approval_hash: str, expires_at: str,
+                         redactions: int) -> str:
+        """The approval notice of `skill run`, with its content shown as foreign text (review
+        2026-11-25): every row of the content starts with `|`, so that a model output cannot
+        print a header, a rule or a status line of the harness inside the notice. The content
+        is not cleaned again: it is shown exactly as it is hashed, only cut into rows."""
+        header = approval_header(proposal, approval_hash, expires_at, redactions)
+        columns = self._deps.columns()
+        content: list[str] = []
+        for line in proposal.content.split("\n"):
+            content += wrap_rows(line, columns, FOREIGN_PREFIX)
+        rule = self._harness_rows([APPROVAL_RULE])
+        return "\n".join([*self._harness_rows(header), *rule, *content, *rule])
 
     # -- interruption (D6, D7) --------------------------------------------------------------------
 
@@ -595,6 +669,7 @@ class Conversation:
             context_builder=self._build_context,
             progress=lambda message: self._say(f"skill: {safe_line(message).text}"),
             held_session=self._session_id,
+            render_approval=self._render_approval,
             **dict(self._deps.engine_options or {}),
         )
         self._skill_report(await engine.run(name, str(self._session_id), inputs))

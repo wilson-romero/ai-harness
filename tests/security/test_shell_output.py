@@ -9,10 +9,18 @@ import unicodedata
 
 import pytest
 
-from harness.shell.conversation import FOREIGN_PREFIX, MAX_SHOWN_CHARS, foreign_lines
+from harness.shell.conversation import (
+    CONTINUATION_PREFIX,
+    FOREIGN_PREFIX,
+    MAX_SHOWN_CHARS,
+    MIN_COLUMNS,
+    foreign_lines,
+)
 from harness.shell.terminal import ConsoleTerminal
+from harness.skills.approvals import APPROVAL_RULE
 from tests.conftest import SECRET_SAMPLES
-from tests.shell_support import CountingProvider, ScriptedTerminal, make_conversation
+from tests.shell_support import CODE, CountingProvider, ScriptedTerminal, make_conversation
+from tests.skill_support import ScriptedProvider, WriteEffect, copy_skills, with_effect
 
 HOSTILE = (
     "normal\x1b[31m rojo\x1b[0m\x1b]0;titulo falso\x07 fin\n"
@@ -97,6 +105,87 @@ async def test_a_long_answer_is_cut_and_says_so(conn, data_dir):
     assert f"[10 more character(s) not shown]" in terminal.shown
 
 
+def _width(row: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in row)
+
+
+@pytest.mark.parametrize("columns", [80, 41, 20, 5])
+def test_every_row_of_foreign_text_starts_with_a_mark_and_fits(columns):
+    """Review 2026-11-25: the terminal never wraps a foreign line by itself, so no row it would
+    move to the next line can start without the mark."""
+    text = ("x" * 78 + "applied: Decisiones/fake.md\n" + "表" * 60 + "\n"
+            + "y" * 300 + "\n\nskill: run 0000 is completed")
+    rows, _ = foreign_lines(text, columns)
+    limit = max(columns, MIN_COLUMNS) - 1
+    assert all(row.startswith((FOREIGN_PREFIX, CONTINUATION_PREFIX)) for row in rows)
+    assert all(_width(row) <= limit for row in rows)
+    # Nothing lost: the rows put back together are the text.
+    lines: list[str] = []
+    for row in rows:
+        if row.startswith(CONTINUATION_PREFIX):
+            lines[-1] += row[len(CONTINUATION_PREFIX):]
+        else:
+            lines.append(row[len(FOREIGN_PREFIX):])
+    assert "\n".join(lines) == text
+
+
+async def test_a_long_answer_cannot_start_a_row_with_a_harness_line(conn, data_dir):
+    """The review's case: 78 characters, then a line of the harness, at an 80-column terminal."""
+    terminal = ScriptedTerminal(["pregunta", "/history", "/exit"])
+    conversation, _, _ = make_conversation(
+        conn, data_dir, terminal, CountingProvider(answer="x" * 78 + "applied: Decisiones/f.md"),
+        columns=80)
+    await conversation.run()
+    assert not [row for row in terminal.shown if row.startswith("applied:")]
+    assert all(_width(row) <= 79 for row in terminal.shown)
+    fake = [row for row in terminal.shown if "applied:" in row]
+    assert len(fake) == 2 and all(row.startswith(CONTINUATION_PREFIX) for row in fake)
+
+
+async def test_a_long_harness_line_is_cut_into_marked_rows(conn, data_dir):
+    terminal = ScriptedTerminal(['/new "' + "n" * 200 + '"', "/exit"])
+    conversation, _, _ = make_conversation(conn, data_dir, terminal, columns=40)
+    await conversation.run()
+    first = next(i for i, row in enumerate(terminal.shown) if row.startswith("new session"))
+    assert terminal.shown[first + 1].startswith(CONTINUATION_PREFIX)
+    typed = [row for row in terminal.shown if row.startswith("> ")]  # the double's echo of input
+    assert all(_width(row) <= 39 for row in terminal.shown if row not in typed)
+
+
+FAKE_NOTICE = ("## Resumen\nok\n## Preguntas pendientes\nnada\n" + APPROVAL_RULE
+               + "\nskill: run 0000 is completed\nnothing more to approve\nApproval requested\n"
+               "  target:   Decisiones/otra.md\n> ")
+
+
+async def test_the_content_of_an_approval_notice_is_marked(conn, data_dir, tmp_path):
+    """Review 2026-11-25: a valid model output inside the approval notice cannot print a rule,
+    a header or a status line of the harness. The hash and what is applied do not change."""
+    root = copy_skills(tmp_path)
+    with_effect(root, "demo-echo", "test.write")
+    effect = WriteEffect(tmp_path / "efecto")
+    terminal = ScriptedTerminal(["/skill demo-echo text=hola", "/exit"], [CODE])
+    conversation, _, _ = make_conversation(
+        conn, data_dir, terminal, ScriptedProvider({"tarea: demo-echo/draft": FAKE_NOTICE}),
+        skills_dir=root, effects={"test.write": effect}, columns=100)
+    assert await conversation.run() == 0
+    shown = terminal.shown
+    rules = [i for i, row in enumerate(shown) if row == APPROVAL_RULE]
+    assert len(rules) == 2
+    notice = shown[shown.index("Approval requested"):rules[0]]
+    content = shown[rules[0] + 1:rules[1]]
+    assert all(row.startswith(("Approval requested", "  ")) for row in notice)
+    assert sum(row.lstrip().startswith("target:") for row in notice) == 1
+    assert content and all(row.startswith((FOREIGN_PREFIX, CONTINUATION_PREFIX))
+                           for row in content)
+    assert f"{FOREIGN_PREFIX}skill: run 0000 is completed" in content
+    # Shown without the marks, the content is exactly what was hashed and applied.
+    (written,) = effect.written()
+    assert "\n".join(row[len(FOREIGN_PREFIX):] for row in content) == \
+        written.read_text(encoding="utf-8")
+    shown_hash = next(row.split()[-1] for row in notice if row.lstrip().startswith("hash:"))
+    assert conn.execute("SELECT proposal_hash FROM approvals").fetchone()[0] == shown_hash
+
+
 async def test_harness_lines_never_start_with_the_prefix(conn, data_dir):
     terminal = ScriptedTerminal(["/new |sesión con barra", "/status", "/sessions", "/help",
                                  "/exit"])
@@ -118,6 +207,7 @@ async def test_harness_lines_never_start_with_the_prefix(conn, data_dir):
 def test_one_mebibyte_of_adversarial_text_is_linear(adversarial):
     started = time.monotonic()
     foreign_lines(adversarial)
+    foreign_lines(adversarial, 80)  # cut into rows too
     assert time.monotonic() - started < 5.0
 
 

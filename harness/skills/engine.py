@@ -178,7 +178,12 @@ class SkillEngine:
         run_time_limit_s: float = MAX_RUN_TIME_S,
         busy_retry_s: float = BUSY_RETRY_S,
         held_session: UUID | None = None,
+        render_approval: Callable[[Proposal, str, str, int], str] | None = None,
     ) -> None:
+        # How the approval notice is printed: `render_for_terminal` unless a conversation shows
+        # it with its own marks (interactive-shell D9, 2026-11-25). What is hashed never depends
+        # on it: the hash is the proposal's.
+        self._render_approval = render_approval or render_for_terminal
         self._busy_retry_s = busy_retry_s
         self._conn = conn
         self._data_dir = data_dir
@@ -670,8 +675,8 @@ class SkillEngine:
                 return waiting
             decision = decide(
                 self._terminal,
-                render_for_terminal(proposal, proposal_hash, live["expires_at"],
-                                    proposed.redactions),
+                self._render_approval(proposal, proposal_hash, live["expires_at"],
+                                      proposed.redactions),
                 proposal_hash,
             )
             decided = utc_iso(self._clock())

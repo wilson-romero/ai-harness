@@ -133,11 +133,20 @@ def proposal_hash(proposal: dict) -> str:
     return hashlib.sha256(HASH_DOMAIN + canonical.encode("utf-8")).hexdigest()
 
 
+APPROVAL_RULE = "-" * 72
+
+
 def render_for_terminal(proposal: Proposal, approval_hash: str, expires_at: str,
                         redactions: int = 0) -> str:
     """Header, then the full content between two rules. The content is shown as hashed."""
-    rule = "-" * 72
-    header = [
+    header = approval_header(proposal, approval_hash, expires_at, redactions)
+    return "\n".join([*header, APPROVAL_RULE, proposal.content, APPROVAL_RULE])
+
+
+def approval_header(proposal: Proposal, approval_hash: str, expires_at: str,
+                    redactions: int = 0) -> list[str]:
+    """The lines of the notice written by the harness (none comes from the content)."""
+    return [
         "Approval requested",
         f"  skill:    {proposal.skill_name} {proposal.skill_version} ({proposal.skill_sha256})",
         f"  run:      {proposal.run_id}",
@@ -150,7 +159,6 @@ def render_for_terminal(proposal: Proposal, approval_hash: str, expires_at: str,
         f"  hash:     {approval_hash}",
         f"  expires:  {expires_at} (UTC)",
     ]
-    return "\n".join([*header, rule, proposal.content, rule])
 
 
 def decide(terminal: Terminal, shown: str, approval_hash: str) -> Decision:
