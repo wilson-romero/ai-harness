@@ -20,6 +20,9 @@ import pytest
 from tests.conftest import REPO_ROOT, fingerprint
 
 MEMORY_PACKAGE = REPO_ROOT / "harness" / "memory"
+# The sanitising and redaction it uses moved to a neutral package (mcp-gateway D7); the same
+# allowlist still applies to them.
+TEXT_PACKAGE = REPO_ROOT / "harness" / "text"
 
 ALLOWED_MODULES = {
     "__future__",
@@ -38,7 +41,7 @@ ALLOWED_MODULES = {
     "unicodedata",
     "harness.core.errors",
 }
-ALLOWED_PREFIXES = ("harness.memory.",)
+ALLOWED_PREFIXES = ("harness.memory.", "harness.text.")
 READ_FLAGS = {"O_RDONLY", "O_NONBLOCK", "O_BINARY", "O_NOINHERIT", "O_CLOEXEC"}
 OS_ALLOWED = {"walk", "listdir", "open", "fstat", "read", "close", "path", *READ_FLAGS}
 OS_PATH_ALLOWED = {"samefile"}
@@ -180,7 +183,9 @@ def check_source(source: str) -> list[str]:
 
 def test_memory_package_has_no_copy_upload_or_write_path():
     offenders = []
-    for path in sorted(MEMORY_PACKAGE.rglob("*.py")):
+    paths = [*MEMORY_PACKAGE.rglob("*.py"), *TEXT_PACKAGE.rglob("*.py")]
+    assert any(p.parent == TEXT_PACKAGE for p in paths)
+    for path in sorted(paths):
         relative = path.relative_to(REPO_ROOT).as_posix()
         offenders += [f"{relative}:{p}" for p in check_source(path.read_text(encoding="utf-8"))]
     assert offenders == []

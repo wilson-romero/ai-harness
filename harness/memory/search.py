@@ -9,8 +9,8 @@ from pathlib import Path
 from harness.core.errors import InvalidInput
 from harness.memory.notes import load_note, project_section
 from harness.memory.paths import SkippedRead, resolve_project, walk_vault
-from harness.memory.redaction import private_key_spans
-from harness.memory.safe_text import safe_line, strip_controls
+from harness.text.redaction import private_key_spans
+from harness.text.safe_text import safe_line, strip_controls
 
 QUERY_MAX_CHARS = 200
 QUERY_MAX_TERMS = 10

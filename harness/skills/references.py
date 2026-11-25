@@ -10,7 +10,7 @@ from __future__ import annotations
 import secrets
 from collections.abc import Mapping, Sequence
 
-from harness.memory.safe_text import neutralise_delimiters, strip_controls
+from harness.text.safe_text import neutralise_delimiters, strip_controls
 from harness.skills.definition import Reference, find_references
 
 DATA_NOTICE = (

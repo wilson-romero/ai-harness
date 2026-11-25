@@ -27,7 +27,7 @@ from harness.memory.paths import (
     SkippedRead,
     walk_vault,
 )
-from harness.memory.safe_text import safe_line, safe_text
+from harness.text.safe_text import safe_line, safe_text
 
 CATEGORIES = (
     "sync_conflicts",

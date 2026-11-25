@@ -18,6 +18,7 @@ from harness.core.errors import (
     UsageError,
 )
 from harness.core.service import SessionService
+from harness.mcp.commands import add_mcp_parser, run_mcp_command
 from harness.memory.config import (
     MemorySettings,
     ensure_data_dir_outside_vault,
@@ -84,6 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     maintain.add_argument("--dry-run", action="store_true", help="report only (required)")
     add_skill_parser(commands)
+    add_mcp_parser(commands)
     return parser
 
 
@@ -116,6 +118,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.command == "mcp":
+        return run_mcp_command(args)
     settings = Settings.from_env(os.environ)
     if args.command == "memory":
         return _memory(args)
