@@ -69,6 +69,22 @@ def validate_project_slug(raw: str) -> str:
     return raw
 
 
+def is_safe_name(raw: str) -> bool:
+    """A plain file or folder name that means the same on every platform (no separators,
+    no `..`, no trailing dot or space, not a reserved Windows device name)."""
+    return _is_valid_slug(raw)
+
+
+def is_safe_file_name(raw: str) -> bool:
+    """A file name the harness may create, legal and with one meaning on Windows and POSIX.
+
+    The rules of `is_safe_name` (letters, digits, `.`, `_`, `-`; no separator, no `..`, no
+    trailing dot or space, no reserved device name, at most 128 characters), or a hidden name
+    (one leading dot) whose rest follows them.
+    """
+    return _is_valid_slug(raw[1:] if raw.startswith(".") else raw)
+
+
 def _is_valid_slug(raw: str) -> bool:
     if not _PROJECT_RE.fullmatch(raw) or raw in (".", ".."):
         return False

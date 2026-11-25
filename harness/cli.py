@@ -18,6 +18,7 @@ from harness.core.errors import (
     UsageError,
 )
 from harness.core.service import SessionService
+from harness.mcp.commands import add_mcp_parser, run_mcp_command
 from harness.memory.config import (
     MemorySettings,
     ensure_data_dir_outside_vault,
@@ -33,6 +34,8 @@ from harness.memory.search import (
     validate_limit,
 )
 from harness.providers.registry import provider_factory
+from harness.skills.commands import add_skill_parser, run_skill_command
+from harness.skills.engine import recover_runs
 from harness.storage.database import open_database
 
 EXIT_OK = 0
@@ -81,6 +84,8 @@ def build_parser() -> argparse.ArgumentParser:
         "maintain", help="report what a maintenance pass would find, without changing anything"
     )
     maintain.add_argument("--dry-run", action="store_true", help="report only (required)")
+    add_skill_parser(commands)
+    add_mcp_parser(commands)
     return parser
 
 
@@ -113,9 +118,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.command == "mcp":
+        return run_mcp_command(args)
     settings = Settings.from_env(os.environ)
     if args.command == "memory":
         return _memory(args)
+    if args.command == "skill":
+        return run_skill_command(args)
     memory: MemorySettings | None = None
     memory_error: MemoryNotConfigured | None = None
     with_project = args.command == "ask" and args.project is not None
@@ -137,6 +146,7 @@ def _run(args: argparse.Namespace) -> int:
             settings.request_timeout_s,
         )
         service.recover()
+        recover_runs(conn, settings.data_dir)
         if args.command == "session" and args.session_command == "create":
             session = service.create_session(args.name, args.project)
             print(session.session_id)

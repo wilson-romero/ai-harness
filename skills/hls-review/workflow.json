@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "version": "1.0.0",
+  "inputs": {
+    "document": {"description": "Documento HLS a revisar", "required": true}
+  },
+  "steps": [
+    {"id": "review", "kind": "llm", "template": "templates/review.md", "memory": "project", "timeout_s": 300},
+    {
+      "id": "check",
+      "kind": "validate",
+      "of": "review",
+      "format": "markdown",
+      "max_bytes": 32768,
+      "required_headings": [
+        "Resumen",
+        "Alternativas",
+        "Restricciones",
+        "Requisitos no funcionales",
+        "Supuestos",
+        "Preguntas pendientes"
+      ]
+    }
+  ],
+  "output": "check"
+}

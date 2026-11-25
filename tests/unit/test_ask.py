@@ -163,3 +163,45 @@ def test_history_after_two_questions(cli):
         "[completed] assistant",
     ]
     assert lines[0].endswith("first") and lines[2].endswith("second")
+
+
+# -- text that is not valid Unicode (skill-engine review 8.6) ------------------------------------
+
+
+class SurrogateProvider:
+    """A synthetic provider whose answer holds a lone surrogate: not encodable as UTF-8."""
+
+    name = "mock"
+    synthetic_content = True
+
+    async def ask(self, request, on_sent):
+        on_sent()
+        return "respuesta \ud800 rota"
+
+
+async def test_an_answer_that_is_not_valid_unicode_fails_the_request(conn, make_service):
+    service = make_service({"mock": SurrogateProvider()})
+    session = service.create_session("S")
+    response = await service.ask(str(session.session_id), "hola")
+    assert response.status is RequestStatus.FAILED and response.text is None
+    assert [tuple(r) for r in conn.execute("SELECT status, error_code FROM requests")] == [
+        ("failed", "invalid_text")]
+    assert [tuple(r) for r in conn.execute("SELECT role FROM messages")] == [("user",)]
+
+
+async def test_a_prompt_that_is_not_valid_unicode_is_rejected(conn, make_service):
+    service = make_service()
+    session = service.create_session("S")
+    with pytest.raises(InvalidInput, match="not valid Unicode"):
+        await service.ask(str(session.session_id), "hola \udcff")
+    assert conn.execute("SELECT count(*) FROM requests").fetchone()[0] == 0
+
+
+def test_cli_prompt_with_invalid_utf8_bytes(data_dir):
+    from tests.conftest import run_main
+
+    session_id = run_main(data_dir, "session", "create", "S").stdout.strip()
+    result = run_main(data_dir, "ask", session_id, "hola \udcff")  # the byte 0xff in argv
+    assert result.returncode == 1 and "Traceback" not in result.stderr
+    assert "not valid Unicode" in result.stderr
+    assert query(data_dir, "SELECT count(*) FROM requests") == [(0,)]

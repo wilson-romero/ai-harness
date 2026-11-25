@@ -122,7 +122,8 @@ def test_escape_sequence_neutralised(search, vault):
     (row,) = _rows(out)
     assert len(row) == 4  # the tab inside the note did not add a column
     assert "\x1b" not in out and "‮" not in out
-    assert row[3].startswith("alerta [31mroja[0m con tab")
+    # Since the review of 2026-11-24 the whole sequence goes, not only its ESC byte.
+    assert row[3].startswith("alerta roja con tab")
 
 
 def test_credential_in_a_snippet(search, vault):

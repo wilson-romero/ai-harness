@@ -30,6 +30,12 @@ HARNESS_VARS = [
     "HARNESS_MOCK_DELAY_MS",
     "HARNESS_VAULT_ROOT",
     "HARNESS_MEMORY_CONTEXT_MAX_BYTES",
+    "HARNESS_MOCK_RESPONSES",
+    "HARNESS_SKILLS_DIR",
+    "HARNESS_APPROVAL_TTL_S",
+    "HARNESS_MCP_CONFIG",
+    # Set in every MCP server the harness starts; a test run inside one would be refused.
+    "AI_HARNESS_MCP_CHILD",
     # No longer read by the harness; cleared so a developer's shell cannot change a test.
     "HARNESS_PROFILE",
 ]

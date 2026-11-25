@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "version": "0.1.0",
+  "inputs": {
+    "source": {"description": "Texto fuente sintético", "required": true}
+  },
+  "steps": [
+    {"id": "extract", "kind": "llm", "template": "templates/extract.md", "memory": "project"},
+    {
+      "id": "fields",
+      "kind": "validate",
+      "of": "extract",
+      "format": "json",
+      "fields": {
+        "title": {"type": "string", "single_line": true, "max_length": 120},
+        "kind": {"type": "string", "enum": ["decision", "lesson"]},
+        "date": {"type": "string", "format": "date", "required": false},
+        "points": {"type": "string_list", "max_items": 5, "max_length": 200},
+        "priority": {"type": "integer", "min": 1, "max": 5},
+        "urgent": {"type": "boolean", "required": false}
+      }
+    },
+    {"id": "summary", "kind": "llm", "template": "templates/summary.md"},
+    {"id": "final", "kind": "validate", "of": "summary", "format": "text", "min_bytes": 1, "max_bytes": 4096}
+  ],
+  "output": "final"
+}
