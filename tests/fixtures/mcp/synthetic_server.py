@@ -31,6 +31,8 @@ MODES = (
     # added after the independent review of 2026-11-24
     "regex-bomb", "stderr-flood", "grandchild", "grandchild-escapes", "server-error",
     "destructive", "forge-output", "paged", "result-over-64k", "line-over-limit",
+    # added on 2026-11-25: stderr floods whose outcome does not depend on timing
+    "stderr-noisy", "stderr-after-answer",
 )
 # A pattern with catastrophic backtracking and the subject that triggers it: a regex engine
 # that runs it never finishes (seconds per extra character, exponential).
@@ -173,8 +175,6 @@ class Server:
         if self.mode == "chatty-stderr":
             sys.stderr.write(STDERR_CANARY + "\n")
             sys.stderr.flush()
-        if self.mode == "stderr-flood":
-            threading.Thread(target=self.flood_stderr, daemon=True).start()
         if self.mode in ("grandchild", "grandchild-escapes"):
             self.start_grandchild(escape=self.mode == "grandchild-escapes")
         stdin = sys.stdin.buffer
@@ -187,6 +187,9 @@ class Server:
             except ValueError:
                 continue
             self.handle(message)
+        if self.mode == "stderr-after-answer":
+            # Only once stdin is closed: the harness has the result before the first byte.
+            self.flood_stderr(256)
         if self.mode == "ignore-close":
             while True:  # stdin is closed; stay alive until killed
                 time.sleep(1)
@@ -273,6 +276,14 @@ class Server:
         if mode == "regex-bomb":
             self.text(request_id, "bomba", structured={"project": BOMB_SUBJECT})
             return
+        if mode == "stderr-flood":
+            # 256 MiB (enough to show an unbounded log, not to fill a disk) BEFORE answering:
+            # the harness must pass its 64 MiB cap before any answer can exist.
+            self.flood_stderr(256)
+            self.text(request_id, "respuesta tras la inundacion")
+            return
+        if mode == "stderr-noisy":
+            self.flood_stderr(8)  # over the 1 MiB kept, under the 64 MiB cap; then answer
         if mode == "server-error":
             self.error(request_id, -32000, "error generico del servidor sintetico")
             return
@@ -313,10 +324,10 @@ class Server:
         else:
             self.text(request_id, f"herramienta sintetica {name} llamada", is_error=False)
 
-    def flood_stderr(self) -> None:
-        # 256 MiB at most: enough to show an unbounded log, not enough to fill a disk.
+    def flood_stderr(self, mebibytes: int) -> None:
+        """Write to stderr in the calling thread: nothing else happens until it is written."""
         chunk = b"E" * (1024 * 1024)
-        for _ in range(256):
+        for _ in range(mebibytes):
             try:
                 sys.stderr.buffer.write(chunk)
                 sys.stderr.buffer.flush()

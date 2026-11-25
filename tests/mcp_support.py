@@ -3,6 +3,10 @@
 Liveness is checked without any platform branch and without signals (`os.kill(pid, 0)` would
 kill the process on Windows): the synthetic server rewrites a heartbeat file every 100 ms
 while it lives, so a heartbeat that stops changing means the process is gone.
+
+Revised on 2026-11-25 (a flaky test on a loaded machine): "stopped" needs the beat to stay
+still for `QUIET_S` (ten missed beats), and "alive" only needs one change within `ALIVE_S`. A
+live process on a busy machine can pause for half a second; it does not pause for three.
 """
 
 from __future__ import annotations
@@ -42,6 +46,43 @@ DEFAULT_TOOLS = {
 }
 # A hung test aborts with a traceback in two minutes instead of hanging the run for hours.
 HANG_GUARD_S = 120
+QUIET_S = 1.0  # a heartbeat unchanged this long: the process is gone
+ALIVE_S = 3.0  # a heartbeat that changes within this: the process lives
+POLL_S = 0.1
+
+
+def _read_beat(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def heartbeat_stopped(path: Path, within_s: float = 5.0) -> bool:
+    """True once the file has not changed for `QUIET_S`, if that happens within `within_s`.
+    A file that does not exist counts as stopped: callers that need it to exist check that."""
+    deadline = time.monotonic() + within_s
+    previous = _read_beat(path)
+    still_since = time.monotonic()
+    while time.monotonic() < deadline:
+        time.sleep(POLL_S)
+        current = _read_beat(path)
+        if current != previous:
+            previous, still_since = current, time.monotonic()
+        elif time.monotonic() - still_since >= QUIET_S:
+            return True
+    return False
+
+
+def heartbeat_alive(path: Path, within_s: float = ALIVE_S) -> bool:
+    """True if the file changes at least once within `within_s`."""
+    deadline = time.monotonic() + within_s
+    first = _read_beat(path)
+    while time.monotonic() < deadline:
+        time.sleep(POLL_S)
+        if _read_beat(path) != first:
+            return True
+    return False
 
 
 @pytest.fixture
@@ -98,28 +139,15 @@ class Server:
         path = self.state / "calls.log"
         return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
 
-    def _beat(self) -> str | None:
-        try:
-            return (self.state / "heartbeat").read_text(encoding="utf-8")
-        except OSError:
-            return None
-
-    def stopped(self, within_s: float = 3.0) -> bool:
-        """True once the heartbeat has not changed for 0.5 s, if that happens within the bound."""
+    def stopped(self, within_s: float = 5.0) -> bool:
+        """True once the heartbeat has stayed still for `QUIET_S`, within the bound."""
         if not self.started:
             return True
-        deadline = time.monotonic() + within_s
-        previous = self._beat()
-        while time.monotonic() < deadline:
-            time.sleep(0.5)
-            current = self._beat()
-            if current == previous:
-                return True
-            previous = current
-        return False
+        return heartbeat_stopped(self.state / "heartbeat", within_s)
 
     def alive(self) -> bool:
-        return self.started and not self.stopped(within_s=1.2)
+        # Not "stopped within ALIVE_S": a dead server answers in QUIET_S, a live one in ALIVE_S.
+        return self.started and not heartbeat_stopped(self.state / "heartbeat", ALIVE_S)
 
 
 def kill_survivors(server: Server) -> None:
