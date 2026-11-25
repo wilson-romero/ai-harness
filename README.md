@@ -4,7 +4,7 @@ Copiloto de arquitectura que se ejecuta en local. Mantiene varias conversaciones
 
 **Es un proyecto educativo:** sirve para aprender a construir un harness, no está pensado para uso en producción. Se ejercita solo con prompts sintéticos y no guarda contenido real. Quien lo use para automatizar un servicio real es responsable de cumplir las condiciones de uso de ese servicio.
 
-Estado: **Corte 1 · Esqueleto**, **Corte 3 · Memoria** y **Corte 4 · Skills**. Sesiones, historial y recuperación funcionan con un proveedor Mock; el harness lee una segunda memoria en Markdown compatible con `claude-memory-system` y ejecuta Skills declarativos. Su única escritura en esa memoria es una nota de decisión nueva en `Decisiones/`, después de una aprobación humana (ver [Skills de arquitectura](#skills-de-arquitectura)). El plan de entregas está en [`docs/plan/2026-11-24-ai-harness-cortes.md`](docs/plan/2026-11-24-ai-harness-cortes.md).
+Estado: **Corte 1 · Esqueleto**, **Corte 3 · Memoria**, **Corte 4 · Skills** y **Corte 9 · Interfaz conversacional** ([Conversación](#conversación)). Sesiones, historial y recuperación funcionan con un proveedor Mock; el harness lee una segunda memoria en Markdown compatible con `claude-memory-system` y ejecuta Skills declarativos. Su única escritura en esa memoria es una nota de decisión nueva en `Decisiones/`, después de una aprobación humana (ver [Skills de arquitectura](#skills-de-arquitectura)). El plan de entregas está en [`docs/plan/2026-11-24-ai-harness-cortes.md`](docs/plan/2026-11-24-ai-harness-cortes.md).
 
 ## Requisitos
 
@@ -28,6 +28,87 @@ uv run python main.py history SESSION_ID
 ```
 
 `session create` imprime el identificador de la sesión. Los comandos aceptan solo el UUID completo, no un prefijo. Los resultados salen por stdout; los avisos y los errores, por stderr, siempre en UTF-8 (también con la salida redirigida en Windows). Código de salida: 0 hecho, 1 error controlado, 2 uso incorrecto, 130 interrumpido con Ctrl+C.
+
+## Conversación
+
+Además de las órdenes sueltas, el harness se usa como una conversación: se entra una vez y se escriben preguntas y comandos.
+
+```sh
+uv run python main.py                                  # en una terminal: abre la conversación
+uv run python main.py chat --project demo-alpha        # sesión nueva con la memoria de un proyecto
+uv run python main.py chat --session SESSION_ID        # continúa una sesión
+```
+
+`main.py` sin argumentos abre la conversación solo si la entrada y la salida son una terminal; en un script o con una tubería sigue mostrando la ayuda. `chat` sin terminal termina con código 2 sin crear ni tocar ninguna sesión: para scripts están las órdenes sueltas, que no cambian.
+
+Al entrar se ve el proveedor, la sesión y el proyecto. Una línea normal es una pregunta en esa sesión, con los mismos estados y reglas que `ask` (y la memoria del proyecto, si la sesión lo tiene, como `ask --project`). Una línea que empieza por `/` es un comando y **nunca** se envía al proveedor, tampoco si está mal escrito; para preguntar algo que empieza por `/`, se escribe `//`.
+
+| Comando | Qué hace |
+|---|---|
+| `/help` | Lista los comandos. |
+| `/status` | Sesión, proyecto, proveedor, última solicitud y adjunto pendiente. |
+| `/new [--project SLUG] [NOMBRE]` | Pasa a una sesión nueva; la anterior queda libre y sin cambios. |
+| `/sessions` | Lista numerada de sesiones. |
+| `/resume N` | Pasa a la sesión número N de la última `/sessions` (un número, no un identificador). |
+| `/history` | Historial de esta sesión, y de ninguna otra. |
+| `/memory TÉRMINOS` | Lo mismo que `memory search` (dentro del proyecto de la sesión, si lo tiene). |
+| `/context` | Lo mismo que `memory context` para el proyecto de la sesión. |
+| `/skill NOMBRE [CLAVE=VALOR…] [--file CLAVE=RUTA…]` | Ejecuta un Skill en esta sesión, como `skill run`. Su aprobación se pide ahí mismo, con el aviso de siempre. |
+| `/file RUTA` | Adjunta un fichero de texto (hasta 64 KiB, UTF-8, un fichero normal: no un enlace, una tubería ni un dispositivo) a la **siguiente** pregunta. Va marcado como datos y no se guarda nunca. |
+| `/exit` | Sale. El fin de entrada (Ctrl+D; en Windows, Ctrl+Z e Intro) también. |
+
+- **Ctrl+C** durante una pregunta la interrumpe: queda `uncertain` si el prompt ya había salido, `failed` si no, nunca se reenvía y la conversación sigue. Ctrl+C mientras se espera una línea solo recuerda cómo salir. Ctrl+C durante `/skill` lo detiene como en `skill run`. Ctrl+C en el aviso de aprobación lo deja sin decidir: no se aplica nada.
+- **La conversación ocupa su sesión** mientras está abierta: otro `chat` o un `ask` sobre esa sesión reciben «in use by another process» / «question in progress». Si el proceso muere, la sesión queda libre sola. Una ejecución de Skill que quede esperando aprobación se continúa con `skill resume` cuando la conversación ya no tiene esa sesión (`/new`, `/resume` o `/exit`).
+- **Lo que no es del harness lleva `| ` delante**: respuestas del proveedor, historial, notas de memoria y salida de Skills salen saneadas (sin secuencias de escape ni caracteres de control o invisibles, con las credenciales conocidas enmascaradas) y con ese prefijo, que ninguna línea del propio harness usa. Una pregunta de más de 64 KiB se rechaza sin registrar nada. El contenido dentro del aviso de aprobación se muestra como en `skill run`, entre sus dos reglas.
+- **Qué no hace esta versión:** ni paneles, ni colores, ni barra de estado; la respuesta aparece entera, no poco a poco; el modelo no ejecuta herramientas por su cuenta ni hay llamadas MCP desde la conversación (`mcp call` sigue siendo una orden suelta); no hay edición avanzada de la línea, autocompletado ni historial de lo escrito entre ejecuciones.
+
+### Paso a paso con el Mock
+
+Con una copia del vault sintético en una carpeta temporal y una respuesta guionizada para el Skill `architecture-memory`. En PowerShell, desde la raíz del repositorio:
+
+```powershell
+$w = Join-Path $env:TEMP "ai-harness-chat"
+Remove-Item -Recurse -Force $w -ErrorAction SilentlyContinue
+New-Item -ItemType Directory $w | Out-Null
+Copy-Item -Recurse tests\fixtures\vault-synthetic "$w\vault"
+@{ "tarea: architecture-memory/extract" = (Get-Content -Raw -Encoding utf8 tests\fixtures\skill-inputs\decision-ok.json) } | ConvertTo-Json | Set-Content -Encoding utf8 "$w\respuestas.json"
+$env:HARNESS_DATA_DIR = "$w\data"
+$env:HARNESS_VAULT_ROOT = "$w\vault"
+$env:HARNESS_MOCK_RESPONSES = "$w\respuestas.json"
+$env:HARNESS_MOCK_DELAY_MS = "0"
+uv run python main.py
+```
+
+En zsh o bash:
+
+```sh
+w="$(mktemp -d)"
+cp -R tests/fixtures/vault-synthetic "$w/vault"
+python3 -c 'import json,sys; print(json.dumps({"tarea: architecture-memory/extract": open(sys.argv[1], encoding="utf-8").read()}))' tests/fixtures/skill-inputs/decision-ok.json > "$w/respuestas.json"
+export HARNESS_DATA_DIR="$w/data" HARNESS_VAULT_ROOT="$w/vault" HARNESS_MOCK_RESPONSES="$w/respuestas.json" HARNESS_MOCK_DELAY_MS=0
+uv run python main.py
+```
+
+Dentro de la conversación (las líneas son iguales en las dos terminales; en zsh la ruta del fichero va con `/`):
+
+```text
+/new --project demo-alpha "Demo Corte 9"
+¿Qué decisiones de mensajería tiene el proyecto?
+¿Qué riesgos ves en esa decisión?
+/context
+/skill architecture-memory --file source=tests\fixtures\skill-inputs\fuente-decision.md
+```
+
+Cada pregunta muestra una línea `context: demo-alpha, 7 note(s) included…` y la respuesta del Mock con `| ` delante. `/context` muestra el bloque de memoria. El Skill muestra el aviso `Approval requested` con la nota entera, su destino `Decisiones/…` y su hash; al escribir los 8 primeros caracteres del hash se ve `applied: Decisiones/…md` y `skill: run … is completed`. Después, `/status` (anotar el identificador de la sesión) y `/exit`.
+
+Para interrumpir una pregunta lenta, se vuelve a entrar en la misma sesión con el Mock lento:
+
+```powershell
+$env:HARNESS_MOCK_DELAY_MS = "60000"
+uv run python main.py chat --session SESSION_ID
+```
+
+(en zsh: `HARNESS_MOCK_DELAY_MS=60000 uv run python main.py chat --session SESSION_ID`). Se escribe una pregunta, se pulsa Ctrl+C durante `waiting for the provider` y se ve `interrupted: request … is uncertain: the prompt may have reached the provider; it was not resent`; la conversación sigue. `/history` muestra las preguntas anteriores, el marcador del Skill y la pregunta interrumpida como `[uncertain]`. `/exit` sale con código 0.
 
 ## Memoria del proyecto
 
@@ -390,4 +471,4 @@ Solo una pregunta a la vez por sesión: una segunda pregunta mientras la primera
 - El repositorio es público: lee [`SECURITY.md`](SECURITY.md) y activa el hook una vez por clon con `git config core.hooksPath .githooks`.
 - Sin código condicionado por plataforma fuera de Enterprise Architect: lo que pasa en macOS es lo que corre en Windows.
 - Puerta local antes de un merge: `scripts/verify.sh` sobre el árbol limpio.
-- Demos, iguales en macOS y Windows (PowerShell incluido): `uv run python scripts/demo_session_core.py` (Corte 1), `uv run python scripts/demo_project_memory.py` (Corte 3), `uv run python scripts/demo_skill_engine.py` (Corte 4, motor de Skills) y `uv run python scripts/demo_mcp_gateway.py` (Corte 5, pasarela MCP). Terminan en `demo: PASS`.
+- Demos, iguales en macOS y Windows (PowerShell incluido): `uv run python scripts/demo_session_core.py` (Corte 1), `uv run python scripts/demo_project_memory.py` (Corte 3), `uv run python scripts/demo_skill_engine.py` (Corte 4, motor de Skills), `uv run python scripts/demo_mcp_gateway.py` (Corte 5, pasarela MCP) y `uv run python scripts/demo_interactive_shell.py` (Corte 9, conversación). Terminan en `demo: PASS`.

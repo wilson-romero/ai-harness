@@ -136,6 +136,7 @@ Premisas **sin medir**, cada una con su tarea:
 - **Alternativas rechazadas:**
   - Un comando `/approve`: separa la decisión del contenido mostrado, que es justo lo que el diseño de la aprobación evita.
 - **Impacto:** spec (Skills y aprobación dentro de la conversación). Sigue valiendo el límite declarado en `skill-engine`: la aprobación no prueba que haya una persona delante.
+- **Añadido el 2026-11-25 (implementación):** el motor toma el bloqueo de la sesión en `run` y `resume`, y la conversación ya lo tiene (D4). `SkillEngine` gana una opción `held_session`: para esa sesión usa el bloqueo que ya tiene quien lo llama en vez de pedir otro (que se rechazaría). Solo la pasa la conversación, con su propia sesión. Una ejecución que queda esperando aprobación se continúa con `skill resume` cuando la conversación ha dejado la sesión; la conversación no tiene `/skill resume` en esta versión.
 
 ### D9 · Texto ajeno marcado y saneado al mostrarlo
 
@@ -144,6 +145,7 @@ Premisas **sin medir**, cada una con su tarea:
 - **Alternativas rechazadas:**
   - Colores para distinguir: son secuencias de escape, dependen de la terminal y no existen al redirigir.
 - **Impacto:** spec (Salida segura y distinguible).
+- **Añadido el 2026-11-25 (implementación):** el prefijo del texto ajeno es `| ` y ninguna línea del harness empieza por `|`; el texto ajeno se corta a 256 Ki caracteres antes de sanearlo (se dice cuántos quedan fuera) y una pregunta de más de 64 KiB se rechaza sin registrar nada. Límite que queda: el contenido de una propuesta dentro del aviso de aprobación lo imprime el motor como en `skill run`, normalizado (sin controles ni invisibles) pero sin prefijo, entre sus dos reglas. Una propuesta que imite el final del aviso no puede conceder nada (el código es el del hash real), pero puede confundir; prefijarla cambiaría el aviso de `skill run` y queda para el change de apariencia.
 
 ### D10 · Comandos de la primera versión
 
