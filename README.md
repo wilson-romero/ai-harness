@@ -2,6 +2,8 @@
 
 Copiloto de arquitectura que se ejecuta en local. Mantiene varias conversaciones persistentes con un proveedor de lenguaje y, en cortes posteriores, usará Microsoft Copilot Web, herramientas MCP, Skills, una segunda memoria en Markdown y Enterprise Architect.
 
+**Es un proyecto educativo:** sirve para aprender a construir un harness, no está pensado para uso en producción. Se ejercita solo con prompts sintéticos y no guarda contenido real. Quien lo use para automatizar un servicio real es responsable de cumplir las condiciones de uso de ese servicio.
+
 Estado: **Corte 1 · Esqueleto** y **Corte 3 · Memoria**. Sesiones, historial y recuperación funcionan con un proveedor Mock, y el harness lee (sin escribir nunca) una segunda memoria en Markdown compatible con `claude-memory-system`. El plan de entregas está en [`docs/plan/2026-11-24-ai-harness-cortes.md`](docs/plan/2026-11-24-ai-harness-cortes.md).
 
 ## Requisitos
