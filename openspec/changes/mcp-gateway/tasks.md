@@ -104,6 +104,20 @@ Una revisión independiente sobre `d327eb5` no encontró ningún modo de saltars
 - [x] 6.14 Verificación final sobre el árbol limpio. Oráculo: `scripts/verify.sh` → `verify: PASS on <SHA>`, `uv lock --check`, `check_public_safety`, la demo `scripts/demo_mcp_gateway.py` → `demo: PASS`, y `pgrep` sin procesos de prueba.
   - Recibo: en el informe (el SHA es el de este commit).
 
+- [x] 6.15 (2026-11-25) Test inestable: `test_a_server_flooding_stderr_is_capped_and_stopped` falló en 2 de 3 ejecuciones completas en otra rama y pasaba solo. Oráculo: el resultado de cada escenario de stderr no depende del reloj, y la batería completa pasa 5 veces seguidas sin ningún fallo.
+  - Causa confirmada (no supuesta): en 3 ejecuciones completas aquí y 8 repeticiones bajo carga (20 procesos ocupando las 10 CPU) el test pasó siempre, así que se instrumentó una copia desechable de `HEAD` (`mktemp -d`). En las 6 repeticiones, el servidor contestó la llamada con solo 1 MiB escrito en stderr, y el harness ya tenía el resultado completo (227 bytes) antes del corte. El `stderr_too_large` llegaba después, en los ~2,5 s del cierre (0,5 s de vaciado y 2 s de gracia), y solo porque el proceso de sesión daba prioridad a ese fallo sobre un resultado ya recibido. Con esa ventana reducida a 0,02 s, el mismo test falló 3 de 3 veces (`assert 0 == 1`: llamada `completed`). El resultado dependía de cuántos MiB leyera el harness durante el cierre.
+  - Cambio:
+    - el modo `stderr-flood` escribe sus 256 MiB en el mismo hilo **antes** de contestar, así que el corte llega siempre antes de que pueda existir una respuesta. Con la ventana de 0,02 s pasa 3 de 3 veces;
+    - regla del producto, especificada (D4 revisada el 2026-11-25, dos escenarios nuevos con sus tests `test_a_noisy_server_that_answers_completes_with_its_stderr_cut` y `test_a_flood_after_the_answer_keeps_the_result`): si el resultado estaba completo antes del corte, vale, el servidor se detiene igual y el comando avisa; más de 1 MiB de stderr también avisa.
+  - Otros tests frágiles encontrados y corregidos:
+    - (a) «parado» era medio segundo sin latido: una máquina cargada lo finge en un proceso vivo. Ahora hace falta 1 s de silencio, «vivo» es un latido en 3 s, y un latido que nunca existió hace fallar el test en vez de darlo por parado;
+    - (b) el test del nieto que escapa exigía un latido cada 0,5 s durante 1,5 s: frágil bajo carga;
+    - (c) el sustituto colgado del proceso de sesión podía recibir Ctrl+C antes de que su nieto latiera: ahora se cuelga solo cuando el nieto late;
+    - (d) el test de sockets podía perder el informe del proceso de sesión si el árbol se mataba antes de que corrieran sus manejadores de salida: el harness le deja hasta 2 s, nunca más allá del plazo, para salir solo;
+    - (e) cotas medidas más un margen (`SHUTDOWN_MARGIN_S` = 7 s sobre unos 5,5 s medidos; `elapsed < 10` en `long-line`): ahora son la cota garantizada, y que el plazo fue el de la fase lo prueba el mensaje.
+    - Sin puertos ni ficheros compartidos (todo bajo `tmp_path`) y sin `sleep` como sincronización: las esperas del driver son retrasos después de una señal por fichero, no la señal.
+  - Recibo de estabilidad (macOS arm64, Python 3.14.8): 5 ejecuciones completas seguidas, 854 pasados cada una, ningún fallo, 189 + 187 + 188 + 181 + 182 s de reloj (927 s, unos 15,5 min). Antes, otra completa (854, 180 s) y 2 repeticiones de `tests/integration/test_mcp_*` con 10 procesos ocupando la CPU (58 pasados cada una). La batería tarda unos 45 s más que antes (138 → ~185 s) por la ventana de silencio de 1 s, y porque otra sesión corría tests en la máquina a la vez.
+
 ## Workflow follow-up
 
 - Implementar y mergear `mcp-gateway` antes de empezar el grupo 2 de `ea-read`, que lo consume.
