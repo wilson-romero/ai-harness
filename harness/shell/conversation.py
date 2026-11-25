@@ -134,21 +134,33 @@ def wrap_rows(line: str, columns: int | None, first: str = "") -> list[str]:
     The terminal would wrap a longer line by itself, and the part it moves to the next row
     would start that row with whatever the text says there: a foreign line could start a row
     without its prefix. So every row is cut here, below `columns`: the first row starts with
-    `first`, every other with CONTINUATION_PREFIX. `columns` None: no cut. Linear.
+    `first`, every other with CONTINUATION_PREFIX. A row ends after its last space when it has
+    one, so that words (an identifier, a command) stay whole; the rows put back together are
+    the line. `columns` None: no cut. Linear: a character moves to the next row at most once.
     """
     if columns is None:
         return [first + line]
     limit = max(columns, MIN_COLUMNS) - 1  # never the last column: some terminals wrap there
+    lead = len(CONTINUATION_PREFIX)
     rows: list[str] = []
-    current, used, start = [first], len(first), len(first)
+    current: list[str] = [first]
+    widths: list[int] = [len(first)]
+    used = len(first)
+    space, used_to_space = -1, 0  # the row's last space: its index in `current`, width up to it
     for char in line:
         width = _char_columns(char)
-        if used + width > limit and used > start:
-            rows.append("".join(current))
-            current, used = [CONTINUATION_PREFIX], len(CONTINUATION_PREFIX)
-            start = used
+        if used + width > limit and len(current) > 1:
+            cut = len(current)
+            if space > 0 and lead + used - used_to_space + width <= limit:
+                cut = space + 1  # after the space; what follows it goes to the next row
+            rows.append("".join(current[:cut]))
+            current, widths = [CONTINUATION_PREFIX, *current[cut:]], [lead, *widths[cut:]]
+            used, space = sum(widths), -1
         current.append(char)
+        widths.append(width)
         used += width
+        if char == " ":
+            space, used_to_space = len(current) - 1, used
     rows.append("".join(current))
     return rows
 
@@ -438,7 +450,7 @@ class Conversation:
             self._say("interrupted: /skill was stopped; no run was left open")
             return
         run_id, status = run
-        leave = "leave this session (/new, /resume or /exit), then run"
+        leave = "To go on, leave this session (/new, /resume or /exit) and run one of:"
         if status == "uncertain":
             steps: dict[str, str] = {}
             for key, step_status in self._deps.conn.execute(
@@ -448,13 +460,20 @@ class Conversation:
             ):
                 steps[key] = step_status  # the last attempt wins
             key = next((k for k, s in steps.items() if s == "uncertain"), "?")
-            self._say(f"interrupted: skill run {run_id} is uncertain: step {key!r} may have "
-                      f"reached the provider; it was not resent. To go on, {leave} "
-                      f"`skill resume {run_id} --retry-step {key}` (asks again) or "
-                      f"`skill cancel {run_id}`")
+            self._say("\n".join([
+                f"interrupted: skill run {run_id} is uncertain: step {key!r} may have reached "
+                "the provider; it was not resent.",
+                leave,
+                f"  skill resume {run_id} --retry-step {key}",
+                f"  skill cancel {run_id}",
+            ]))
             return
-        self._say(f"interrupted: skill run {run_id} is {status}; nothing was resent. To go on, "
-                  f"{leave} `skill resume {run_id}` or `skill cancel {run_id}`")
+        self._say("\n".join([
+            f"interrupted: skill run {run_id} is {status}; nothing was resent.",
+            leave,
+            f"  skill resume {run_id}",
+            f"  skill cancel {run_id}",
+        ]))
 
     # -- sessions (D4, D10) -----------------------------------------------------------------------
 

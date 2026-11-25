@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import random
 import time
 import unicodedata
 
@@ -15,6 +16,7 @@ from harness.shell.conversation import (
     MAX_SHOWN_CHARS,
     MIN_COLUMNS,
     foreign_lines,
+    wrap_rows,
 )
 from harness.shell.terminal import ConsoleTerminal
 from harness.skills.approvals import APPROVAL_RULE
@@ -127,6 +129,36 @@ def test_every_row_of_foreign_text_starts_with_a_mark_and_fits(columns):
         else:
             lines.append(row[len(FOREIGN_PREFIX):])
     assert "\n".join(lines) == text
+
+
+def test_a_cut_keeps_words_whole_and_loses_nothing():
+    word = "01a21446-6c02-750c-9c1e-6ea24471ab8e"
+    rows = wrap_rows(f"run skill resume {word} --retry-step draft", 40)
+    assert rows == ["run skill resume ", f"{CONTINUATION_PREFIX}{word} ",
+                    f"{CONTINUATION_PREFIX}--retry-step draft"]
+    rng = random.Random(20261125)
+    alphabet = "ab cd 表́\tx-"
+    for _ in range(300):
+        line = "".join(rng.choice(alphabet) for _ in range(rng.randrange(0, 400)))
+        columns = rng.randrange(1, 120)
+        for first in ("", FOREIGN_PREFIX):
+            rows = wrap_rows(line, columns, first)
+            limit = max(columns, MIN_COLUMNS) - 1
+            assert all(_cols(row) <= limit for row in rows), (line, columns)
+            assert all(row.startswith(CONTINUATION_PREFIX) for row in rows[1:])
+            rebuilt = rows[0][len(first):] + "".join(r[len(CONTINUATION_PREFIX):]
+                                                     for r in rows[1:])
+            assert rebuilt == line
+
+
+def _cols(row: str) -> int:
+    def one(c: str) -> int:
+        if c == "\t":
+            return 8
+        if unicodedata.combining(c):
+            return 0
+        return 2 if unicodedata.east_asian_width(c) in ("W", "F") else 1
+    return sum(one(c) for c in row)
 
 
 async def test_a_long_answer_cannot_start_a_row_with_a_harness_line(conn, data_dir):

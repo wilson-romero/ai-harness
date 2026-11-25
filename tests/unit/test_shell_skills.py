@@ -87,6 +87,19 @@ async def test_a_rejected_approval(conn, data_dir, tmp_path):
     assert any(line.startswith("last request:") for line in terminal.shown)  # still open
 
 
+async def test_wrong_answers_typed_ahead_leave_the_approval_pending(conn, data_dir, tmp_path):
+    """Review 2026-11-25 (limit of type-ahead, D8): lines typed before the prompt can use up
+    its attempts, but then nothing is decided: the approval stays pending for `skill resume`,
+    which asks again with all its attempts."""
+    conversation, terminal, effect, _ = _setup(conn, data_dir, tmp_path, [LINE, "/exit"],
+                                               ["hola", "/status", "otra cosa"])
+    assert await conversation.run() == 0
+    assert len(terminal.questions) == 3
+    assert effect.written() == []
+    assert _run_status(conn) == ["awaiting_approval"]
+    assert _approvals(conn) == ["pending"]
+
+
 async def test_ctrl_c_at_the_approval_prompt_leaves_it_undecided(conn, data_dir, tmp_path):
     conversation, terminal, effect, _ = _setup(conn, data_dir, tmp_path, [LINE, "/exit"],
                                                [INTERRUPT])
@@ -163,9 +176,10 @@ async def test_ctrl_c_during_the_llm_step_leaves_a_run_that_can_be_ended(conn, d
     assert [tuple(row) for row in conn.execute("SELECT status FROM requests")] == [
         ("uncertain",)]
     assert provider.calls == 1  # never resent
-    told = next(line for line in terminal.shown if line.startswith("interrupted: skill run"))
-    assert f"`skill resume {run_id} --retry-step draft`" in told
-    assert f"`skill cancel {run_id}`" in told
+    told = next(i for i, line in enumerate(terminal.shown)
+                if line.startswith("interrupted: skill run"))
+    assert f"  skill resume {run_id} --retry-step draft" in terminal.shown[told:]
+    assert f"  skill cancel {run_id}" in terminal.shown[told:]
     assert any(line.startswith("last request:") for line in terminal.shown)  # still open
     assert effect.written() == []
     engine = SkillEngine(conn, data_dir, conversation._service, None, default_timeout_s=5.0)
