@@ -65,9 +65,18 @@ Estados de las tareas que dependen de Wilson o de la UI real: **PASS**, **FAIL**
     - que el identificador llega a la URL después de la primera respuesta;
     - que el sandbox de Edge arranca con las políticas de la empresa (8.8).
     - Queda también el diagnóstico del bloqueo (8.2).
-- [ ] 3.3 Revisar las puertas de decisión con el resumen de 3.2 y editar `design.md` en su sitio: P1 falsa → corte **BLOCKED**; P2 falsa → D6 se decide con Wilson antes del grupo 5; P3 falsa → se quita la comprobación de turnos de D6; ninguna señal válida (P4 falsa) → D8 se replantea; mediana de arranque > 20 s → D3 se replantea. Hecho: cada premisa P1–P7 marcada en el design como medida (con fecha) o revertida, y specs releídas. Estado: **BLOCKED** hasta 3.2.
+- [x] 3.3 Revisar las puertas de decisión con el resumen de 3.2 y editar `design.md` en su sitio: P1 falsa → corte **BLOCKED**; P2 falsa → D6 se decide con Wilson antes del grupo 5; P3 falsa → se quita la comprobación de turnos de D6; ninguna señal válida (P4 falsa) → D8 se replantea; mediana de arranque > 20 s → D3 se replantea. Hecho: cada premisa P1–P7 marcada en el design como medida (con fecha) o revertida, y specs releídas. Estado: **BLOCKED** hasta 3.2.
+  - **Estado (2026-11-25): PASADA EN macOS con la cuenta de prueba universitaria.** No vale como medición corporativa. Puertas revisadas por el coordinador sobre el resumen de 3.2 (commit 09d5e2a, `verify: PASS`, 699 tests):
+    - P1, controlable: sí, en macOS y en Windows (8.1).
+    - P2, referencia en la URL: sí. Forma `path_segment 2` con prefijo `chat`, `conversation`; 3 de 3 conversaciones reabiertas solo con el identificador.
+    - P3, turnos visibles al reabrir: `[4, 4, 4]` de 4 enviados. Se mantiene la comprobación de turnos de D6.
+    - P4, señal de fin: tres señales estructurales válidas (`stop_hidden`, la elegida; `done_control`; `aria_busy`) y además `text_stable_4000`. `send_ready` nunca se cumple. D8 se mantiene.
+    - P5, login: reconocido por host (1 host de login).
+    - P6, tamaño: 32 000 caracteres aceptados (el mayor probado).
+    - P7, arranque: mediana 4,4 s, máximo 4,6 s (n = 7). Muy por debajo de los 20 s que reabrirían D3.
+  - **Pendiente:** la medición en el Windows corporativo de Wilson. Puede reabrir cualquiera de estas puertas; si lo hace, la decisión afectada se reescribe en su sitio y los grupos que dependan de ella vuelven a BLOCKED. Los grupos 4 y 5 se implementan ya sobre la medición de macOS, sin esperarla, por decisión de Wilson.
 
-## 4. Proveedor de Copilot (BLOCKED hasta 3.3)
+## 4. Proveedor de Copilot (desbloqueado el 2026-11-25 por 3.3 en macOS)
 
 - [ ] 4.1 Ampliar la interfaz y el servicio (D5): `LLMRequest.remote_ref` y `completed_turns`, `events` con `bound` y `warn`, `check()`, excepciones `AuthenticationRequired`, `RemoteConversationLost` y `ProviderUncertain`, rechazo de `ask` en sesión `closed`. Oráculo: la suite de `session-core` pasa sin cambios en sus tests; tests nuevos con proveedores de prueba (sin navegador) para cada excepción, con `SELECT status FROM requests` y `SELECT status, remote_ref FROM sessions`, incluido «Pregunta en una sesión cerrada» (`count(*) FROM requests` no cambia). Control negativo: lanzar `AuthenticationRequired` después de `on_sent` debe dar `uncertain`, no `authentication_required`.
 - [ ] 4.2 Registrar `copilot_web` en el registro y `check()` con la medición (D2, D12). Oráculo: tests de «Sesión creada con el proveedor de Copilot» (lanzador espía: 0 lanzamientos) y «Falta la medición de la sonda» (sin `ui.json`, con uno incompleto: código ≠ 0, `count(*) FROM requests` = 0, 0 lanzamientos).
@@ -75,7 +84,7 @@ Estados de las tareas que dependen de Wilson o de la UI real: **PASS**, **FAIL**
 - [ ] 4.4 Envío, detección de la respuesta nueva y su final, comprobación de longitud en el editor y límite de prompt (D8, D12). Oráculo: tests `edge` de «Respuesta que se escribe por partes», «Una respuesta anterior no cuenta», «Prompt demasiado largo» y «Prompt en el límite» (el servidor recibe exactamente esa longitud). Control negativo: configurar en el `ui.json` sintético una señal que la app adelanta y sin la guarda de estabilidad, y confirmar que el test de respuesta por partes falla (respuesta truncada).
 - [ ] 4.5 Pérdida del navegador según el punto de fallo (D10). Oráculo: tests `edge` de «Navegador cerrado antes del envío» (`failed`, contador = 0) y «Navegador cerrado durante la respuesta» (`uncertain`, contador = 1), y «Nada queda abierto tras un plazo vencido» (la siguiente pregunta obtiene el navegador).
 
-## 5. Identidad remota y solicitudes inciertas (BLOCKED hasta 3.3; si P2 es falsa, hasta la decisión de Wilson)
+## 5. Identidad remota y solicitudes inciertas (desbloqueado el 2026-11-25 por 3.3 en macOS: P2 cierta)
 
 - [ ] 5.1 Abrir conversación nueva sin `remote_ref`, `bound` con la forma medida y reutilización (D6). Oráculo: tests `edge` de «Tres sesiones, tres conversaciones» (3 `remote_ref` distintos con `SELECT`, y el servidor sintético registra cada prompt en la conversación de su sesión) y «Segunda pregunta en la misma conversación». Desde la revisión de D6 (8.7): `remote_ref` es solo el identificador (`ConversationRef.identifier_in`) y la reapertura usa `ConversationRef.url_for`; oráculo añadido: «Consulta tras el identificador ignorada» y «Fallo antes de conocer el identificador».
 - [ ] 5.2 Recuperación tras reinicio y conversación perdida (D6). Oráculo: tests con subprocesos reales de `main.py` de «Conversación recuperada en un proceso nuevo» y «Conversación remota desaparecida» (`failed`, sesión `closed`, contador sin cambios). Control negativo: quitar la comprobación de identificador en una copia desechable y ver que el test de conversación desaparecida falla porque el prompt llega a otra conversación.
