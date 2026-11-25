@@ -43,6 +43,11 @@ def read_text_limited(path: Path, *, max_bytes: int, what: str) -> str:
             raw = handle.read(max_bytes + 1)
     except OSError:
         raise InvalidInput(f"{what} cannot be read") from None
+    return decode_text_limited(raw, max_bytes=max_bytes, what=what)
+
+
+def decode_text_limited(raw: bytes, *, max_bytes: int, what: str) -> str:
+    """The checks of `read_text_limited` on bytes already read (at most `max_bytes + 1`)."""
     if len(raw) > max_bytes:
         raise InvalidInput(f"{what} is larger than {max_bytes} bytes")
     try:

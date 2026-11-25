@@ -787,3 +787,46 @@ def test_a_literal_redaction_mark_from_the_model_is_not_counted(conn, data_dir, 
     assert outcome.status == "completed", outcome.message
     assert "- Credenciales enmascaradas: 0.\n" in shown_note(terminal)
     assert not any("redacted:" in line for line in terminal.shown[0].splitlines())
+
+
+# -- 7.8 `apply` checks the verified proposal against its target and project -----------------------
+
+
+def _approved_proposal(conn, data_dir, vault):
+    """A run waiting for its approval, with its context and the proposal it would apply."""
+    engine, sessions, _ = engine_for(conn, data_dir, vault)
+    outcome = run(engine, sessions.create_session("Demo", "demo-alpha"))
+    assert outcome.status == "awaiting_approval"
+    state = engine._require_run(outcome.run_id)
+    from harness.skills.engine import _Run
+
+    session = sessions.require_session(state["session_id"])
+    skill = engine._load_same_skill(state)
+    run_state = _Run(outcome.run_id, session, sessions.provider_for(session), skill, {})
+    step = skill.step("save")
+    proposed = engine._propose(run_state, step)
+    effect = engine._effects[DecisionEffect.scope]
+    return effect, engine._effect_context(run_state, step), proposed.proposal
+
+
+@pytest.mark.parametrize("change", ["project", "name", "id8"])
+def test_apply_refuses_a_proposal_that_does_not_match_its_target(conn, data_dir, vault, change):
+    import dataclasses
+
+    from harness.skills.effects import EffectRefused
+
+    effect, context, proposal = _approved_proposal(conn, data_dir, vault)
+    if change == "project":
+        proposal = dataclasses.replace(
+            proposal, content=proposal.content.replace("project_slug: demo-alpha",
+                                                       "project_slug: demo-beta"))
+    elif change == "name":
+        proposal = dataclasses.replace(proposal, target="Decisiones/otra-nota.md")
+    else:
+        proposal = dataclasses.replace(proposal,
+                                       target=proposal.target[:-11] + "00000000.md")
+    before = fingerprint(vault)
+    with pytest.raises(EffectRefused) as caught:
+        effect.apply(context, proposal)
+    assert caught.value.code == "unsafe_target"
+    assert fingerprint(vault) == before

@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import stat
 import sys
 from pathlib import Path
 
 from harness.config import Settings
 from harness.core.errors import UsageError
 from harness.core.service import SessionService
-from harness.core.strict_json import read_text_limited
+from harness.core.strict_json import decode_text_limited
 from harness.memory.config import ensure_data_dir_outside_vault, load_memory_settings
 from harness.memory.context import ProjectContext, build_context
 from harness.providers.registry import provider_factory
@@ -129,15 +130,47 @@ def _read_inputs(args: argparse.Namespace) -> dict[str, str]:
         inputs[name] = value
     for raw in args.input_file:
         name, value = add(raw, "--input-file")
-        path = Path(value)
-        try:
-            size = path.stat().st_size
-        except OSError:
-            raise UsageError(f"input file for {name!r} cannot be read") from None
-        if size > MAX_INPUT_BYTES:
-            raise UsageError(f"input {name!r} is larger than {MAX_INPUT_BYTES} bytes")
-        inputs[name] = read_text_limited(path, max_bytes=MAX_INPUT_BYTES, what=f"input {name!r}")
+        inputs[name] = _read_input_file(name, Path(value))
     return inputs
+
+
+def _read_input_file(name: str, path: Path) -> str:
+    """A regular file only, opened without blocking and checked on the open descriptor
+    (2026-11-25, independent review): a pipe, a device or a folder is refused at once instead
+    of waiting forever, and a file swapped after the `stat` is refused too."""
+    try:
+        info = path.stat()
+    except OSError:
+        raise UsageError(f"input file for {name!r} cannot be read") from None
+    if not stat.S_ISREG(info.st_mode):
+        raise UsageError(f"input file for {name!r} is not a regular file")
+    if info.st_size > MAX_INPUT_BYTES:
+        raise UsageError(f"input {name!r} is larger than {MAX_INPUT_BYTES} bytes")
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        raise UsageError(f"input file for {name!r} cannot be read") from None
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
+            info.st_dev, info.st_ino
+        ):
+            raise UsageError(f"input file for {name!r} is not a regular file")
+        chunks: list[bytes] = []
+        remaining = MAX_INPUT_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except OSError:
+        raise UsageError(f"input file for {name!r} cannot be read") from None
+    finally:
+        os.close(fd)
+    return decode_text_limited(b"".join(chunks), max_bytes=MAX_INPUT_BYTES,
+                               what=f"input {name!r}")
 
 
 def printable(text: str) -> str:
