@@ -227,6 +227,52 @@ def test_granted_approval_expired_before_the_effect(conn, data_dir, tmp_path):
     assert events == ["approval.requested", "approval.expired"]
 
 
+class _BusyWriteEffect(WriteEffect):
+    """A test effect whose exclusive section is taken while `busy` is set."""
+
+    def __init__(self, folder) -> None:
+        super().__init__(folder)
+        self.busy = True
+
+    def exclusive(self, context):
+        import contextlib
+
+        from harness.skills.effects import EffectBusy
+
+        if self.busy:
+            raise EffectBusy("the test effect is busy")
+        return contextlib.nullcontext()
+
+
+def test_granted_approval_that_expires_while_the_effect_is_busy_is_not_consumed(
+        conn, data_dir, tmp_path):
+    """Independent review of hardening (2026-11-25): the expiry is checked again at the
+    moment of consuming. Granted, then the effect is busy (the approval stays `granted`), the
+    expiry passes, and a resume with the effect free must not consume nor apply it."""
+    from harness.skills.effects import EffectBusy
+
+    clock = Clock()
+    root = copy_skills(tmp_path)
+    with_effect(root, "demo-echo", "test.write")
+    effect = _BusyWriteEffect(tmp_path / "efecto")
+    engine, sessions, _ = build(
+        conn, data_dir, root=root, terminal=ApprovingTerminal(), clock=clock,
+        provider=ScriptedProvider({"tarea: demo-echo/draft": GOOD_ECHO}),
+        effects={"test.write": effect})
+    session = sessions.create_session("Demo")
+    with pytest.raises(EffectBusy):
+        _run(engine, session)
+    assert [a["status"] for a in _approval(conn)] == ["granted"] and effect.written() == []
+    run_id = conn.execute("SELECT run_id FROM skill_runs").fetchone()[0]
+    clock.advance(901)  # past HARNESS_APPROVAL_TTL_S (900 s by default)
+    effect.busy = False
+    outcome = _resume(engine, run_id)
+    assert effect.written() == []
+    statuses = [a["status"] for a in _approval(conn)]
+    assert "consumed" not in statuses and statuses[0] == "expired", statuses
+    assert outcome.status != "completed"
+
+
 # -- 5.4 single use, alteration and the closed list of effects ------------------------------------
 
 
