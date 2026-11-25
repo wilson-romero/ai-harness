@@ -179,7 +179,7 @@ En macOS o Linux se usa `export HARNESS_MCP_CONFIG=/ruta/absoluta/mcp.local.json
   4. hace **una** llamada;
   5. cierra el servidor.
 
-  El resultado saneado va por stdout. El resumen va por stderr: `call: <servidor>/<herramienta> <estado> in <ms> ms, <bytes> bytes, <n> credential(s) redacted`.
+  El resultado saneado va por stdout, y **cada línea empieza por `| `** (una línea vacía es `|`). Así ninguna línea de una herramienta puede pasar por una línea del harness; para quedarte con el resultado tal cual, quita los dos primeros caracteres de cada línea. El mensaje de error de una herramienta va por stderr con el mismo prefijo. El resumen va por stderr: `call: <servidor>/<herramienta> <estado> in <ms> ms, <bytes> bytes, <n> credential(s) redacted`.
 - Códigos de salida:
   - 0: llamada completada.
   - 1: llamada denegada, error de la herramienta o del servidor, o plazo vencido.
@@ -188,7 +188,7 @@ En macOS o Linux se usa `export HARNESS_MCP_CONFIG=/ruta/absoluta/mcp.local.json
 
 ### La lista local
 
-La escribes y la editas tú, a mano; el harness solo la lee. Vive **fuera del repositorio**, porque contiene rutas locales. Si la ruta está dentro de un árbol de Git y no está ignorada, el harness la rechaza. Este ejemplo usa el servidor sintético de los tests:
+La escribes y la editas tú, a mano; el harness solo la lee. Vive **fuera del repositorio**, porque contiene rutas locales. Si la ruta está dentro de un árbol de Git y no está ignorada, el harness la rechaza. En macOS y Linux también rechaza una lista (o el enlace que la nombra, o la carpeta que contiene a cualquiera de los dos) que sea de otro usuario o que el grupo u otros puedan escribir: deja la lista con `chmod 600` y su carpeta sin escritura para otros. En Windows no se comprueban las ACL: protege la carpeta tú. Este ejemplo usa el servidor sintético de los tests:
 
 ```json
 {
@@ -242,35 +242,40 @@ Después de preguntar al servidor, comprueba dos más:
 
 - `tool_absent`: el servidor no ofrece la herramienta.
 - `schema_mismatch`: el esquema del servidor no tiene un argumento declarado, o exige uno que no está declarado.
+- `annotation_conflict`: la lista declara la herramienta `read`, pero el servidor la anota con `readOnlyHint: false` o `destructiveHint: true`.
 
-Lo que el servidor dice de sí mismo (descripción, esquema, `readOnlyHint`) solo puede restringir, nunca permitir. Un `mcp` lanzado desde dentro de un servidor se niega con `recursion`.
+Lo que el servidor dice de sí mismo (descripción, esquema, anotaciones) solo puede restringir, nunca permitir. De los esquemas del servidor solo se comparan formas (nombres, `required`, tipos); nunca se evalúa un `pattern`, un `format` ni nada parecido que mande el servidor. Un `mcp` lanzado desde dentro de un servidor se niega con `recursion`.
 
 ### Plazos y procesos
 
-Cada comando arranca su servidor y lo cierra antes de terminar. Para cerrarlo:
+La conversación con el servidor no corre en el proceso del harness, sino en un **proceso de sesión** (`python -m harness.mcp.worker`) que el harness arranca en su propio grupo de procesos (macOS y Linux) o Job Object (Windows). El servidor arranca dentro de ese grupo. El harness conserva la política, la auditoría y la última palabra:
 
-1. cierra su entrada;
-2. espera 2 s;
-3. termina el árbol del proceso (grupo de procesos en macOS y Linux, Job Object en Windows);
-4. lo recoge.
+1. al acabar la conversación, o al vencer su plazo, **siempre** termina el árbol entero del proceso de sesión: el servidor y lo que este haya lanzado en su grupo (SIGTERM, 2 s, SIGKILL; en Windows, el Job Object);
+2. anota en la auditoría si vio terminar el árbol (`server_stopped`);
+3. atiende Ctrl+C en cualquier momento: termina el árbol y sale con 130.
 
-El plazo de arranque cubre la negociación y la lista de herramientas. El plazo de llamada cubre la llamada. Si el servidor no se cierra, el comando no espera más de arranque + llamada + 20 s. En ese caso dice `did not shut down in time`, deja la llamada como `abandoned` en la auditoría y termina.
+Dentro del proceso de sesión, el cierre del servidor es: cerrar su entrada, esperar 2 s, matarlo, esperar 2 s.
+
+El plazo de arranque cubre la negociación y la lista de herramientas. El plazo de llamada cubre la llamada. **Garantía**: `mcp tools` y `mcp call` terminan en menos de arranque + llamada + 15 s, haga lo que haga el servidor o el proceso de sesión (aunque se cuelgue en código C sin soltar el intérprete). Al vencer, el error es `timeout` y la llamada queda como `timeout` en la auditoría.
 
 Una respuesta que pasa de `max_result_bytes` se corta mientras llega: el error es `result_too_large` y no se imprime nada del resultado. Una línea que no es JSON-RPC termina la sesión con `protocol_error`.
 
-Límite: en macOS y Linux, un servidor que sale solo al cerrarse su entrada deja vivos los procesos que él haya lanzado. El harness no los ve.
+Un servidor que escribe en stderr más de 64 MiB en una sesión se detiene con `stderr_too_large`. Un error JSON-RPC que el propio servidor envía es `server_error`; una conexión que se cierra es `server_exited`.
+
+Límite: un proceso que el servidor lance en **otra sesión o grupo** (`setsid`, un demonio) o fuera del Job Object escapa a ese cierre, y el harness no lo ve: la auditoría dirá igualmente `server_stopped = 1`.
 
 ### Qué se guarda
 
 - La tabla `tool_calls` de SQLite guarda:
   - servidor, herramienta y operación;
   - decisión y motivo;
-  - SHA-256 y tamaño de los argumentos;
+  - un HMAC-SHA-256 de los argumentos, con una clave aleatoria local (`HARNESS_DATA_DIR/keys/mcp-args.key`, solo legible por su dueño, nunca se imprime), y su tamaño;
   - estado, código de error y si el servidor quedó parado;
   - bytes del resultado y duración.
 
   **Nunca** guarda los argumentos ni el resultado.
-- El stderr del servidor va a `HARNESS_DATA_DIR/logs/mcp/<servidor>.stderr.log`, nunca a la terminal. Se guarda sin sanear, porque es lo que escribió el servidor. Se rota a `.1` al pasar de 1 MiB.
+- El stderr del servidor va a `HARNESS_DATA_DIR/logs/mcp/<servidor>.stderr.log`, nunca a la terminal. Se guarda sin sanear, porque es lo que escribió el servidor. Cada sesión guarda como mucho 1 MiB; del resto solo se anota cuántos bytes se descartaron. Antes de cada sesión, un fichero de más de 1 MiB pasa a `.1` (que sustituye al anterior), así que los dos ficheros de un servidor no pasan de unos 4 MiB. En macOS y Linux la carpeta es `0700` y los ficheros `0600`.
+- Una llamada `running` cuyo comando ya no existe (se cortó la luz, se mató el proceso) se marca `failed`/`interrupted` en el siguiente `mcp call`. "Ya no existe" lo dice un bloqueo que el comando mantiene mientras vive, no la antigüedad de la fila.
 - Todo lo que se imprime (resultado, descripciones, nombres y errores del servidor) sale sin caracteres de control, de formato ni secuencias de escape. Las credenciales conocidas salen como `[REDACTED:<tipo>]`. Imágenes y audio se sustituyen por `[<tipo> withheld: N bytes of base64]`, y los recursos por `[<tipo> withheld]`.
 
 ## Configuración

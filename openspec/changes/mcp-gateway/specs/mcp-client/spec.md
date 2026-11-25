@@ -21,6 +21,10 @@ El sistema SHALL conocer solo los servidores declarados en el fichero que indica
 - **WHEN** el fichero de configuración tiene un campo desconocido, un servidor sin orden de arranque o una orden escrita como una sola cadena
 - **THEN** todo comando `mcp` termina con un error que nombra el campo y no arranca ningún proceso
 
+#### Scenario: Lista que otros pueden escribir
+- **WHEN** en macOS o Linux el fichero de la lista, el enlace que la nombra o su carpeta tienen escritura para el grupo u otros, o son de otro usuario
+- **THEN** todo comando `mcp` que la lea termina con un error que dice que otros pueden escribirla y no arranca ningún proceso
+
 ### Requirement: La orden de arranque solo sale de la configuración local
 El sistema SHALL arrancar un servidor solo con la orden de la lista local, como lista de argumentos y sin intérprete de órdenes. Ningún argumento de la CLI, resultado de herramienta ni texto de un modelo SHALL poder cambiar la orden, sus argumentos, su directorio ni su entorno.
 
@@ -65,8 +69,16 @@ El proceso de un servidor SHALL recibir solo las variables de entorno de una lis
 - **WHEN** la herramienta devuelve un resultado marcado como error
 - **THEN** el sistema imprime el mensaje saneado por stderr y termina con código 1
 
+#### Scenario: Error enviado por el servidor
+- **WHEN** el servidor sintético contesta la llamada con un error JSON-RPC -32000
+- **THEN** el comando termina con código 1 y el error `server_error`, no `server_exited`, en stderr y en la auditoría
+
+#### Scenario: Herramienta en la segunda página del listado
+- **WHEN** el servidor sintético ofrece la herramienta declarada solo en la segunda página de `tools/list`
+- **THEN** `mcp call` la encuentra, la llama y termina con código 0
+
 ### Requirement: Plazos duros
-Cada fase con un servidor SHALL tener un plazo propio (arranque y negociación, llamada, cierre) y el comando entero un plazo total. Vencido un plazo, el sistema SHALL dejar de esperar al servidor, cerrarlo y terminar con un error que nombra la fase, aunque el servidor no responda a nada.
+Cada fase con un servidor SHALL tener un plazo propio (arranque y negociación, llamada, cierre) y el comando entero un plazo total de arranque + llamada + 15 s, medido por el proceso del harness (revisada el 2026-11-24, D4). Vencido un plazo, el sistema SHALL terminar la sesión y salir con un error que nombra la fase, aunque el servidor o el proceso de sesión no respondan a nada.
 
 #### Scenario: Servidor que no responde a la negociación
 - **WHEN** el servidor sintético arranca y nunca contesta
@@ -80,8 +92,20 @@ Cada fase con un servidor SHALL tener un plazo propio (arranque y negociación, 
 - **WHEN** el servidor sintético ignora el fin de su entrada y la señal de terminar
 - **THEN** el comando termina dentro de su plazo total y el proceso del servidor deja de existir
 
+#### Scenario: Patrón catastrófico en el esquema de salida
+- **WHEN** el servidor sintético declara un `outputSchema` con el patrón `^(a+)+$` y devuelve 34 `a` seguidas de `!`
+- **THEN** el comando termina con código 0 en menos de arranque + llamada + 15 s, porque ningún patrón del servidor se evalúa, y la llamada queda `completed` con el servidor parado
+
+#### Scenario: Proceso de sesión colgado en código C
+- **WHEN** el proceso de sesión se cuelga en el motor de expresiones regulares sujetando el GIL
+- **THEN** el comando termina con `timeout` en menos de arranque + llamada + 15 s, la llamada queda `timeout` y ningún proceso de la sesión sigue vivo
+
+#### Scenario: Ctrl+C con la sesión colgada
+- **WHEN** el usuario interrumpe `mcp call` mientras el proceso de sesión está colgado en código C
+- **THEN** el comando termina con código 130 sin traza, la llamada queda `failed` con `interrupted` y ningún proceso de la sesión sigue vivo
+
 ### Requirement: Ningún proceso propio queda vivo
-Al terminar cualquier comando `mcp`, con éxito, con error, por plazo vencido o por interrupción del usuario, el proceso del servidor que arrancó SHALL haber terminado. Si no se puede comprobar, el sistema SHALL decirlo por stderr y en la auditoría.
+Al terminar cualquier comando `mcp`, con éxito, con error, por plazo vencido o por interrupción del usuario, el sistema SHALL haber terminado el árbol de su proceso de sesión, con el servidor y lo que este lanzó en su grupo o Job Object (revisada el 2026-11-24, D4). Si no se puede comprobar, el sistema SHALL decirlo por stderr y en la auditoría.
 
 #### Scenario: Interrupción del usuario
 - **WHEN** el usuario interrumpe `mcp call` mientras la herramienta trabaja
@@ -90,6 +114,14 @@ Al terminar cualquier comando `mcp`, con éxito, con error, por plazo vencido o 
 #### Scenario: El servidor muere a mitad de llamada
 - **WHEN** el servidor sintético termina su proceso al recibir la llamada
 - **THEN** el comando termina con un error que dice que el servidor terminó, sin traza de Python, y la llamada queda auditada como `failed`
+
+#### Scenario: Nieto del servidor
+- **WHEN** el servidor sintético lanza un proceso hijo en su mismo grupo y después sale normalmente al cerrarse su entrada
+- **THEN** al terminar `mcp call` ese proceso hijo tampoco existe y la auditoría registra `server_stopped = 1`
+
+#### Scenario: Nieto en su propia sesión
+- **WHEN** el servidor sintético lanza un proceso hijo en una sesión propia (`setsid`)
+- **THEN** ese proceso sigue vivo tras `mcp call`, como documentan el README y `SECURITY.md`
 
 ### Requirement: Límites de tamaño
 El sistema SHALL rechazar unos argumentos de más de 16 KiB en JSON y un resultado de más del límite de su herramienta (64 KiB por defecto, configurable hasta 1 MiB), sin imprimir nada del resultado rechazado.
@@ -101,6 +133,18 @@ El sistema SHALL rechazar unos argumentos de más de 16 KiB en JSON y un resulta
 #### Scenario: Resultado demasiado grande
 - **WHEN** la herramienta sintética devuelve 2 MiB de texto
 - **THEN** el comando termina con un error que da el tamaño y el límite, no imprime el resultado y la llamada queda auditada como `failed` con motivo `result_too_large`
+
+#### Scenario: Resultado por encima del límite de la herramienta y por debajo del de listado
+- **WHEN** la herramienta sintética devuelve un poco más de 64 KiB, o una línea JSON-RPC que pasa de 64 KiB por menos de un bloque de lectura
+- **THEN** el comando termina con `result_too_large`, dice que el límite es 65536 bytes y no imprime nada del resultado
+
+#### Scenario: stderr sin fin
+- **WHEN** el servidor sintético escribe cientos de MiB en stderr durante la llamada
+- **THEN** su log guarda como mucho 1 MiB de esa sesión, la sesión termina con `stderr_too_large` y el servidor ya no existe
+
+#### Scenario: Log del servidor privado
+- **WHEN** en macOS o Linux un servidor escribe en stderr
+- **THEN** su log tiene permisos `0600` y la carpeta de logs `0700`
 
 ### Requirement: Servidor que escribe basura
 Una línea de la salida del servidor que no es un mensaje del protocolo SHALL terminar la sesión con ese servidor con un error controlado, sin traza de Python y sin imprimir esa línea.
