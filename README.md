@@ -217,6 +217,15 @@ Límites conocidos:
 3. No se sincroniza el directorio tras publicar: después de un corte de luz justo en ese momento, la nota podría no estar, y `skill resume` lo vería como ausente y pediría aprobarla otra vez.
 4. **Riesgo de atribución del curador:** el curador de `claude-memory-system` atribuye a su propia ejecución cualquier `.md` de `Decisiones/` modificado después de que empiece. Si el harness escribe una decisión mientras el curador corre en el mismo equipo, el log del curador la contará como suya. No se pierde ni se rompe nada.
 
+## Puerta MVP sin EA
+
+El flujo completo sin Enterprise Architect: **requerimiento → memoria del proyecto → `hls-review` → tu decisión → `architecture-memory` → aprobación → nota nueva en `Decisiones/` → la nota vuelve en `memory context`**. Son los dos Skills de arriba, por separado y en la **misma sesión**, con tu decisión entre medias: lees la revisión, escribes en un fichero tuyo la decisión que tomas y se la pasas a `architecture-memory` con `--input-file source=<fichero>`. Nada pasa de un Skill al otro sin que lo leas. No hay código nuevo: es la integración de lo que ya existe.
+
+- **Demo automática** (sin persona, salvo la aprobación, que imprime como instrucciones con los comandos exactos para PowerShell y zsh/bash): `uv run python scripts/demo_mvp_without_ea.py`. Termina en `demo: PASS`. Con `--keep` deja la carpeta temporal y la ejecución esperando, para que la apruebes tú en una terminal.
+- **A mano**, paso a paso y con qué se ve en cada uno: [`docs/runbook/mvp-without-ea.md`](docs/runbook/mvp-without-ea.md), primero con el vault sintético y el Mock, después con una copia de tu vault.
+- **Datos:** los requerimientos sintéticos, la revisión y la decisión guionizadas del Mock y una decisión de ejemplo están en `tests/fixtures/mvp/`. Los tres `requerimiento-<n>-*.md` son también los de la medición con Copilot real (seis preguntas), que queda pendiente del merge del proveedor de Copilot.
+- **Test:** `tests/integration/test_mvp_flow.py` recorre el flujo con la CLI en procesos separados y aprueba con la terminal de prueba del motor. No dice nada de si Copilot real cumple los formatos.
+
 ## Herramientas MCP
 
 El harness puede hablar con servidores MCP locales por stdio, usando el SDK oficial (`mcp==2.3.0`). Tiene tres reglas:
@@ -390,4 +399,4 @@ Solo una pregunta a la vez por sesión: una segunda pregunta mientras la primera
 - El repositorio es público: lee [`SECURITY.md`](SECURITY.md) y activa el hook una vez por clon con `git config core.hooksPath .githooks`.
 - Sin código condicionado por plataforma fuera de Enterprise Architect: lo que pasa en macOS es lo que corre en Windows.
 - Puerta local antes de un merge: `scripts/verify.sh` sobre el árbol limpio.
-- Demos, iguales en macOS y Windows (PowerShell incluido): `uv run python scripts/demo_session_core.py` (Corte 1), `uv run python scripts/demo_project_memory.py` (Corte 3), `uv run python scripts/demo_skill_engine.py` (Corte 4, motor de Skills) y `uv run python scripts/demo_mcp_gateway.py` (Corte 5, pasarela MCP). Terminan en `demo: PASS`.
+- Demos, iguales en macOS y Windows (PowerShell incluido): `uv run python scripts/demo_session_core.py` (Corte 1), `uv run python scripts/demo_project_memory.py` (Corte 3), `uv run python scripts/demo_skill_engine.py` (Corte 4, motor de Skills), `uv run python scripts/demo_architecture_skills.py` (Corte 4, Skills de arquitectura), `uv run python scripts/demo_mcp_gateway.py` (Corte 5, pasarela MCP) y `uv run python scripts/demo_mvp_without_ea.py` (Puerta MVP sin EA). Terminan en `demo: PASS`.
