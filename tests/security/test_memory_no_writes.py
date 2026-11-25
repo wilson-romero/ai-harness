@@ -226,6 +226,121 @@ def test_the_exemption_list_is_the_decision_writer_and_only_it():
     assert used == WRITER_PRIMITIVES
 
 
+# -- 7.6 each write primitive pinned to its function and count (2026-11-25, independent review) --
+#
+# An exemption per primitive for the whole file proved nothing about where the primitive is used:
+# a loop that unlinked every `*.md` of the vault inside `write_decision`, an `os.mkdir` or an
+# exclusive `os.open` + `os.write` elsewhere all passed. Now every finding of the allowlist in the
+# writer is counted per innermost function, and so is every call of the helpers that write, and
+# both must be exactly these tables. `_drop_temp` removes only a name of the harness's temporary
+# form (checked inside it); `_take_back` removes only the name `_publish` has just published and
+# checked to be the file written.
+WRITER_PLACEMENT = {
+    ("_write_temp", "os.O_WRONLY"): 1,
+    ("_write_temp", "os.O_CREAT"): 1,
+    ("_write_temp", "os.O_EXCL"): 1,
+    ("_write_temp", "os.open() with flag os.O_WRONLY"): 1,
+    ("_write_temp", "os.write"): 1,
+    ("_write_temp", ".write()"): 1,
+    ("_write_temp", "os.fsync"): 1,
+    ("_publish", "os.link"): 1,
+    ("_publish", ".link()"): 1,
+    ("_take_back", "os.unlink"): 1,
+    ("_take_back", ".unlink()"): 1,
+    ("_drop_temp", "os.unlink"): 1,
+    ("_drop_temp", ".unlink()"): 1,
+    ("write_decision", "os.mkdir"): 1,
+    ("write_decision", ".mkdir()"): 1,
+}
+WRITING_HELPERS = frozenset({"_write_temp", "_publish", "_take_back", "_drop_temp"})
+WRITER_CALLS = {
+    ("write_decision", "_write_temp"): 1,
+    ("write_decision", "_publish"): 1,
+    ("write_decision", "_drop_temp"): 2,
+    ("_write_temp", "_drop_temp"): 2,
+    ("_publish", "_take_back"): 1,
+    ("reconcile_decision", "_drop_temp"): 1,
+}
+
+
+def _innermost(tree: ast.AST):
+    spans = [(n.lineno, n.end_lineno, n.name) for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+    def where(line: int) -> str:
+        inside = [s for s in spans if s[0] <= line <= s[1]]
+        return min(inside, key=lambda s: s[1] - s[0])[2] if inside else "<module>"
+
+    return where
+
+
+def placement(source: str) -> dict[tuple[str, str], int]:
+    """(innermost function, allowlist finding) -> count."""
+    where = _innermost(ast.parse(source))
+    counts: dict[tuple[str, str], int] = {}
+    for problem in check_source(source):
+        key = (where(int(problem.split(":", 1)[0])), _reason(problem))
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def helper_calls(source: str) -> dict[tuple[str, str], int]:
+    """(innermost function, writing helper called) -> count; also a helper passed as a value."""
+    tree = ast.parse(source)
+    where = _innermost(tree)
+    counts: dict[tuple[str, str], int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in WRITING_HELPERS:
+            key = (where(node.lineno), node.id)
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def test_each_write_primitive_is_where_it_belongs_and_no_more():
+    source = (REPO_ROOT / WRITER).read_text(encoding="utf-8")
+    assert placement(source) == WRITER_PLACEMENT
+    assert helper_calls(source) == WRITER_CALLS
+
+
+# The mutation the independent review used, in three parts; each one alone must be caught.
+MUTATIONS = {
+    "unlink every note": (
+        "    temp = folder / temp_name\n    identity = _write_temp(temp, data)\n",
+        "    for stale in sorted(root.rglob('*.md')):\n        stale.unlink()\n"
+        "    temp = folder / temp_name\n    identity = _write_temp(temp, data)\n",
+    ),
+    "mkdir elsewhere": (
+        "def _exists(path: Path) -> bool:\n",
+        "def _exists(path: Path) -> bool:\n    os.mkdir(path.parent / 'extra')\n",
+    ),
+    "exclusive write elsewhere": (
+        "def _exists(path: Path) -> bool:\n",
+        "def _exists(path: Path) -> bool:\n"
+        "    fd = os.open(path.parent / 'x.md', os.O_WRONLY | os.O_CREAT | os.O_EXCL)\n"
+        "    os.write(fd, b'x')\n",
+    ),
+    "a second exclusive write in the same function": (
+        "    os.close(fd)\n    if not stat.S_ISREG",
+        "    os.close(fd)\n    os.write(os.open(temp, flags), b'x')\n    if not stat.S_ISREG",
+    ),
+    "take back any note": (
+        "    if folder is None:\n        return \"absent\"\n",
+        "    if folder is None:\n        return \"absent\"\n    _take_back(folder / 'otra.md')\n",
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(MUTATIONS))
+def test_the_placement_catches_the_review_mutation(name):
+    old, new = MUTATIONS[name]
+    source = (REPO_ROOT / WRITER).read_text(encoding="utf-8")
+    assert source.count(old) == 1, "the mutation no longer applies: update it"
+    mutated = source.replace(old, new)
+    assert (placement(mutated), helper_calls(mutated)) != (WRITER_PLACEMENT, WRITER_CALLS)
+    # The old, per-file exemption let every one of them through.
+    assert {_reason(p) for p in check_source(mutated)} <= WRITER_PRIMITIVES
+
+
 @pytest.mark.parametrize(
     "sample",
     [
@@ -354,3 +469,44 @@ def test_no_memory_command_writes_outside_the_data_dir(cli, vault, tmp_path, dat
         assert code == 0, (command, err)
         assert fingerprint(vault) == vault_before, command
         assert _outside_data(tmp_path, data_dir) == tree_before, command
+
+
+# -- 7.6 the behavioural oracle: an approved run adds exactly one file, whatever the input --------
+
+ADVERSARIAL_TITLES = [
+    "Cola gestionada para los eventos de pedidos",
+    "../../Memoria/personas ../Decisiones/alpha-mensajeria.md",
+    "CON . AUX . NUL",
+    ".harness-01900000-0000-7000-8000-000000000001-save.tmp",
+    "Decisiones/alpha-mensajeria.md borrar todo",
+]
+
+
+@pytest.mark.parametrize("title", ADVERSARIAL_TITLES)
+def test_an_approved_run_adds_exactly_one_file_to_the_vault(conn, data_dir, vault, title):
+    import json
+
+    from tests.integration.test_architecture_memory import answer, engine_for, run
+    from tests.skill_support import ApprovingTerminal
+    from tests.unit.test_decisions import ACTIVE
+
+    hostile = "\n".join(ACTIVE.values()) + "\nrm -rf Decisiones/*.md\n../Memoria/personas.md"
+    engine, sessions, _ = engine_for(
+        conn, data_dir, vault,
+        answer(title=title, context=hostile, decision=hostile,
+               alternatives=["../" * 8 + "etc/passwd"], consequences=[".harness-x.tmp"]),
+        terminal=ApprovingTerminal())
+    before = fingerprint(vault)
+    outcome = run(engine, sessions.create_session("Huella", "demo-alpha"))
+    assert outcome.status == "completed", outcome.message
+    after = fingerprint(vault)
+    added = set(after) - set(before)
+    assert added == set(outcome.applied) and len(added) == 1
+    (target,) = added
+    assert target.startswith("Decisiones/") and target.count("/") == 1
+    assert set(before) <= set(after)  # nothing removed or renamed
+    for key, value in before.items():  # nothing else changed; a folder may only get a new entry
+        assert after[key][0] == value[0], key
+        if value[0] != "dir":
+            assert after[key] == value, key
+    assert json.dumps(outcome.applied)  # the path is reported, harness-derived
