@@ -100,6 +100,7 @@ class _Run:
     outputs: dict[str, str] = field(default_factory=dict)  # this invocation's step outputs
     started: float = 0.0
     applied: list[str] = field(default_factory=list)  # targets applied in this invocation
+    source_checked: bool = False  # the early check of applied sources ran (2026-11-25)
 
 
 @dataclass(frozen=True)
@@ -463,7 +464,9 @@ class SkillEngine:
                 (step.id, utc_iso(self._clock()), state.run_id),
             )
             if isinstance(step, LlmStep):
-                outcome = await self._llm(state, step, latest)
+                outcome = self._check_sources(state)
+                if outcome is None:
+                    outcome = await self._llm(state, step, latest)
             elif isinstance(step, ValidateStep):
                 outcome = self._validate(state, step, latest)
             else:
@@ -820,6 +823,7 @@ class SkillEngine:
         with transaction(self._conn):
             self._audit("effect.applied", "applied", state.session, state.run_id,
                         f"step={step.id};ref={proposed.effect_ref}")
+            self._record_source(state, step, effect, effect_context, proposed.effect_ref)
         if proposal.target is not None:
             state.applied.append(proposal.target)
         self._complete(state, step.id, row, proposal.content)
@@ -866,6 +870,7 @@ class SkillEngine:
                     state.outputs[key] = stored
                 self._audit("skill.step.reconciled", "applied", state.session, state.run_id,
                             detail)
+                self._record_source(state, step, effect, context, row["effect_ref"])
             return
         if result == "absent":
             if row["attempt"] >= MAX_ATTEMPTS:
@@ -937,6 +942,61 @@ class SkillEngine:
     def _approval_detail(approval: sqlite3.Row) -> str:
         return (f"approval={approval['approval_id']};step={approval['step_key']};"
                 f"hash={approval['proposal_hash']}")
+
+    def _check_sources(self, state: _Run) -> RunOutcome | None:
+        """Before the first model call of this invocation: has an effect of this skill already
+        been applied from the same source, and is it still in place? (D8, revised 2026-11-25.)
+
+        Only a refusal is acted on; the title check after the model stays the authority. The
+        approval step whose effect refuses fails with its code, before anything is sent."""
+        if state.source_checked:
+            return None
+        state.source_checked = True
+        latest = self._latest_steps(state.run_id)
+        for step in state.skill.workflow.steps:
+            if not isinstance(step, ApprovalStep) or latest[step.id]["status"] == "completed":
+                continue
+            effect = self._effects[step.effect]
+            key_of = getattr(effect, "source_key", None)
+            refusal_of = getattr(effect, "early_refusal", None)
+            if key_of is None or refusal_of is None:
+                continue
+            context = self._effect_context(state, step)
+            key = key_of(context, state.inputs)
+            if key is None:
+                continue
+            refs = [r[0] for r in self._conn.execute(
+                "SELECT effect_ref FROM effect_sources WHERE scope = ? AND partition_key = ? "
+                "AND source_sha256 = ? ORDER BY recorded_at, effect_ref",
+                (effect.scope, *key),
+            )]
+            refused = refusal_of(context, refs) if refs else None
+            if refused is None:
+                continue
+            row = latest[step.id]
+            with transaction(self._conn):
+                self._set_step(row, "failed", error_code=refused.code, finished=True)
+                self._finish_run_locked(state.run_id, state.session, "failed", refused.code)
+            return RunOutcome(state.run_id, "failed",
+                              message=f"step {step.id!r}: {refused}; nothing was sent to the "
+                              "provider, asked or applied")
+        return None
+
+    def _record_source(self, state: _Run, step: ApprovalStep, effect: Effect,
+                       context: EffectContext, effect_ref: str | None) -> None:
+        """Inside the transaction that records the effect as applied: which source it came
+        from. Never for a rejected, abandoned or uncertain step (2026-11-25)."""
+        key_of = getattr(effect, "source_key", None)
+        if key_of is None or effect_ref is None:
+            return
+        key = key_of(context, state.inputs)
+        if key is None:
+            return
+        self._conn.execute(
+            "INSERT OR IGNORE INTO effect_sources (scope, partition_key, source_sha256, "
+            "effect_ref, run_id, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (effect.scope, *key, effect_ref, state.run_id, utc_iso(self._clock())),
+        )
 
     def _bind(self, skill: Skill, session: Session, run_id: str, now: str, manifest: str) -> str:
         """What each effect of the skill fixes for the whole run, as canonical JSON (2026-11-25).

@@ -14,7 +14,7 @@ import contextlib
 import hashlib
 import hmac
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from datetime import date, datetime, tzinfo
 from pathlib import Path
@@ -169,6 +169,44 @@ class DecisionEffect:
         assert result in ("applied", "absent", "conflict")
         return result  # type: ignore[return-value]
 
+    def source_key(
+        self, context: EffectContext, inputs: Mapping[str, str]
+    ) -> tuple[str, str] | None:
+        """The vault and project this run is bound to, and the SHA-256 of its source text
+        (D8, revised 2026-11-25). None without a project, a vault binding or a source."""
+        source = inputs.get(SOURCE_INPUT)
+        vault = context.binding.get("vault")
+        if source is None or context.project_slug is None or vault is None:
+            return None
+        return f"{vault}/{context.project_slug}", source_sha256(source)
+
+    def early_refusal(
+        self, context: EffectContext, effect_refs: Sequence[str]
+    ) -> EffectRefused | None:
+        """`duplicate_decision` if a decision already saved from the same source is still in
+        the vault (looked up by its identifier, as D8 does). A note that was removed, a vault
+        that cannot be read now or another vault: no early refusal; the run goes on and the
+        checks after the model decide."""
+        try:
+            root = self._bound_root(context)
+            folder = inspect_decisions_dir(root)
+            if folder is None:
+                return None
+            for ident in effect_refs:
+                if not is_decision_id(ident):
+                    continue
+                found = find_decision_notes(folder, ident)
+                if found:
+                    where = safe_line(f"{DECISIONS_DIR}/{found[0][0]}").text
+                    return EffectRefused(
+                        "duplicate_decision",
+                        f"the same source text is already recorded as decision {ident} in "
+                        f"{where}",
+                    )
+        except (EffectRefused, DecisionRefused):
+            return None
+        return None
+
     # -- helpers --------------------------------------------------------------------------------
 
     @contextlib.contextmanager
@@ -215,6 +253,13 @@ def vault_digest(root: Path) -> str:
     """What a run stores to recognise its vault: a domain-separated SHA-256 of the resolved
     root, so that the path itself never reaches SQLite (it can name a person or a company)."""
     return hashlib.sha256(f"{VAULT_DOMAIN}{root}".encode()).hexdigest()
+
+
+def source_sha256(source: str) -> str:
+    """SHA-256 of a source text as the product reads a text file: BOM dropped and line ends
+    normalised to LF, so the same text typed or read from a CRLF file gives the same hash."""
+    text = source.removeprefix("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _fields(validated: str) -> DecisionFields:
