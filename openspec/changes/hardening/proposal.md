@@ -12,8 +12,8 @@ Corte **8 · Cierre** de `docs/plan/2026-11-24-ai-harness-cortes.md`, en la part
 
 - **Matriz SEC viva** en `docs/security/sec-matrix.md`: por cada SEC-01..15, la capacidad y el requisito que lo cubren, los tests que lo prueban (por identificador de pytest), el control negativo (el recibo donde se vio fallar), el estado (`cubierto`, `parcial`, `pendiente de merge`, `no cubierto`, `BLOCKED`) y los límites escritos. Se rellena con lo que existe en `develop` el día que se implemente; lo de ramas sin mergear se marca `pendiente de merge`.
 - **Comprobación de que la matriz no se pudre** en `scripts/verify.sh`: un script que exige las 15 filas, un estado de la lista cerrada, al menos un test en cada fila `cubierto` o `parcial`, y que cada test citado exista y lo recoja `pytest --collect-only`.
-- **Runbook de instalación y uso** para macOS y Windows/PowerShell (`docs/runbook/install-and-use.md`).
-- **Guía de diagnóstico** (`docs/runbook/diagnosis.md`): qué significa cada estado incierto o en espera, qué hacer, dónde están los bloqueos, la base de datos y los logs, y qué no se debe borrar a mano.
+- **Runbook de instalación y uso** para macOS y Windows/PowerShell (`docs/runbook/instalacion-y-uso.md`).
+- **Guía de diagnóstico** (`docs/runbook/diagnostico.md`): qué significa cada estado incierto o en espera, qué hacer, dónde están los bloqueos, la base de datos y los logs, y qué no se debe borrar a mano.
 - **Lista de deuda conocida** (`docs/security/known-debt.md`) con dueño y decisión por cada punto.
 
 **No entra**, aunque un lector lo asumiría:
@@ -37,7 +37,7 @@ Ninguna. Este change es documentación y una comprobación de desarrollo; no cam
 
 ## Impact
 
-- Documentación nueva: `docs/security/sec-matrix.md`, `docs/security/known-debt.md`, `docs/runbook/install-and-use.md`, `docs/runbook/diagnosis.md`; enlaces desde `README.md` y `SECURITY.md`.
+- Documentación nueva: `docs/security/sec-matrix.md`, `docs/security/known-debt.md`, `docs/runbook/instalacion-y-uso.md`, `docs/runbook/diagnostico.md`; enlaces desde `README.md` y `SECURITY.md`.
 - Script nuevo: `scripts/check_sec_matrix.py` (biblioteca estándar; ejecuta `pytest --collect-only` como subproceso con plazo) y su llamada en `scripts/verify.sh`; tests del script en `tests/unit/`.
 - Código de producto: ninguno. Dependencias: ninguna.
 - Demo: `scripts/demo_hardening.py`.
