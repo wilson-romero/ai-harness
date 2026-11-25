@@ -172,3 +172,36 @@ def test_cancel_then_new_run(data_dir, env):
     second = run_main(data_dir, "skill", "run", "demo-echo", "--session", session,
                       "--input", "text=x", **env)
     assert second.returncode == 3
+
+
+# -- 7.7 (e) an input file must be a regular file, and is never waited on ---------------------------
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "mkfifo"),
+                    reason="this Python has no os.mkfifo (named pipes are created differently)")
+def test_input_file_that_is_a_pipe_is_refused_without_blocking(data_dir, env, tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    from tests.conftest import REPO_ROOT, subprocess_env
+
+    session = _session(data_dir, env)
+    pipe = tmp_path / "tuberia"
+    os.mkfifo(pipe)
+    result = subprocess.run(
+        [sys.executable, "main.py", "skill", "run", "demo-echo", "--session", session,
+         "--input-file", f"text={pipe}"],
+        cwd=REPO_ROOT, env=subprocess_env(data_dir, **env), capture_output=True, text=True,
+        timeout=15,
+    )
+    assert result.returncode == 2 and "not a regular file" in result.stderr
+    assert query(data_dir, "SELECT count(*) FROM skill_runs") == [(0,)]
+
+
+def test_input_file_that_is_a_folder_is_refused(data_dir, env, tmp_path):
+    session = _session(data_dir, env)
+    result = run_main(data_dir, "skill", "run", "demo-echo", "--session", session,
+                      "--input-file", f"text={tmp_path}", **env)
+    assert result.returncode == 2 and "not a regular file" in result.stderr
+    assert query(data_dir, "SELECT count(*) FROM skill_runs") == [(0,)]

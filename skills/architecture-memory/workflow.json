@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "version": "1.0.0",
+  "inputs": {
+    "source": {"description": "Texto fuente del que se extrae una decisión", "required": true}
+  },
+  "steps": [
+    {"id": "extract", "kind": "llm", "template": "templates/extract.md", "memory": "project", "timeout_s": 300},
+    {
+      "id": "check",
+      "kind": "validate",
+      "of": "extract",
+      "format": "json",
+      "max_bytes": 32768,
+      "fields": {
+        "title": {"type": "string", "single_line": true, "min_length": 8, "max_length": 120},
+        "context": {"type": "string", "max_length": 2000},
+        "decision": {"type": "string", "max_length": 2000},
+        "alternatives": {"type": "string_list", "max_items": 8, "max_length": 400},
+        "consequences": {"type": "string_list", "max_items": 8, "max_length": 400},
+        "assumptions": {"type": "string_list", "required": false, "max_items": 8, "max_length": 400}
+      }
+    },
+    {"id": "save", "kind": "approval", "of": "check", "effect": "vault.save_decision"}
+  ],
+  "output": "save"
+}

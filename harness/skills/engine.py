@@ -10,6 +10,8 @@ that marks the step as applying.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
 import json
 import sqlite3
@@ -47,7 +49,13 @@ from harness.skills.definition import (
     load_skill,
     validate_skill_name,
 )
-from harness.skills.effects import Effect, EffectContext, default_effects
+from harness.skills.effects import (
+    Effect,
+    EffectBusy,
+    EffectContext,
+    EffectRefused,
+    default_effects,
+)
 from harness.skills.references import new_nonce, reference_key, render
 from harness.storage import repositories as repo
 from harness.storage.database import transaction
@@ -59,6 +67,11 @@ MAX_PROMPT_BYTES = 64 * 1024
 MAX_RESPONSE_BYTES = 128 * 1024
 MAX_RUN_TIME_S = 1800
 MAX_ATTEMPTS = 3
+REDACTION_MARK = "[REDACTED:"
+# With a provider whose outputs are not stored, how long an effect's busy exclusive section is
+# retried in the same invocation before the approval is revoked (2026-11-25).
+BUSY_RETRY_S = 30.0
+BUSY_PAUSE_S = 0.2
 
 OPEN_RUN_STATES = ("pending", "running", "awaiting_approval", "uncertain")
 FINAL_RUN_STATES = ("completed", "failed", "cancelled")
@@ -72,6 +85,7 @@ class RunOutcome:
     status: str
     output: str | None = None
     message: str | None = None
+    applied: tuple[str, ...] = ()  # targets an effect wrote in this invocation
 
 
 @dataclass
@@ -85,6 +99,7 @@ class _Run:
     inputs: Mapping[str, str]
     outputs: dict[str, str] = field(default_factory=dict)  # this invocation's step outputs
     started: float = 0.0
+    applied: list[str] = field(default_factory=list)  # targets applied in this invocation
 
 
 @dataclass(frozen=True)
@@ -96,6 +111,8 @@ class _Proposed:
     effect_ref: str | None
     source: str
     error: str | None = None
+    message: str | None = None  # why the effect refused, for the person
+    redactions: int = 0
 
 
 def utc_iso(moment: datetime) -> str:
@@ -152,7 +169,9 @@ class SkillEngine:
         context_builder: ContextBuilder | None = None,
         progress: Callable[[str], None] | None = None,
         run_time_limit_s: float = MAX_RUN_TIME_S,
+        busy_retry_s: float = BUSY_RETRY_S,
     ) -> None:
+        self._busy_retry_s = busy_retry_s
         self._conn = conn
         self._data_dir = data_dir
         self._sessions = sessions
@@ -200,14 +219,15 @@ class SkillEngine:
                 )
             run_id = str(uuid7())
             now = utc_iso(self._clock())
+            bindings = self._bind(skill, session, run_id, now, manifest)
             try:
                 with transaction(self._conn):
                     self._conn.execute(
                         "INSERT INTO skill_runs (run_id, session_id, skill_name, skill_version, "
-                        "skill_sha256, status, inputs_manifest, created_at, updated_at) "
-                        "VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?)",
+                        "skill_sha256, status, inputs_manifest, created_at, updated_at, "
+                        "effect_bindings) VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)",
                         (run_id, str(session.session_id), skill.name, skill.version,
-                         skill.sha256, manifest, now, now),
+                         skill.sha256, manifest, now, now, bindings),
                     )
                     for position, step in enumerate(skill.workflow.steps):
                         self._insert_step(run_id, step.id, position, step.kind, 1)
@@ -274,7 +294,8 @@ class SkillEngine:
                 return RunOutcome(
                     run_id, "failed",
                     message=f"the outputs of step(s) {', '.join(missing)} were not stored "
-                    "(the provider's content is not synthetic); the run cannot continue",
+                    "(the provider's content is not synthetic); the run cannot continue and "
+                    "nothing was applied: start it again with `skill run`",
                 )
             if retry_step is not None:
                 attempt = latest[retry_step]["attempt"]
@@ -306,6 +327,7 @@ class SkillEngine:
             row = self._require_run(run_id)
             if row["status"] not in ("pending", "awaiting_approval", "uncertain"):
                 raise InvalidInput(f"run {run_id} is {row['status']}; nothing changed")
+            report = self._check_effects_before_cancel(row, session)
             now = utc_iso(self._clock())
             with transaction(self._conn):
                 for approval in self._conn.execute(
@@ -326,9 +348,50 @@ class SkillEngine:
                     (now, now, run_id),
                 )
                 self._audit("skill.run", "cancelled", session, run_id, None)
-            return RunOutcome(run_id, "cancelled")
+            return RunOutcome(run_id, "cancelled", message=report)
         finally:
             lock.release()
+
+    def _check_effects_before_cancel(self, row: sqlite3.Row, session: Session) -> str | None:
+        """Reconcile every uncertain approval step before a cancel (2026-11-25, independent
+        review): the effect finishes what it can (the decision writer removes its temporary file,
+        so that a published note becomes visible) and the person is told, for each step, whether
+        its content is in place. A cancel never removes what an effect applied."""
+        uncertain = [s for s in self._latest_steps(row["run_id"]).values()
+                     if s["kind"] == "approval" and s["status"] == "uncertain"]
+        if not uncertain:
+            return None
+        try:
+            skill = self._load_same_skill(row)
+        except InvalidInput as exc:
+            return (f"the effect of step(s) {', '.join(s['step_key'] for s in uncertain)} could "
+                    f"not be checked ({exc}); look at the target by hand")
+        state = _Run(row["run_id"], session, self._sessions.provider_for(session), skill, {})
+        lines = []
+        for step_row in uncertain:
+            key = step_row["step_key"]
+            step = skill.step(key)
+            assert isinstance(step, ApprovalStep)
+            ref = step_row["effect_ref"] or "-"
+            try:
+                result = (self._effects[step.effect].reconcile(
+                    self._effect_context(state, step), step_row["effect_ref"],
+                    step_row["output_sha256"]) if step_row["output_sha256"] else "conflict")
+            except EffectRefused as refused:
+                result = f"refused:{refused.code}"
+                lines.append(f"step {key!r}: could not be checked: {refused}")
+            with transaction(self._conn):
+                self._audit("skill.step.reconciled", result.split(":")[0], session,
+                            row["run_id"], f"step={key};attempt={step_row['attempt']};cancel")
+            if result == "applied":
+                lines.append(f"step {key!r}: the approved content ({ref}) is in the vault; "
+                             "cancelling does not remove it")
+            elif result == "absent":
+                lines.append(f"step {key!r}: nothing was written")
+            elif result == "conflict":
+                lines.append(f"step {key!r}: something else with {ref} is in place; check the "
+                             "target by hand")
+        return "; ".join(lines)
 
     def status(self, raw_run_id: str) -> dict[str, Any]:
         """Everything about a run except contents; takes no lock."""
@@ -416,7 +479,7 @@ class SkillEngine:
                  state.run_id),
             )
             self._audit("skill.run", "completed", state.session, state.run_id, None)
-        return RunOutcome(state.run_id, "completed", output=output)
+        return RunOutcome(state.run_id, "completed", output=output, applied=tuple(state.applied))
 
     async def _llm(self, state: _Run, step: LlmStep, row: sqlite3.Row) -> RunOutcome | None:
         attempt = row["attempt"]
@@ -492,8 +555,13 @@ class SkillEngine:
         """
         effect = self._effects[step.effect]
         source = self._output(state, step.of)
-        prepared = effect.prepare(self._effect_context(state, step), source)
-        if prepared.target is not None and not valid_target(prepared.target):
+        try:
+            prepared = effect.prepare(self._effect_context(state, step), source)
+        except EffectRefused as refused:
+            return _Proposed(None, None, source, refused.code, str(refused))
+        if (prepared.target is not None and not valid_target(prepared.target)) or (
+            prepared.destination is not None and not valid_target(prepared.destination)
+        ):
             # A target is never cleaned for display: shown, hashed and applied are one string,
             # so one that cannot be shown as it is is refused (review 8.4).
             return _Proposed(None, prepared.effect_ref, source, "invalid_target")
@@ -510,8 +578,9 @@ class SkillEngine:
             skill_sha256=state.skill.sha256,
             target=prepared.target,
             content=content,
+            destination=prepared.destination,
         )
-        return _Proposed(proposal, prepared.effect_ref, source)
+        return _Proposed(proposal, prepared.effect_ref, source, redactions=prepared.redactions)
 
     async def _approval(
         self, state: _Run, step: ApprovalStep, row: sqlite3.Row
@@ -525,6 +594,15 @@ class SkillEngine:
             return RunOutcome(state.run_id, "failed",
                               message=f"step {step.id!r}: the effect's target contains invisible "
                               "or non-normalised characters; nothing was asked or applied")
+        if proposal is None and proposed.error != "limit:proposal_bytes":
+            # The effect refused before anything was asked (a duplicate, an unsafe target).
+            code = proposed.error or "effect_refused"
+            with transaction(self._conn):
+                self._set_step(row, "failed", error_code=code, finished=True)
+                self._finish_run_locked(state.run_id, state.session, "failed", code)
+            return RunOutcome(state.run_id, "failed",
+                              message=f"step {step.id!r}: {proposed.message or code}; nothing "
+                              "was asked or applied")
         if proposal is None:
             return self._stop(state, step.id, row, "limit:proposal_bytes", limit="proposal_bytes")
         proposal_hash = proposal.sha256
@@ -568,7 +646,8 @@ class SkillEngine:
                 return waiting
             decision = decide(
                 self._terminal,
-                render_for_terminal(proposal, proposal_hash, live["expires_at"]),
+                render_for_terminal(proposal, proposal_hash, live["expires_at"],
+                                    proposed.redactions),
                 proposal_hash,
             )
             decided = utc_iso(self._clock())
@@ -629,6 +708,54 @@ class SkillEngine:
             return self._revoke(state, step, row, approval)
         effect = self._effects[step.effect]
         effect_context = self._effect_context(state, step)
+        deadline = self._monotonic() + self._busy_retry_s
+        with contextlib.ExitStack() as held:
+            while True:
+                try:
+                    # Taken before the approval is consumed: if the effect cannot have its turn,
+                    # nothing is consumed or applied (architecture-skills-llm).
+                    held.enter_context(effect.exclusive(effect_context))
+                    break
+                except EffectBusy as busy:
+                    if not own or row["status"] in ("completed", "failed"):
+                        raise
+                    if state.provider.synthetic_content:
+                        # The outputs are stored: the approval stays `granted` for a resume.
+                        self._set_awaiting(state, row)
+                        raise EffectBusy(f"{busy}; the approval is still granted: run `skill "
+                                         f"resume {state.run_id}` again") from None
+                    # A real provider: the outputs exist only in this process, so a later
+                    # resume could not use them (2026-11-25, independent review). Wait here, a
+                    # bounded time, then revoke: never a granted approval on a finished run.
+                    if self._monotonic() >= deadline:
+                        return self._give_up_busy(state, step, row, approval, busy)
+                    await asyncio.sleep(BUSY_PAUSE_S)
+            return self._consume_and_apply(state, step, approval_id, proposed, approval, own,
+                                           row, effect, effect_context)
+
+    def _give_up_busy(self, state: _Run, step: ApprovalStep, row: sqlite3.Row,
+                      approval: sqlite3.Row, busy: EffectBusy) -> RunOutcome:
+        with transaction(self._conn):
+            self._set_approval(approval["approval_id"], "revoked",
+                               decided_at=utc_iso(self._clock()))
+            self._audit("approval.revoked", "busy", state.session, state.run_id,
+                        self._approval_detail(approval))
+            self._set_step(row, "failed", error_code="effect_busy", finished=True)
+            self._finish_run_locked(state.run_id, state.session, "failed", "effect_busy")
+        return RunOutcome(
+            state.run_id, "failed",
+            message=f"step {step.id!r}: {busy} for {self._busy_retry_s:g} s; the approval was "
+            "revoked and nothing was applied. This provider's outputs are not stored, so the "
+            "run cannot be resumed: start it again with `skill run`",
+        )
+
+    def _consume_and_apply(
+        self, state: _Run, step: ApprovalStep, approval_id: str, proposed: _Proposed,
+        approval: sqlite3.Row, own: bool, row: sqlite3.Row, effect: Effect,
+        effect_context: EffectContext,
+    ) -> RunOutcome | None:
+        proposal = proposed.proposal
+        assert proposal is not None
         now = utc_iso(self._clock())
         with transaction(self._conn):
             consumed = self._conn.execute(
@@ -668,12 +795,33 @@ class SkillEngine:
             )
         try:
             effect.apply(effect_context, proposal)
-        except Exception as exc:  # the effect failed: never retried by itself
+        except EffectRefused as refused:  # raised only before any side effect: nothing applied
             with transaction(self._conn):
-                self._set_step(row, "failed", error_code=f"effect_{type(exc).__name__}",
-                               finished=True)
-                self._finish_run_locked(state.run_id, state.session, "failed", "effect_failed")
-            return RunOutcome(state.run_id, "failed", message=f"the effect failed: {exc}")
+                self._set_step(row, "failed", error_code=refused.code, finished=True)
+                self._finish_run_locked(state.run_id, state.session, "failed", refused.code)
+            return RunOutcome(state.run_id, "failed",
+                              message=f"the effect refused: {refused}; nothing was applied")
+        except Exception as exc:
+            # Anything else may have happened after the side effect (2026-11-25, independent
+            # review): the step is `uncertain`, so that `resume` reconciles it; never `failed`,
+            # which nobody would look at again, and never applied a second time.
+            detail = str(exc) if isinstance(exc, HarnessError) else type(exc).__name__
+            with transaction(self._conn):
+                self._set_step(row, "uncertain", error_code="effect_uncertain", finished=True)
+                self._set_run(state.run_id, "uncertain", error_code="effect_uncertain")
+                self._audit("skill.step", "uncertain", state.session, state.run_id,
+                            f"step={step.id};attempt={row['attempt']};"
+                            f"error={type(exc).__name__}")
+            return RunOutcome(
+                state.run_id, "uncertain",
+                message=f"the effect may have been applied ({detail}); nothing is applied "
+                f"twice: `skill resume {state.run_id}` checks the target and finishes the step",
+            )
+        with transaction(self._conn):
+            self._audit("effect.applied", "applied", state.session, state.run_id,
+                        f"step={step.id};ref={proposed.effect_ref}")
+        if proposal.target is not None:
+            state.applied.append(proposal.target)
         self._complete(state, step.id, row, proposal.content)
         return None
 
@@ -691,8 +839,12 @@ class SkillEngine:
         effect = self._effects[step.effect]
         context = self._effect_context(state, step)
         expected = row["output_sha256"]
-        result = (effect.reconcile(context, row["effect_ref"], expected)
-                  if expected is not None else "conflict")
+        reason = None
+        try:
+            result = (effect.reconcile(context, row["effect_ref"], expected)
+                      if expected is not None else "conflict")
+        except EffectRefused as refused:  # the effect cannot answer yet: stays uncertain
+            result, reason = "conflict", f"{refused} ({refused.code})"
         detail = f"step={key};attempt={row['attempt']}"
         if result == "applied":
             stored = None
@@ -702,6 +854,8 @@ class SkillEngine:
                     proposed.proposal.content.encode("utf-8")
                 ).hexdigest() == expected:
                     stored = proposed.proposal.content
+                    if proposed.proposal.target is not None:
+                        state.applied.append(proposed.proposal.target)
             with transaction(self._conn):
                 self._conn.execute(
                     "UPDATE skill_steps SET status = 'completed', output_text = ?, "
@@ -728,10 +882,15 @@ class SkillEngine:
             return
         with transaction(self._conn):
             self._audit("skill.step.reconciled", "conflict", state.session, state.run_id, detail)
+        if reason is not None:
+            raise InvalidInput(f"step {key!r} of run {state.run_id} is still uncertain: {reason}; "
+                               "nothing was applied again")
         raise InvalidInput(
             f"step {key!r} of run {state.run_id} was interrupted while applying its effect and "
             "the effect cannot tell whether it is in place (conflict): a person must check the "
-            f"target, then `skill cancel {state.run_id}`; nothing was applied again"
+            f"target. `skill resume {state.run_id}` checks again; `skill cancel {state.run_id}` "
+            "checks once more, says what is in place and ends the run without removing anything; "
+            "nothing was applied again"
         )
 
     def _revoke(
@@ -746,8 +905,12 @@ class SkillEngine:
                         self._approval_detail(approval))
             self._set_step(row, "failed", error_code="approval_altered", finished=True)
             self._finish_run_locked(state.run_id, state.session, "failed", "approval_altered")
-        return RunOutcome(state.run_id, "failed",
-                          message="the proposal changed after it was approved; nothing applied")
+        if approval["status"] == "granted":
+            message = "the proposal changed after it was approved; nothing applied"
+        else:  # still pending: nobody approved it (2026-11-25, independent review)
+            message = ("the proposal changed while it was waiting for an approval (not approved "
+                       "yet); the request was withdrawn and nothing applied")
+        return RunOutcome(state.run_id, "failed", message=message)
 
     def _set_awaiting(self, state: _Run, row: sqlite3.Row) -> None:
         with transaction(self._conn):
@@ -775,9 +938,55 @@ class SkillEngine:
         return (f"approval={approval['approval_id']};step={approval['step_key']};"
                 f"hash={approval['proposal_hash']}")
 
+    def _bind(self, skill: Skill, session: Session, run_id: str, now: str, manifest: str) -> str:
+        """What each effect of the skill fixes for the whole run, as canonical JSON (2026-11-25).
+
+        Asked before the run exists: an effect that refuses (no vault configured, say) leaves
+        nothing behind. Values are short strings, never a path or content."""
+        bindings: dict[str, dict[str, str]] = {}
+        for step in skill.workflow.steps:
+            if not isinstance(step, ApprovalStep) or step.effect in bindings:
+                continue
+            context = EffectContext(
+                str(session.session_id), run_id, step.id, skill.name,
+                project_slug=session.project_id, run_created_at=now,
+                skill_version=skill.version, skill_sha256=skill.sha256,
+                inputs=json.loads(manifest),
+            )
+            bound = self._effects[step.effect].bind(context)
+            bindings[step.effect] = {str(k): str(v) for k, v in bound.items()}
+        return json.dumps(bindings, sort_keys=True, separators=(",", ":"))
+
     def _effect_context(self, state: _Run, step: ApprovalStep) -> EffectContext:
-        return EffectContext(str(state.session.session_id), state.run_id, step.id,
-                             state.skill.name)
+        run = self._require_run(state.run_id)
+        bindings = json.loads(run["effect_bindings"] or "{}")
+        notes = self._conn.execute(
+            "SELECT DISTINCT rc.note_path, rc.sha256 FROM request_context rc JOIN skill_steps s "
+            "ON s.request_id = rc.request_id WHERE s.run_id = ? AND s.status = 'completed' "
+            "ORDER BY rc.note_path, rc.sha256",
+            (state.run_id,),
+        ).fetchall()
+        return EffectContext(
+            str(state.session.session_id), state.run_id, step.id, state.skill.name,
+            project_slug=state.session.project_id,
+            run_created_at=run["created_at"],
+            skill_version=run["skill_version"],
+            skill_sha256=run["skill_sha256"],
+            inputs=json.loads(run["inputs_manifest"]),
+            memory_notes=tuple((note["note_path"], note["sha256"]) for note in notes),
+            binding=bindings.get(step.effect, {}),
+            model_marks=self._model_marks(state, step),
+        )
+
+    def _model_marks(self, state: _Run, step: ApprovalStep) -> int | None:
+        """Literal redaction marks in the raw model output behind the approved text."""
+        checked = state.skill.step(step.of)
+        if not isinstance(checked, ValidateStep):
+            return None
+        try:
+            return self._output(state, checked.of).count(REDACTION_MARK)
+        except InvalidInput:  # a real provider's output from another invocation
+            return None
 
     # -- values and outputs ---------------------------------------------------------------------
 
@@ -959,7 +1168,17 @@ class SkillEngine:
         )
 
     def _finish_run_locked(self, run_id: str, session: Session, status: str, code: str) -> None:
+        """Finish the run; an approval still `pending` or `granted` is revoked with it, so that
+        no finished run keeps a usable approval (2026-11-25, independent review)."""
         now = utc_iso(self._clock())
+        for approval in self._conn.execute(
+            "SELECT approval_id, step_key, proposal_hash FROM approvals "
+            "WHERE run_id = ? AND status IN ('pending', 'granted')",
+            (run_id,),
+        ).fetchall():
+            self._set_approval(approval["approval_id"], "revoked", decided_at=now)
+            self._audit("approval.revoked", "run_finished", session, run_id,
+                        self._approval_detail(approval))
         self._conn.execute(
             "UPDATE skill_runs SET status = ?, error_code = ?, updated_at = ?, finished_at = ? "
             "WHERE run_id = ?",
