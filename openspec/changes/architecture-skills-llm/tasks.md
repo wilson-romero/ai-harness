@@ -88,6 +88,17 @@ Revisión independiente de `991b3f4`: confirma las garantías principales y encu
   - (d) Los cambios del motor no tenían delta en `human-approval`/`skill-execution`. `skill-engine` está mergeado pero sin archivar, así que se editan en esta rama sus specs en `openspec/changes/skill-engine/specs/` (escenario «Excepción inesperada del efecto», requisito «Rehúses controlados y turno exclusivo del efecto», escenario «Entrada que no es un fichero regular», «Cancelar una ejecución» ampliado); la proposal lo dice.
   - (e) `--input-file` con una tubería con nombre se quedaba bloqueado sin límite. Ahora se exige un fichero regular por `stat`, se abre con `O_NONBLOCK` y se comprueba la identidad con `fstat` antes de una lectura acotada. Recibo: rojo antes `test_input_file_that_is_a_pipe_is_refused_without_blocking` → `subprocess.TimeoutExpired … timed out after 15 seconds`; `test_input_file_that_is_a_folder_is_refused` → código 1 `cannot be read` en lugar de 2 `not a regular file`. Verde después: código 2 al momento y ninguna ejecución creada. El test de la tubería se omite con motivo visible si Python no tiene `os.mkfifo`.
   - (f) La deduplicación es débil porque el modelo elige el título: escrito en el README y en D8.
+- [x] 7.8 Mutaciones que sobrevivían: cada una tiene ahora un test que la mata. Controles negativos en un worktree desechable fuera del repo sobre `2f0e0a2`, una mutación cada vez (borrado después):
+  - quitar la comprobación de `project_slug` en `apply` → `test_apply_refuses_a_proposal_that_does_not_match_its_target[project]` falla (1 failed, 67 passed);
+  - quitar la comprobación de `id8`/nombre en `apply` → `[name]` y `[id8]` fallan (2 failed);
+  - quitar la comprobación de identidad tras el enlace → `test_a_published_name_that_is_not_the_file_written_is_uncertain` falla;
+  - no retirar la nota si `Decisiones/` cambió durante la escritura → `test_decisiones_swapped_for_a_link_during_the_write_takes_the_note_back` falla;
+  - fecha UTC en lugar de local → `test_the_note_date_is_the_local_date_when_the_run_was_created` y `test_a_zone_change_between_run_and_resume_keeps_the_date_and_the_approval` fallan.
+- [x] 7.9 Escenarios débiles reforzados.
+  - «Ejecución no interactiva»: el test del motor comprueba también que el CLI da a ese resultado el código 3 (`_report(outcome) == 3`).
+  - «Revisión completa»: el documento entero está entre la marca de apertura y la de cierre de su referencia (el mismo nonce), después de las instrucciones, y aparece una sola vez.
+  - «Documento con órdenes»: compara la conducta con y sin órdenes (estado, salida, pasos e intentos, memoria enviada, llamadas al proveedor, aprobaciones, huella del vault: iguales) y que las órdenes viajan solo dentro de las marcas. Lo que no puede probar está en el propio test: el Mock contesta por guion, así que no dice nada de si un modelo real obedece las órdenes.
+  - Recibo (2026-11-25, macOS arm64, Python 3.14.8). Control negativo en un worktree desechable sobre `2f0e0a2`, con `_block` de `references.py` cambiado para poner el texto **después** de la marca de cierre: los dos tests anteriores pasan (`2 passed`); los nuevos fallan (`2 failed`).
 
 ## Workflow follow-up
 

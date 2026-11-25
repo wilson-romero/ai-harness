@@ -18,6 +18,7 @@ import pytest
 
 from harness.memory.context import build_context
 from harness.skills.config import DEFAULT_SKILLS_DIR
+from harness.skills.commands import _report
 from harness.skills.decision_effect import DecisionEffect
 from harness.skills.effects import EffectBusy
 from tests.conftest import REPO_ROOT, SECRET_SAMPLES, fingerprint, make_symlink, subprocess_env
@@ -188,6 +189,7 @@ def test_non_interactive_run_waits_with_exit_status_and_vault_untouched(conn, da
     before = fingerprint(vault)
     outcome = run(engine, sessions.create_session("Demo", "demo-alpha"))
     assert outcome.status == "awaiting_approval"
+    assert _report(outcome) == 3  # the exit code the CLI gives this outcome
     assert fingerprint(vault) == before
     # `skill resume` in a terminal shows the whole note.
     terminal = FakeTerminal([None])

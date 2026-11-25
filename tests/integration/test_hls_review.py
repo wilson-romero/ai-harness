@@ -48,10 +48,17 @@ def test_complete_review_with_the_mock(conn, data_dir, vault):
     assert provider.calls == 1
     prompt = provider.prompts[0]
     assert "<<<MEMORIA" in prompt and "projects/demo-alpha/_project.md" in prompt
-    # The document is inside the data markers of the reference, after the instructions.
-    start = prompt.index("inputs.document")
-    assert "Servicio sintético de pedidos" in prompt[start:]
-    assert prompt.index(KEY) < start
+    # The whole document is between the opening and the closing marker of its reference (the
+    # same nonce), after the instructions, and nowhere else in the prompt.
+    document = _fixture("hls-corto.md").strip("\n")
+    opening = next(line for line in prompt.split("\n")
+                   if line.startswith("<<<DATOS ") and line.endswith(" inputs.document"))
+    nonce = opening.split()[1]
+    start = prompt.index(opening) + len(opening) + 1
+    end = prompt.index(f"DATOS {nonce}>>>", start)
+    assert document in prompt[start:end]
+    assert prompt.count(document) == 1
+    assert prompt.index(KEY) < prompt.index(opening)
 
 
 def test_session_without_project_is_refused_before_the_vault_and_the_provider(conn, data_dir,
@@ -109,21 +116,42 @@ def test_the_review_writes_nothing_in_the_vault(conn, data_dir, vault, tmp_path)
 
 
 def test_orders_inside_the_document_change_nothing(conn, data_dir, vault):
-    engine, sessions, _ = _engine(conn, data_dir, vault)
-    plain = sessions.create_session("Sin órdenes", "demo-alpha")
-    _run(engine, plain, document=_fixture("hls-corto.md"))
-    rows_plain = _context_rows(conn)
-    conn.execute("DELETE FROM request_context")
-    before = fingerprint(vault)
-    orders = sessions.create_session("Con órdenes", "demo-alpha")
-    outcome = _run(engine, orders, document=_fixture("hls-con-ordenes.md"))
-    assert outcome.status == "completed"
-    assert _context_rows(conn) == rows_plain
-    assert conn.execute("SELECT count(*) FROM approvals").fetchone()[0] == 0
-    steps = conn.execute(
-        "SELECT DISTINCT step_key FROM skill_steps ORDER BY step_key").fetchall()
-    assert [s[0] for s in steps] == ["check", "review"]
-    assert fingerprint(vault) == before
+    """The same review with and without orders in the document behaves the same in the harness:
+    same steps and attempts, same memory sent, one provider call each, no approval, vault
+    untouched, and the orders travel only inside the data markers. What it cannot prove: the
+    Mock answers by script, so this says nothing about whether a real model obeys the orders."""
+
+    def review(name, title):
+        engine, sessions, provider = _engine(conn, data_dir, vault)
+        conn.execute("DELETE FROM request_context")
+        before = fingerprint(vault)
+        outcome = _run(engine, sessions.create_session(title, "demo-alpha"),
+                       document=_fixture(name))
+        steps = conn.execute(
+            "SELECT step_key, attempt, status FROM skill_steps WHERE run_id = ? "
+            "ORDER BY position, attempt", (outcome.run_id,)).fetchall()
+        return {
+            "status": outcome.status,
+            "output": outcome.output,
+            "steps": [tuple(s) for s in steps],
+            "context": [tuple(r) for r in _context_rows(conn)],
+            "calls": provider.calls,
+            "approvals": conn.execute(
+                "SELECT count(*) FROM approvals WHERE run_id = ?", (outcome.run_id,)
+            ).fetchone()[0],
+            "vault_untouched": fingerprint(vault) == before,
+        }, provider.prompts[0]
+
+    plain, _ = review("hls-corto.md", "Sin órdenes")
+    with_orders, prompt = review("hls-con-ordenes.md", "Con órdenes")
+    assert with_orders == plain
+    assert plain["status"] == "completed" and plain["approvals"] == 0 and plain["vault_untouched"]
+    document = _fixture("hls-con-ordenes.md").strip("\n")
+    opening = next(line for line in prompt.split("\n")
+                   if line.startswith("<<<DATOS ") and line.endswith(" inputs.document"))
+    start = prompt.index(opening)
+    end = prompt.index(f"DATOS {opening.split()[1]}>>>", start)
+    assert prompt.count(document) == 1 and start < prompt.index(document) < end
 
 
 def test_the_skill_has_no_approval_and_no_effect():
