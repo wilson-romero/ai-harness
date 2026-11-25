@@ -1,4 +1,4 @@
-"""The parts of the MCP client that need no server: environment, watchdog, last barrier."""
+"""The parts of the MCP client that need no server: environment, deadline, classification."""
 
 from __future__ import annotations
 
@@ -12,12 +12,12 @@ from harness.mcp import commands
 from harness.mcp.client import (
     BASE_ENV_NAMES,
     RECURSION_MARKER,
-    Outcome,
     SessionRequest,
     build_server_env,
     run_session,
 )
 from harness.mcp.config import ServerEntry
+from harness.mcp.worker import classify
 from tests.mcp_support import hang_guard  # noqa: F401 - fixture
 
 ENTRY = ServerEntry.model_validate({
@@ -52,55 +52,37 @@ def test_recursion_is_refused_before_the_configuration_is_read(cli, tmp_path):
     assert code == 1 and "recursion" in err and out == ""
 
 
-def test_watchdog_abandons_a_worker_that_ignores_cancellation(monkeypatch, hang_guard):  # noqa: F811
-    """The conversation itself blocks its own event loop and never sees the cancel."""
+def test_the_bound_covers_the_child_margin_and_the_tree_kill():
+    """D4 as revised on 2026-11-24: startup + call + GUARANTEED_EXTRA_S, by construction."""
+    assert client_module.GUARANTEED_EXTRA_S >= (
+        client_module.CHILD_MARGIN_S + client_module.TREE_END_S
+    )
+    assert client_module.session_budget_s(ENTRY, True) == 1 + 1 + client_module.GUARANTEED_EXTRA_S
 
-    async def stuck(request, env, control):
-        time.sleep(6)  # blocks the loop: a cancel scope cannot interrupt this
-        return Outcome()
 
-    monkeypatch.setattr(client_module, "_converse", stuck)
-    monkeypatch.setattr(client_module, "CANCEL_MARGIN_S", 0.5)
-    monkeypatch.setattr(client_module, "ABANDON_MARGIN_S", 1.5)
+def test_a_session_process_that_never_answers_is_killed_at_the_deadline(
+    monkeypatch, tmp_path, hang_guard  # noqa: F811
+):
+    """The session process reads nothing and says nothing: the harness ends it by itself."""
+    script = tmp_path / "silent.py"
+    script.write_text("import time\nwhile True:\n    time.sleep(1)\n", encoding="utf-8")
+    monkeypatch.setattr(client_module, "WORKER_ARGS", [str(script)])
+    monkeypatch.setattr(client_module, "CHILD_MARGIN_S", 0.5)
     started = time.monotonic()
     outcome = run_session(SessionRequest(ENTRY, None), {})
     elapsed = time.monotonic() - started
-    assert outcome.abandoned and outcome.error_code == "abandoned"
-    assert elapsed < ENTRY.startup_timeout_s + 1.5 + 1.0
+    assert outcome.error_code == "timeout" and outcome.server_stopped is True
+    assert elapsed < ENTRY.startup_timeout_s + 0.5 + client_module.TREE_END_S + 2
 
 
-def test_watchdog_cancels_a_cooperative_worker_at_the_deadline(monkeypatch, hang_guard):  # noqa: F811
-    async def slow(request, env, control):
-        with anyio.CancelScope() as scope:
-            control.attach(__import__("asyncio").get_running_loop(), scope)
-            await anyio.sleep(30)
-        return Outcome(error_code=control.reason)
-
-    monkeypatch.setattr(client_module, "_converse", slow)
-    monkeypatch.setattr(client_module, "CANCEL_MARGIN_S", 0.5)
-    started = time.monotonic()
+def test_a_session_process_that_says_nonsense_is_an_internal_error(
+    monkeypatch, tmp_path, hang_guard  # noqa: F811
+):
+    script = tmp_path / "nonsense.py"
+    script.write_text("print('[1, 2, 3]', flush=True)\n", encoding="utf-8")
+    monkeypatch.setattr(client_module, "WORKER_ARGS", [str(script)])
     outcome = run_session(SessionRequest(ENTRY, None), {})
-    assert not outcome.abandoned and outcome.error_code == "timeout"
-    assert time.monotonic() - started < ENTRY.startup_timeout_s + 0.5 + 1.0
-
-
-def test_an_abandoned_call_is_audited_and_ends_the_process(cli, tmp_path, monkeypatch):
-    from tests.mcp_support import server_entry, write_config
-
-    config = write_config(tmp_path / "mcp.json", {"synthetic": server_entry(tmp_path / "s")})
-    exits: list[int] = []
-    monkeypatch.setattr(commands, "hard_exit", exits.append)
-    monkeypatch.setattr(client_module, "run_session",
-                        lambda request, environ: Outcome(error_code="abandoned", abandoned=True))
-    code, out, err = cli("mcp", "call", "synthetic", "get_project_metadata",
-                         "--args", '{"project": "demo-alpha"}', HARNESS_MCP_CONFIG=str(config))
-    assert exits == [1]
-    assert "did not shut down in time" in err and out == ""
-    from tests.conftest import query
-
-    assert query(tmp_path / "data", "SELECT status, error_code FROM tool_calls") == [
-        ("abandoned", "abandoned")
-    ]
+    assert outcome.error_code == "internal_error" and outcome.server_stopped is True
 
 
 @pytest.mark.parametrize(("error", "phase", "code"), [
@@ -108,10 +90,22 @@ def test_an_abandoned_call_is_audited_and_ends_the_process(cli, tmp_path, monkey
     (ExceptionGroup("g", [ValueError("x"), TimeoutError()]), "call", "timeout"),
     (anyio.EndOfStream(), "list", "server_exited"),
     (FileNotFoundError("/x"), "startup", "spawn_failed"),
-    (RuntimeError("Invalid structured content returned by tool x"), "call", "invalid_result"),
     (RuntimeError("Unsupported protocol version from the server: 1999"), "startup",
      "protocol_error"),
     (KeyError("x"), "call", "internal_error"),
 ])
 def test_errors_are_classified_without_their_text(error, phase, code):
-    assert client_module._classify(error, phase) == code
+    assert classify(error, phase) == code
+
+
+def test_an_error_reply_is_a_server_error_only_if_the_server_sent_one():
+    """Finding 8 of the review: the SDK makes up -32000 for a closed connection."""
+    from mcp import MCPError
+
+    from harness.mcp.transport import TransportState
+
+    error = MCPError(code=-32000, message="Connection closed")
+    state = TransportState(limit=1)
+    assert classify(error, "call", state) == "server_exited"
+    state.error_replies = 1
+    assert classify(error, "call", state) == "server_error"

@@ -1,7 +1,9 @@
 """Structure of `harness/mcp/` (mcp-gateway D9, D13, task 4.4).
 
-The only way to a process is the SDK's process start, reused by the bounded transport; there
-is no shell, no `subprocess`, no listening socket, no HTTP transport and no import of the
+Two ways to a process, each in one place (D4 as revised on 2026-11-24): `client.py` starts the
+session process with the SDK's helper (its own process group or Job Object), and `transport.py`
+starts the server inside it with `anyio.open_process` (no new group: the harness's kill of the
+session process's group reaches the server). There is no shell, no `subprocess`, no listening socket, no HTTP transport and no import of the
 Enterprise Architect package. What this proves: the source of `harness/mcp/` contains none of
 those forms. What it does not prove: what the SDK does inside (the audit-hook test in
 `tests/integration/test_mcp_cli.py` covers sockets at run time).
@@ -51,11 +53,22 @@ def problems(source: str) -> list[str]:
     return found
 
 
+# The one allowed start of the server process, and only in this module.
+ALLOWED = {("transport.py", "call open_process")}
+
+
 def test_the_mcp_package_has_no_other_way_to_a_process_or_a_socket():
     offenders = []
     for path in sorted(PACKAGE.rglob("*.py")):
-        offenders += [f"{path.name}: {p}" for p in problems(path.read_text(encoding="utf-8"))]
+        offenders += [f"{path.name}: {p}" for p in problems(path.read_text(encoding="utf-8"))
+                      if (path.name, p) not in ALLOWED]
     assert offenders == []
+
+
+def test_the_server_is_started_exactly_once_in_the_transport():
+    source = (PACKAGE / "transport.py").read_text(encoding="utf-8")
+    assert problems(source).count("call open_process") == 1
+    assert "start_new_session" not in source and "creationflags" not in source
 
 
 SAMPLES = [
@@ -84,14 +97,14 @@ def test_each_forbidden_form_is_found(sample):
 def test_the_package_is_where_the_check_looks():
     assert {p.name for p in PACKAGE.glob("*.py")} >= {
         "config.py", "policy.py", "client.py", "transport.py", "render.py", "audit.py",
-        "commands.py",
+        "commands.py", "worker.py",
     }
 
 
-def test_only_the_transport_touches_the_sdk_private_process_helpers():
+def test_only_the_supervisor_starts_a_process_in_its_own_kill_scope():
     users = [p.name for p in PACKAGE.rglob("*.py")
              if "_create_platform_compatible_process" in p.read_text(encoding="utf-8")]
-    assert users == ["transport.py"]
+    assert users == ["client.py"]
 
 
 def test_the_cli_does_not_import_the_sdk_for_other_commands():

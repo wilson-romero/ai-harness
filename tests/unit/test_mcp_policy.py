@@ -67,6 +67,8 @@ CASES = [
     ("boolean for integer", "synthetic", "count_items", {"limit": True}, "argument_invalid"),
     ("float for integer", "synthetic", "count_items", {"limit": 2.0}, "argument_invalid"),
     ("string for boolean", "synthetic", "count_items", {"verbose": "true"}, "argument_invalid"),
+    ("one for boolean", "synthetic", "count_items", {"verbose": 1}, "argument_invalid"),
+    ("zero for boolean", "synthetic", "count_items", {"verbose": 0}, "argument_invalid"),
     ("value outside enum", "synthetic", "set_project_metadata",
      {"project": "demo-alpha", "status": "borrado"}, "argument_invalid"),
     ("declared write", "synthetic", "set_project_metadata",
@@ -84,7 +86,9 @@ def test_each_reason_in_its_order(label, server, tool, args, reason):
 
 def test_every_pre_start_reason_is_covered():
     covered = {case[4] for case in CASES}
-    assert covered == set(DENIAL_REASONS) - {"recursion", "tool_absent", "schema_mismatch"}
+    assert covered == set(DENIAL_REASONS) - {
+        "recursion", "tool_absent", "schema_mismatch", "annotation_conflict"
+    }
 
 
 @pytest.mark.parametrize(("tool", "args"), [
@@ -163,3 +167,31 @@ def test_what_the_server_says_never_allows_a_write():
     assert decide_offered(write, schema, "set_project_metadata").operation == "write"
     decision = decide("set_project_metadata", {"project": "demo-alpha"})
     assert decision.reason == "write_requires_approval"
+
+
+# -- annotations can only restrict (independent review of 2026-11-24, finding 6) ---------------
+
+
+@pytest.mark.parametrize("annotations", [
+    {"destructiveHint": True},
+    {"readOnlyHint": False},
+    {"readOnlyHint": False, "destructiveHint": True},
+])
+def test_a_read_tool_the_server_says_writes_is_denied(annotations):
+    decision = decide_offered(DECLARED, SCHEMA, "get_project_metadata", annotations)
+    assert (decision.allowed, decision.reason) == (False, "annotation_conflict")
+
+
+@pytest.mark.parametrize("annotations", [
+    None, {}, {"readOnlyHint": True}, {"destructiveHint": False}, {"idempotentHint": True},
+    "no es un objeto", {"readOnlyHint": "false"},
+])
+def test_other_annotations_change_nothing_for_a_read_tool(annotations):
+    assert decide_offered(DECLARED, SCHEMA, "get_project_metadata", annotations).allowed
+
+
+def test_annotations_never_turn_a_write_into_a_read():
+    write = TOOLS["set_project_metadata"]
+    schema = {"type": "object", "properties": {"project": {}, "status": {}}}
+    decision = decide_offered(write, schema, "set_project_metadata", {"readOnlyHint": True})
+    assert decision.operation == "write"

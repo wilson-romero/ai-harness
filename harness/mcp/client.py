@@ -1,36 +1,46 @@
-"""One bounded conversation with one MCP server (mcp-gateway D3, D4, D8).
+"""One bounded conversation with one MCP server, run in a session process (mcp-gateway D4).
 
-The whole conversation (start, handshake, `list_tools`, at most one `call_tool`, shutdown) runs
-in a worker thread with its own event loop. The main thread only waits, in short slices, up to
-a deadline it measures itself with a monotonic clock. Inside, every phase has its own deadline;
-the shutdown is the SDK's (close stdin, 2 s, kill the process tree, every wait bounded). If the
-worker has still not returned at the command's deadline, the main thread asks it to cancel; if
-it has not returned a few seconds later, the session is abandoned and the caller ends the
-process. No wait in this module depends on the server cooperating.
+Revised on 2026-11-24 after an independent review: a server could hang the harness for good
+(a regular expression in its output schema, evaluated by the SDK while holding the interpreter
+lock, ignored every deadline and Ctrl+C). The SDK no longer runs in the harness process. Here,
+the harness:
+
+- starts `python -m harness.mcp.worker` in its own kill scope (process group on POSIX, Job
+  Object on Windows; the SDK's helper), and the worker starts the server inside that scope;
+- sends it the request, reads what it says in bounded lines, decides on the offered tools;
+- measures one deadline itself, on a monotonic clock: startup + call + `CHILD_MARGIN_S`;
+- always ends the whole tree when the conversation is over or the deadline passes (SIGTERM,
+  2 s, SIGKILL on POSIX; the job on Windows) and records whether the tree was seen to end;
+- honours Ctrl+C at any moment: the first one ends the tree and the command exits with 130.
+
+Guaranteed bound for `mcp call` and `mcp tools`: startup + call + `GUARANTEED_EXTRA_S`
+seconds, whatever the server or the session process do (measured by the tests in
+`tests/integration/test_mcp_review.py`). Nothing the session process sends is printed here
+without cleaning.
 """
 
 from __future__ import annotations
 
-import asyncio
+import json
 import logging
-import math
 import os
+import signal
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping
-
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import anyio
 import mcp_types as types
-from mcp import Client, Implementation, MCPError
-from pydantic import ValidationError
+from mcp.client.stdio import _close_pipe, _create_platform_compatible_process
+from mcp.client.stdio import _terminate_process_tree as _terminate_tree
 
 from harness.mcp.config import ServerEntry
-from harness.mcp.policy import Decision
-from harness.mcp.transport import TransportState, bounded_stdio
+from harness.mcp.policy import Decision, matches_shape
+from harness.mcp.worker import LIST_MESSAGE_LIMIT
 
 RECURSION_MARKER = "AI_HARNESS_MCP_CHILD"
 # Copied from the harness's environment when present, on every platform (a name a platform
@@ -43,14 +53,19 @@ BASE_ENV_NAMES = (
     "SYSTEMDRIVE", "SYSTEMROOT", "TEMP", "USERNAME", "USERPROFILE",
     "TMP", "TMPDIR", "WINDIR", "COMSPEC",
 )
-LIST_MESSAGE_LIMIT = 1024 * 1024  # handshake and tool listing: bytes per message
-MAX_LIST_PAGES = 10
-MAX_TOOLS = 1000
-CANCEL_MARGIN_S = 15.0  # after startup + call: ask the worker to cancel
-ABANDON_MARGIN_S = 20.0  # after startup + call: give up on the worker
-INTERRUPT_GRACE_S = 15.0  # after Ctrl+C: time for the shutdown to finish
-WAIT_SLICE_S = 0.1
-CLIENT_INFO = Implementation(name="ai-harness", version="0.1.0")
+# How the session process is started: `sys.executable` followed by these (a test replaces
+# them with a stand-in that hangs).
+WORKER_ARGS = ["-m", "harness.mcp.worker"]
+PACKAGE_ROOT = Path(__file__).resolve().parents[2]  # where `-m harness...` is found
+# Interpreter start, the worker's own shutdown of the server (0.5 + 2 + 2 s) and slack: the
+# session process normally reports well within startup + call + this.
+CHILD_MARGIN_S = 10.0
+# Ending the tree after the deadline: SIGTERM, 2 s, SIGKILL, up to 2 s to see it gone.
+TREE_END_S = 4.0
+GUARANTEED_EXTRA_S = 15.0  # CHILD_MARGIN_S + TREE_END_S, rounded up
+CHANNEL_LINE_LIMIT = 32 * 1024 * 1024  # one message of the session process
+EXIT_POLL_S = 0.01
+TICK_S = 0.1
 
 
 def build_server_env(entry: ServerEntry, environ: Mapping[str, str]) -> dict[str, str]:
@@ -75,12 +90,14 @@ class OfferedTool:
     name: str
     description: str
     input_schema: Any
+    output_schema: Any = None
+    annotations: Any = None
 
 
 @dataclass(frozen=True)
 class SessionRequest:
     entry: ServerEntry
-    errlog: Path | None  # where the server's stderr goes; None: the null device
+    errlog: Path | None  # where the server's stderr goes; None: dropped
     tool: str | None = None  # None: list the tools only
     arguments: dict[str, Any] | None = None
     max_result_bytes: int = 0
@@ -100,240 +117,269 @@ class Outcome:
     call_bytes: int = 0
     server_stopped: bool | None = None
     interrupted: bool = False
-    abandoned: bool = False
+    killed_at_deadline: bool = False  # the harness's own deadline, not a phase deadline
     call_sent: bool = False
     duration_ms: int = 0
 
 
-class _Control:
-    """Lets the main thread cancel the worker's conversation, at any moment, from outside."""
+class _Interrupts:
+    """Ctrl+C while the session runs: the first one cancels, the others are ignored."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._scope: anyio.CancelScope | None = None
-        self.reason: str | None = None
+        self.pressed = False
+        self._cancel: Callable[[], None] | None = None
+        self._previous: Any = None
+        self._installed = False
 
-    def attach(self, loop: asyncio.AbstractEventLoop, scope: anyio.CancelScope) -> None:
-        with self._lock:
-            self._loop, self._scope = loop, scope
-            if self.reason is not None:
-                scope.cancel()
+    def install(self, cancel: Callable[[], None]) -> None:
+        self._cancel = cancel
+        if threading.current_thread() is threading.main_thread():
+            self._previous = signal.signal(signal.SIGINT, self._handle)
+            self._installed = True
 
-    def cancel(self, reason: str) -> None:
-        with self._lock:
-            if self.reason is None:
-                self.reason = reason
-            if self._loop is not None and self._scope is not None:
-                try:
-                    self._loop.call_soon_threadsafe(self._scope.cancel)
-                except RuntimeError:
-                    pass  # the loop already ended
+    def _handle(self, signum: int, frame: object) -> None:
+        if not self.pressed and self._cancel is not None:
+            self.pressed = True
+            self._cancel()
+
+    def restore(self) -> None:
+        if self._installed:
+            signal.signal(signal.SIGINT, self._previous)
+            self._installed = False
 
 
 def run_session(request: SessionRequest, environ: Mapping[str, str]) -> Outcome:
-    """Run the conversation in a worker thread; return within the deadline, whatever happens.
+    """Run the conversation in a session process; return within the bound, whatever happens.
 
-    Raises KeyboardInterrupt after the shutdown, if the person interrupted (the outcome is
-    attached to the exception as `.outcome`).
+    Raises KeyboardInterrupt after the tree is ended, if the person interrupted (the outcome
+    is attached to the exception as `.outcome`).
     """
-    _silence_sdk_logs()
-    entry = request.entry
-    control = _Control()
-    env = build_server_env(entry, environ)
-    box: list[Outcome] = []
+    logging.getLogger("mcp").setLevel(logging.CRITICAL + 1)
     started = time.monotonic()
-
-    def worker() -> None:
-        try:
-            box.append(anyio.run(_converse, request, env, control, backend="asyncio"))
-        except BaseException:  # never printed: it may quote what the server sent
-            box.append(Outcome(error_code="internal_error"))
-
-    thread = threading.Thread(target=worker, name="mcp-session", daemon=True)
-    thread.start()
-    budget = entry.startup_timeout_s + (entry.call_timeout_s if request.tool else 0)
-    interrupted = False
+    interrupts = _Interrupts()
     try:
-        _join(thread, started + budget + CANCEL_MARGIN_S)
-    except KeyboardInterrupt:
-        interrupted = True
-        control.cancel("interrupted")
-        _join_ignoring_interrupts(thread, time.monotonic() + INTERRUPT_GRACE_S)
-    if thread.is_alive() and not interrupted:
-        control.cancel("timeout")
-        _join_ignoring_interrupts(thread, started + budget + ABANDON_MARGIN_S)
-    if thread.is_alive():
-        outcome = Outcome(error_code="abandoned", abandoned=True)
-    else:
-        outcome = box[0]
-    outcome.interrupted = interrupted
+        outcome = anyio.run(_supervise, request, dict(environ), started, interrupts,
+                            backend="asyncio")
+    finally:
+        interrupts.restore()
     outcome.duration_ms = int((time.monotonic() - started) * 1000)
-    if interrupted:
+    if interrupts.pressed:
+        outcome.interrupted = True
+        outcome.error_code = "interrupted"
         error = KeyboardInterrupt()
         error.outcome = outcome  # type: ignore[attr-defined]
         raise error
     return outcome
 
 
-def _join(thread: threading.Thread, deadline: float) -> None:
-    while thread.is_alive() and (remaining := deadline - time.monotonic()) > 0:
-        thread.join(timeout=min(WAIT_SLICE_S, remaining))
-
-
-def _join_ignoring_interrupts(thread: threading.Thread, deadline: float) -> None:
-    while thread.is_alive() and time.monotonic() < deadline:
-        try:
-            _join(thread, deadline)
-        except KeyboardInterrupt:
-            continue  # a second Ctrl+C does not skip the bounded shutdown
-
-
-def _silence_sdk_logs() -> None:
-    # The SDK's log records can quote what a server sent; Python's last-resort handler would
-    # print them unsanitised on stderr.
-    for name in ("mcp", "mcp_types"):
-        logging.getLogger(name).setLevel(logging.CRITICAL + 1)
-
-
-async def _converse(
-    request: SessionRequest, env: dict[str, str], control: _Control
+async def _supervise(
+    request: SessionRequest, environ: dict[str, str], started: float, interrupts: _Interrupts
 ) -> Outcome:
+    entry = request.entry
     outcome = Outcome()
-    state = TransportState(limit=LIST_MESSAGE_LIMIT)
-    with anyio.CancelScope() as scope:
-        state.on_fault = scope.cancel
-        control.attach(asyncio.get_running_loop(), scope)
+    budget = entry.startup_timeout_s + (entry.call_timeout_s if request.tool else 0)
+    deadline = anyio.current_time() + budget + CHILD_MARGIN_S - (time.monotonic() - started)
+    loop = _running_loop()
+    with anyio.CancelScope(deadline=deadline) as scope:
+        interrupts.install(lambda: loop.call_soon_threadsafe(scope.cancel))
+        devnull = open(os.devnull, "w")  # noqa: SIM115 - the session process's own stderr
         try:
-            await _talk(request, env, state, outcome)
-        except Exception as exc:  # noqa: BLE001 - classified, never printed
-            outcome.error_code = _classify(exc, outcome.phase)
-    if state.fault is not None:
-        outcome.error_code = state.fault
-        outcome.fault_bytes, outcome.fault_bytes_exact = state.fault_bytes, state.fault_bytes_exact
-    elif scope.cancel_called:
-        # Only the main thread (interrupt, deadline) or a fault cancels this scope.
-        outcome.error_code = control.reason or outcome.error_code or "interrupted"
-    outcome.call_bytes = state.call_bytes
-    outcome.server_stopped = state.server_stopped
-    if outcome.error_code is None and outcome.phase == "shutdown":
-        outcome.phase = "done"
+            process = await _create_platform_compatible_process(
+                command=sys.executable, args=list(WORKER_ARGS), env=environ, errlog=devnull,
+                cwd=PACKAGE_ROOT,
+            )
+        except OSError:
+            devnull.close()
+            outcome.error_code = "internal_error"
+            return outcome
+        try:
+            async with anyio.create_task_group() as group:
+                group.start_soon(_tick)
+                await _guarded(_converse(process, request, environ, outcome), outcome)
+                group.cancel_scope.cancel()
+        finally:
+            with anyio.CancelScope(shield=True):
+                outcome.server_stopped = await _end_tree(process)
+            devnull.close()
+            # Inside the loop: the event loop's runner restores its own handler when it ends.
+            interrupts.restore()
+    if interrupts.pressed:
+        outcome.error_code = "interrupted"
+        outcome.result = None
+    elif scope.cancelled_caught:
+        outcome.error_code = "timeout"
+        outcome.killed_at_deadline = True
+        outcome.result = None
     return outcome
 
 
-async def _talk(
-    request: SessionRequest, env: dict[str, str], state: TransportState, outcome: Outcome
+async def _tick() -> None:
+    """Wake the loop often: a Python signal handler (Ctrl+C) only runs when the main thread
+    runs Python code, and an event loop waiting for I/O may not be woken by the signal (on
+    Windows it never is)."""
+    while True:
+        await anyio.sleep(TICK_S)
+
+
+async def _guarded(conversation: Any, outcome: Outcome) -> None:
+    try:
+        await conversation
+    except (OSError, anyio.BrokenResourceError, anyio.ClosedResourceError,
+            anyio.EndOfStream, ValueError):
+        if outcome.error_code is None:
+            outcome.error_code = "internal_error"
+
+
+async def _converse(
+    process: Any, request: SessionRequest, environ: Mapping[str, str], outcome: Outcome
 ) -> None:
     entry = request.entry
-    # One scope for the whole session whose deadline moves from phase to phase: the client's
-    # task group must be entered and left inside the same scope. The shutdown is shielded.
-    with anyio.CancelScope(deadline=anyio.current_time() + entry.startup_timeout_s) as phase:
-        with _open_errlog(request.errlog) as errlog:
-            transport = bounded_stdio(list(entry.command), env, entry.cwd, errlog, state)
-            # No sampling, elicitation or roots callbacks: the harness offers none, and the SDK
-            # answers a server's request for one with an error (D8). No response cache.
-            client = Client(transport, mode="legacy", cache=None, client_info=CLIENT_INFO)
-            async with client:
-                outcome.phase = "list"
-                outcome.offered = await _list_tools(client)
-                if request.tool is None or request.check_offered is None:
-                    outcome.phase = "shutdown"
-                    return
-                outcome.decision = request.check_offered(outcome.offered)
-                if not outcome.decision.allowed:
-                    outcome.phase = "shutdown"
-                    return
-                outcome.phase = state.phase = "call"
-                state.limit = request.max_result_bytes
-                phase.deadline = anyio.current_time() + entry.call_timeout_s
+    lines = _Lines(process.stdout)
+    await _send(process, {
+        "command": list(entry.command),
+        "env": build_server_env(entry, environ),
+        "cwd": entry.cwd or os.getcwd(),
+        "startup_timeout_s": entry.startup_timeout_s,
+        "call_timeout_s": entry.call_timeout_s if request.tool else 0,
+        "tool": request.tool,
+        "arguments": request.arguments,
+        "max_result_bytes": request.max_result_bytes,
+        "errlog": str(request.errlog) if request.errlog is not None else None,
+    })
+    message = await lines.next()
+    if message.get("event") == "offered":
+        outcome.phase = "list"
+        outcome.offered = _offered(message.get("tools"))
+        if request.tool is not None and request.check_offered is not None:
+            outcome.decision = request.check_offered(outcome.offered)
+            go = outcome.decision.allowed
+            if go:
+                outcome.phase = "call"
                 outcome.call_sent = True
-                # The session's call_tool, not the Client's: the Client's re-sends the call by
-                # itself (input-required rounds, a re-list after a header mismatch). Exactly
-                # one tools/call request leaves here.
-                outcome.result = await client.session.call_tool(
-                    request.tool, request.arguments, read_timeout_seconds=entry.call_timeout_s
-                )
-                outcome.phase = state.phase = "shutdown"
-                phase.deadline = math.inf
-    if phase.cancelled_caught:
-        raise TimeoutError  # classified as `timeout`; outcome.phase names the phase
+            await _send(process, {"go": go})
+        message = await lines.next()
+    if message.get("event") != "outcome":
+        outcome.error_code = "internal_error"
+        return
+    _absorb(message, outcome, request)
 
 
-async def _list_tools(client: Client) -> dict[str, OfferedTool]:
+def _absorb(message: dict[str, Any], outcome: Outcome, request: SessionRequest) -> None:
+    phase = message.get("phase")
+    if isinstance(phase, str) and phase in ("startup", "list", "call", "shutdown", "done"):
+        outcome.phase = phase
+    code = message.get("error_code")
+    outcome.error_code = code if isinstance(code, str) and code.isidentifier() else None
+    if code is not None and outcome.error_code is None:
+        outcome.error_code = "internal_error"
+    outcome.fault_bytes = _int(message.get("fault_bytes"))
+    outcome.fault_bytes_exact = message.get("fault_bytes_exact") is not False
+    outcome.call_bytes = _int(message.get("call_bytes")) or 0
+    raw = message.get("result")
+    if outcome.error_code is None and raw is not None:
+        try:
+            result = types.CallToolResult.model_validate(raw)
+        except ValueError:
+            outcome.error_code = "invalid_result"
+            return
+        if not result.is_error and not _shape_ok(result, outcome, request):
+            outcome.error_code = "invalid_result"
+            return
+        outcome.result = result
+
+
+def _shape_ok(result: types.CallToolResult, outcome: Outcome, request: SessionRequest) -> bool:
+    """The harness's own check of a structured result against the tool's output schema: types,
+    `required`, `properties`, `items`, `additionalProperties: false` only; never a pattern."""
+    tool = (outcome.offered or {}).get(request.tool or "")
+    schema = tool.output_schema if tool is not None else None
+    if not isinstance(schema, dict):
+        return True
+    if result.structured_content is None:
+        return False  # a tool with an output schema must return structured content
+    return matches_shape(schema, result.structured_content)
+
+
+def _offered(raw: Any) -> dict[str, OfferedTool]:
     offered: dict[str, OfferedTool] = {}
-    cursor: str | None = None
-    for _ in range(MAX_LIST_PAGES):
-        page = await client.list_tools(cursor=cursor)
-        for tool in page.tools:
-            if len(offered) >= MAX_TOOLS:
-                return offered
-            offered.setdefault(
-                tool.name, OfferedTool(tool.name, tool.description or "", tool.input_schema)
-            )
-        cursor = page.next_cursor
-        if cursor is None:
-            break
+    if not isinstance(raw, dict):
+        return offered
+    for name, tool in raw.items():
+        if not isinstance(name, str) or not isinstance(tool, dict):
+            continue
+        description = tool.get("description")
+        offered[name] = OfferedTool(
+            name, description if isinstance(description, str) else "",
+            tool.get("input_schema"), tool.get("output_schema"), tool.get("annotations"),
+        )
     return offered
 
 
-class _open_errlog:  # noqa: N801 - a context manager used like a function
-    """The server's stderr goes to its own log file, never to the harness's terminal."""
-
-    def __init__(self, path: Path | None) -> None:
-        self._path = path
-        self._handle: Any = None
-
-    def __enter__(self) -> Any:
-        if self._path is not None:
-            try:
-                self._handle = self._path.open("a", encoding="utf-8")
-            except OSError:
-                self._handle = None
-        if self._handle is None:
-            self._handle = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
-        return self._handle
-
-    def __exit__(self, *exc_info: object) -> None:
-        self._handle.close()
+def _int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def _classify(exc: BaseException, phase: str) -> str:
-    """An error code for an exception from the SDK or the transport. Its text is never used."""
-    leaves = list(_leaves(exc))
-    if any(isinstance(leaf, TimeoutError) for leaf in leaves):
-        return "timeout"
-    for leaf in leaves:
-        if isinstance(leaf, MCPError):
-            return "server_exited" if leaf.code == types.CONNECTION_CLOSED else "protocol_error"
-    for leaf in leaves:
-        if isinstance(leaf, (anyio.EndOfStream, anyio.ClosedResourceError,
-                             anyio.BrokenResourceError, BrokenPipeError, ConnectionError)):
-            return "server_exited"
-    for leaf in leaves:
-        if isinstance(leaf, OSError) and phase == "startup":
-            return "spawn_failed"
-    for leaf in leaves:
-        if isinstance(leaf, RuntimeError) and _is_schema_failure(leaf):
-            return "invalid_result"
-        if isinstance(leaf, ValidationError):
-            return "invalid_result" if phase == "call" else "protocol_error"
-        if isinstance(leaf, RuntimeError):
-            return "protocol_error"
-    return "internal_error"
+async def _send(process: Any, message: dict[str, Any]) -> None:
+    data = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    await process.stdin.send(data + b"\n")
 
 
-def _is_schema_failure(exc: RuntimeError) -> bool:
-    # The SDK's two messages for a structured result that breaks the tool's output schema
-    # (mcp 2.3.0, ClientSession.validate_tool_result). Only the prefix is compared.
-    text = str(exc.args[0]) if exc.args else ""
-    return text.startswith("Invalid structured content") or "has an output schema" in text[:200]
+class _Lines:
+    """Bounded JSON lines from the session process."""
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+        self._buffer = bytearray()
+        self._scanned = 0
+
+    async def next(self) -> dict[str, Any]:
+        while (newline := self._buffer.find(b"\n", self._scanned)) < 0:
+            self._scanned = len(self._buffer)
+            if len(self._buffer) > CHANNEL_LINE_LIMIT:
+                raise ValueError("message too large")
+            self._buffer += await self._stream.receive()
+        line = bytes(self._buffer[:newline])
+        del self._buffer[: newline + 1]
+        self._scanned = 0
+        value = json.loads(line)
+        if not isinstance(value, dict):
+            raise ValueError("not an object")
+        return value
 
 
-def _leaves(exc: BaseException):
-    if isinstance(exc, BaseExceptionGroup):
-        for inner in exc.exceptions:
-            yield from _leaves(inner)
-    else:
-        yield exc
-        if exc.__cause__ is not None:
-            yield from _leaves(exc.__cause__)
+async def _end_tree(process: Any) -> bool:
+    """End the session process and everything in its kill scope; True if seen to end."""
+    await _close_pipe(process.stdin)
+    await _terminate_tree(process)
+    with anyio.move_on_after(TREE_END_S / 2):
+        while process.returncode is None:
+            await anyio.sleep(EXIT_POLL_S)
+    stopped = process.returncode is not None
+    if stopped and hasattr(os, "killpg"):
+        # POSIX: the group is gone only once every member is (the SDK's own probe).
+        from mcp.os.posix.utilities import _group_alive
+
+        with anyio.move_on_after(TREE_END_S / 2):
+            while _group_alive(process.pid):
+                await anyio.sleep(EXIT_POLL_S)
+        stopped = not _group_alive(process.pid)
+    from mcp.os.win32.utilities import close_process_job
+
+    close_process_job(process)
+    await _close_pipe(process.stdout)
+    transport = getattr(getattr(process, "_process", None), "_transport", None)
+    if callable(getattr(transport, "close", None)):
+        transport.close()
+    return stopped
+
+
+def _running_loop() -> Any:
+    import asyncio
+
+    return asyncio.get_running_loop()
+
+
+def session_budget_s(entry: ServerEntry, with_call: bool) -> float:
+    """The longest a session can take, by construction (what the tests measure against)."""
+    return entry.startup_timeout_s + (entry.call_timeout_s if with_call else 0) + \
+        GUARANTEED_EXTRA_S

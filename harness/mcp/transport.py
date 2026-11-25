@@ -7,28 +7,28 @@ read as bytes into one buffer, each new chunk is scanned once for the newline, a
 longer than the current limit is never decoded or parsed: the transport counts its size,
 reports a fault and stops reading.
 
-What is reused from the SDK, unchanged: starting the process in its own kill scope (process
-group on POSIX, Job Object on Windows) and the shutdown sequence (close stdin, wait, kill the
-whole tree). Those are the SDK's private helpers of the pinned version (`mcp==2.3.0`); the
-platform branches stay inside the SDK, none is added here.
+This transport runs inside the session process (`harness.mcp.worker`, design D4 as revised on
+2026-11-24). The server is started as a plain child of that process, in the same process group
+(POSIX) or Job Object (Windows): the harness kills the whole tree of the session process from
+outside, so the server and anything it starts in that group end with it, without a platform
+branch here. Inside, the shutdown is: close stdin, wait 2 s, kill the server, wait 2 s.
+
+The server's stderr is read through a pipe: the first `STDERR_KEEP_BYTES` go to its log, the
+rest is counted and dropped, and past `STDERR_KILL_BYTES` the session is ended with the fault
+`stderr_too_large` (independent review of 2026-11-24, finding 2).
 """
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import TextIO
 
 import anyio
 import anyio.lowlevel
 import mcp_types as types
-from mcp.client.stdio import (
-    _create_platform_compatible_process,
-    _drain_stdout,
-    _get_executable_command,
-    _stop_server_process,
-)
+from mcp.client.stdio import _drain_stdout, _get_executable_command
 from mcp.shared.message import SessionMessage
 
 # The rest of an oversized message is counted (not kept) up to this size or for this long, to
@@ -36,6 +36,11 @@ from mcp.shared.message import SessionMessage
 OVERFLOW_COUNT_CAP = 64 * 1024 * 1024
 OVERFLOW_COUNT_WINDOW_S = 1.0
 WRITER_FLUSH_TIMEOUT_S = 0.5
+STOP_GRACE_S = 2.0  # after closing the server's stdin, before killing it
+REAP_WAIT_S = 2.0  # after the kill, for the process to be seen ended
+EXIT_POLL_S = 0.01
+STDERR_KEEP_BYTES = 1024 * 1024  # per session, written to the server's log
+STDERR_KILL_BYTES = 64 * 1024 * 1024  # per session: past this the server is stopped
 
 
 @dataclass
@@ -44,11 +49,13 @@ class TransportState:
 
     limit: int  # largest message accepted now, in bytes of its UTF-8 line
     phase: str = "startup"
-    fault: str | None = None  # protocol_error, result_too_large, message_too_large
+    fault: str | None = None  # protocol_error, result/message_too_large, stderr_too_large
     fault_bytes: int | None = None  # size of the oversized message, if it was measured
     fault_bytes_exact: bool = True
     call_bytes: int = 0  # bytes of the messages received during the call phase
-    server_stopped: bool | None = None  # set by the shutdown: did the process end?
+    server_stopped: bool | None = None  # set by the shutdown: did the server process end?
+    error_replies: int = 0  # JSON-RPC error responses the server itself sent
+    stderr_bytes: int = 0  # everything the server wrote on stderr, kept or not
     on_fault: Callable[[], None] = field(default=lambda: None)
 
     def report(self, fault: str, size: int | None = None, exact: bool = True) -> None:
@@ -62,13 +69,14 @@ async def bounded_stdio(
     command: list[str],
     env: dict[str, str],
     cwd: str | None,
-    errlog: TextIO,
+    errlog: int | None,
     state: TransportState,
 ) -> AsyncGenerator[tuple[object, object], None]:
+    """`errlog` is a file descriptor open for appending, or None to drop the server's stderr."""
     executable = await _get_executable_command(command[0])
-    process = await _create_platform_compatible_process(
-        command=executable, args=command[1:], env=env, errlog=errlog, cwd=cwd
-    )
+    # Not in a new session or job of its own: the server stays in the session process's kill
+    # scope, which the harness ends from outside (see the module docstring).
+    process = await anyio.open_process([executable, *command[1:]], env=env, cwd=cwd)
     # No awaits until the task group is entered (same rule as the SDK): a cancellation in the
     # gap would leak the live process.
     read_writer, read_stream = anyio.create_memory_object_stream[SessionMessage | Exception](0)
@@ -102,6 +110,8 @@ async def bounded_stdio(
                 if message is None:
                     state.report("protocol_error")
                     return None
+                if isinstance(message.message, types.JSONRPCError):
+                    state.error_replies += 1
                 await read_writer.send(message)
             del buffer[:start]
             scanned = len(buffer)
@@ -137,6 +147,34 @@ async def bounded_stdio(
         except (anyio.ClosedResourceError, anyio.BrokenResourceError, ConnectionError):
             pass  # shutdown closed a stream under the read; the session sees the closure
 
+    async def stderr_reader() -> None:
+        """Keep the first bytes in the log, count the rest, stop a server that floods it."""
+        assert process.stderr is not None
+        kept = 0
+        try:
+            async for chunk in process.stderr:
+                state.stderr_bytes += len(chunk)
+                if errlog is not None and kept < STDERR_KEEP_BYTES:
+                    part = chunk[: STDERR_KEEP_BYTES - kept]
+                    kept += len(part)
+                    try:
+                        os.write(errlog, part)
+                    except OSError:
+                        pass
+                if state.stderr_bytes > STDERR_KILL_BYTES:
+                    state.report("stderr_too_large", state.stderr_bytes, False)
+                    return
+        except (anyio.ClosedResourceError, anyio.BrokenResourceError, OSError):
+            pass
+        finally:
+            dropped = state.stderr_bytes - kept
+            if errlog is not None and dropped > 0:
+                try:
+                    os.write(errlog, f"\n[ai-harness: {dropped} more bytes of stderr were "
+                                     "dropped]\n".encode("ascii"))
+                except OSError:
+                    pass
+
     async def stdin_writer() -> None:
         assert process.stdin is not None
         try:
@@ -156,14 +194,23 @@ async def bounded_stdio(
         write_stream.close()
         with anyio.move_on_after(WRITER_FLUSH_TIMEOUT_S):
             await writer_done.wait()
-        await _stop_server_process(process)
+        await _close(process.stdin)
+        if not await _exited(process, STOP_GRACE_S):
+            try:
+                process.kill()  # the server only; its whole tree is the harness's to end
+            except OSError:
+                pass
+            await _exited(process, REAP_WAIT_S)
         state.server_stopped = process.returncode is not None
+        await _close(process.stdout)
+        await _close(process.stderr)
         for stream in (read_stream, write_stream, read_writer, write_reader):
             await stream.aclose()
         await anyio.lowlevel.checkpoint()
 
     async with anyio.create_task_group() as group:
         group.start_soon(stdout_reader)
+        group.start_soon(stderr_reader)
         group.start_soon(stdin_writer)
         try:
             yield read_stream, write_stream
@@ -174,6 +221,23 @@ async def bounded_stdio(
                 await shutdown()
             group.cancel_scope.cancel()
     await anyio.lowlevel.cancel_shielded_checkpoint()
+
+
+async def _close(stream: object) -> None:
+    if stream is None:
+        return
+    try:
+        await stream.aclose()  # type: ignore[attr-defined]
+    except (OSError, anyio.BrokenResourceError, anyio.ClosedResourceError):
+        pass
+
+
+async def _exited(process: object, timeout: float) -> bool:
+    """Poll the return code (not `wait()`: a grandchild holding a pipe would make it hang)."""
+    with anyio.move_on_after(timeout):
+        while process.returncode is None:  # type: ignore[attr-defined]
+            await anyio.sleep(EXIT_POLL_S)
+    return process.returncode is not None  # type: ignore[attr-defined]
 
 
 def _parse(line: bytes) -> SessionMessage | None:

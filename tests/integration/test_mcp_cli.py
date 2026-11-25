@@ -27,6 +27,7 @@ from tests.mcp_support import (
     child_env,
     hang_guard,  # noqa: F401 - fixture
     kill_survivors,
+    result_lines,
     run_bounded,
     server_entry,
     write_config,
@@ -60,22 +61,10 @@ def ws(tmp_path: Path, hang_guard) -> Workspace:  # noqa: F811
         kill_survivors(server)
 
 
-class HardExit(AssertionError):
-    pass
-
-
 @pytest.fixture
-def mcp(cli, ws, monkeypatch):
-    """Run `main.py mcp ...` in this process against the workspace's allowlist.
-
-    The last barrier (`os._exit` when a session is abandoned) would end pytest itself here;
-    it becomes a test failure instead.
-    """
-
-    def no_hard_exit(code: int) -> None:
-        raise HardExit(f"the harness abandoned the session and would exit with {code}")
-
-    monkeypatch.setattr("harness.mcp.commands.hard_exit", no_hard_exit)
+def mcp(cli, ws):
+    """Run `main.py mcp ...` in this process against the workspace's allowlist. The session
+    itself runs in a separate process (D4 as revised on 2026-11-24)."""
 
     def run(*args: str, **env: str):
         started = time.monotonic()
@@ -161,7 +150,7 @@ def test_allowed_call(mcp, ws, data_dir):
     server = ws.server()
     code, out, err, _ = mcp("call", "synthetic", "get_project_metadata", "--args", ALPHA)
     assert code == 0, err
-    assert json.loads(out)["name"] == "Demo Alpha"
+    assert json.loads(result_lines(out))["name"] == "Demo Alpha"
     assert re.search(r"^call: synthetic/get_project_metadata completed in \d+ ms, \d+ bytes, "
                      r"0 credential\(s\) redacted$", err, re.M)
     assert server.calls() == ["call get_project_metadata"]
@@ -182,7 +171,7 @@ def test_a_server_written_with_the_official_sdk(mcp, ws, tmp_path):
     code, out, err, _ = mcp("call", "sdk", "get_project_metadata", "--args", ALPHA,
                             HARNESS_MCP_CONFIG=str(config))
     assert code == 0, err
-    assert json.loads(out)["name"] == "Demo Alpha (SDK)"
+    assert json.loads(result_lines(out))["name"] == "Demo Alpha (SDK)"
     code, out, err, _ = mcp("tools", "sdk", HARNESS_MCP_CONFIG=str(config))
     assert code == 0 and "get_project_metadata\tread\tallowed" in out, err
 
@@ -192,7 +181,7 @@ def test_the_tool_reports_an_error(mcp, ws, data_dir):
     code, out, err, _ = mcp("call", "synthetic", "get_project_metadata",
                             "--args", '{"project": "demo-error"}')
     assert code == 1 and out == ""
-    assert "error: the tool reported an error: fallo sintetico rojo [REDACTED:github]" in err
+    assert "error: the tool reported an error:\n| fallo sintetico rojo [REDACTED:github]" in err
     assert "\x1b" not in err
     assert (rows(data_dir)[0]["status"], rows(data_dir)[0]["error_code"]) == ("failed", "tool_error")
     assert server.stopped()
@@ -208,7 +197,7 @@ def test_metacharacters_in_the_command_reach_the_server_literally(mcp, ws, tmp_p
     ws.servers.append(Server(ws.root / "state-meta"))
     code, out, err, _ = mcp("call", "synthetic", "echo_argv")
     assert code == 0, err
-    assert json.loads(out)[-4:] == list(tricky)
+    assert json.loads(result_lines(out))[-4:] == list(tricky)
     assert list(work.iterdir()) == [] and not list(REPO_ROOT.glob("CANARY*"))
 
 
@@ -262,7 +251,7 @@ def test_an_undeclared_variable_does_not_reach_the_server(mcp, ws):
     server = ws.server()
     code, out, _, _ = mcp("call", "synthetic", "echo_env", "--args",
                           '{"name": "HARNESS_TEST_CANARY"}', HARNESS_TEST_CANARY="1")
-    assert code == 0 and out.strip() == "HARNESS_TEST_CANARY: absent"
+    assert code == 0 and result_lines(out).strip() == "HARNESS_TEST_CANARY: absent"
     assert server.stopped()
 
 
@@ -270,7 +259,7 @@ def test_a_declared_variable_reaches_the_server_with_its_value(mcp, ws):
     server = ws.server(env=("HARNESS_TEST_CANARY",))
     code, out, _, _ = mcp("call", "synthetic", "echo_env", "--args",
                           '{"name": "HARNESS_TEST_CANARY"}', HARNESS_TEST_CANARY="valor-1")
-    assert code == 0 and out.strip() == "HARNESS_TEST_CANARY: visible=valor-1"
+    assert code == 0 and result_lines(out).strip() == "HARNESS_TEST_CANARY: visible=valor-1"
     assert server.stopped()
 
 
@@ -284,7 +273,7 @@ def test_the_server_starts_with_only_the_base_environment(mcp, ws, monkeypatch):
     server = ws.server()
     code, out, err, _ = mcp("call", "synthetic", "env_names")
     assert code == 0, err
-    names = set(out.split())
+    names = set(result_lines(out).split())
     added_by_os = {"__CF_USER_TEXT_ENCODING", "LC_CTYPE", "PWD", "SHLVL", "_"}
     assert names - added_by_os <= set(BASE_ENV_NAMES) | {RECURSION_MARKER}
     assert RECURSION_MARKER in names and "HARNESS_TEST_SECRETO" not in names
@@ -480,7 +469,7 @@ def test_audit_rows_never_hold_argument_values_or_result_text(mcp, ws, data_dir)
     ]
     unknown = rows(data_dir)[2]["server"]
     assert unknown == "otro [REDACTED:github]"
-    assert all(len(r["args_sha256"] or "x" * 64) == 64 for r in rows(data_dir))
+    assert all(len(r["args_hmac"] or "x" * 64) == 64 for r in rows(data_dir))
 
 
 def test_a_stale_running_row_is_recovered_as_interrupted(mcp, ws, data_dir):
@@ -497,15 +486,24 @@ def test_a_stale_running_row_is_recovered_as_interrupted(mcp, ws, data_dir):
             "args_bytes, status, created_at) VALUES ('fresh', 'synthetic', 't', 'read', "
             "'allowed', 'allowed', 2, 'running', strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))")
     conn.close()
-    mcp("call", "synthetic", "drop_project")
+    # "Stale" is "nobody holds its lock" (revised 2026-11-24), not an age: the fresh row's
+    # lock is held here, as a live command would hold it.
+    from harness.mcp.audit import call_lock
+
+    live = call_lock(data_dir, "fresh")
+    assert live.acquire()
+    try:
+        mcp("call", "synthetic", "drop_project")
+    finally:
+        live.release()
     by_id = {r["call_id"]: r for r in rows(data_dir)}
     assert (by_id["old"]["status"], by_id["old"]["error_code"]) == ("failed", "interrupted")
-    assert by_id["fresh"]["status"] == "running"  # may still belong to a live command
+    assert by_id["fresh"]["status"] == "running"  # its owner is alive
 
 
 def test_the_table_refuses_content_shaped_values(data_dir, conn):
     insert = ("INSERT INTO tool_calls (call_id, server, tool, decision, reason, args_bytes, "
-              "status, created_at, args_sha256) VALUES (?, 's', 't', ?, ?, 0, ?, 'now', ?)")
+              "status, created_at, args_hmac) VALUES (?, 's', 't', ?, ?, 0, ?, 'now', ?)")
     for values in [
         ("a", "maybe", "allowed", "running", None),
         ("b", "denied", "a value /etc/passwd", "denied", None),

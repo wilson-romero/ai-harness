@@ -2,6 +2,10 @@
 
 Results go to stdout; denials, errors, warnings and the one-line summary go to stderr. Exit
 codes: 0 completed, 1 denied or failed, 2 misuse of `--args`, 130 interrupted.
+
+Every line of a tool's own text (its result on stdout, its error message on stderr) is printed
+after `RESULT_PREFIX` ("| "; an empty line is "|"), so that nothing a tool returns can pass for
+a line of the harness (independent review of 2026-11-24, finding 7).
 """
 
 from __future__ import annotations
@@ -18,6 +22,10 @@ from harness.config import Settings
 from harness.core.errors import HarnessError
 from harness.mcp.audit import (
     CallRow,
+    args_key,
+    call_lock,
+    forget_lock,
+    new_call_id,
     record_denied,
     record_denied_after_listing,
     record_finished,
@@ -46,6 +54,7 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
 LOG_ROTATE_BYTES = 1024 * 1024
+RESULT_PREFIX = "| "
 
 
 class RecursionRefused(HarnessError):
@@ -108,8 +117,6 @@ def _tools(config: LoadedConfig, server: str, data_dir: Path, environ: Mapping[s
 
     outcome = run_session(SessionRequest(entry, _server_log(data_dir, server)), environ)
     _warn_if_alive(outcome)
-    if outcome.abandoned:
-        return _abandon(None, None, outcome)
     if outcome.error_code is not None or outcome.offered is None:
         print(f"error: {_explain(outcome, entry, None)}", file=sys.stderr)
         return EXIT_ERROR
@@ -131,7 +138,7 @@ def _tool_line(entry: ServerEntry, name: str, offered: Mapping[str, OfferedTool]
         return [clean_name(name), "-", "denied:tool_not_allowed", description]
     if tool is None:
         return [name, declared.operation, "absent", ""]
-    decision = decide_offered(declared, tool.input_schema, name)
+    decision = decide_offered(declared, tool.input_schema, name, tool.annotations)
     if not decision.allowed:
         status = f"denied:{decision.reason}"
     elif declared.operation != "read":
@@ -157,38 +164,45 @@ def _call(
     parsed = parse_arguments(raw_args)
     conn = open_database(data_dir)
     try:
-        recover_stale(conn)
+        key = args_key(data_dir)
+        recover_stale(conn, data_dir)
         decision = decide_before_start(config, server, tool, parsed)
         if not decision.allowed:
             record_denied(conn, server, tool, decision.reason, decision.operation,
-                          parsed.canonical, parsed.size)
+                          parsed.canonical, parsed.size, key)
             _print_denied(decision)
             return EXIT_USAGE if decision.reason in USAGE_REASONS else EXIT_ERROR
         entry = config.servers[server]
         declared = entry.tools[tool]
-        row = record_running(conn, server, tool, declared.operation, parsed.canonical)
-
-        def check(offered: Mapping[str, OfferedTool]) -> Decision:
-            found = offered.get(tool)
-            return decide_offered(declared, found.input_schema if found else None, tool)
-
-        request = SessionRequest(
-            entry, _server_log(data_dir, server), tool, parsed.value,
-            declared.max_result_bytes, check,
-        )
+        call_id = new_call_id()
+        lock = call_lock(data_dir, call_id)
+        lock.acquire()  # a new name: nobody else can hold it
         try:
-            outcome = run_session(request, environ)
-        except KeyboardInterrupt as interrupt:
-            outcome = getattr(interrupt, "outcome", Outcome(error_code="interrupted"))
-            status = "abandoned" if outcome.abandoned else "failed"
-            code = "abandoned" if outcome.abandoned else "interrupted"
-            record_finished(conn, row, status, code, outcome.server_stopped, None,
-                            outcome.duration_ms)
-            _warn_if_alive(outcome)
-            if outcome.abandoned:
-                print("error: the MCP server did not shut down in time", file=sys.stderr)
-            raise
-        return _finish(conn, row, server, tool, entry, declared.max_result_bytes, outcome)
+            row = record_running(conn, call_id, server, tool, declared.operation,
+                                 parsed.canonical, key)
+
+            def check(offered: Mapping[str, OfferedTool]) -> Decision:
+                found = offered.get(tool)
+                if found is None:
+                    return decide_offered(declared, None, tool)
+                return decide_offered(declared, found.input_schema, tool, found.annotations)
+
+            request = SessionRequest(
+                entry, _server_log(data_dir, server), tool, parsed.value,
+                declared.max_result_bytes, check,
+            )
+            try:
+                outcome = run_session(request, environ)
+            except KeyboardInterrupt as interrupt:
+                outcome = getattr(interrupt, "outcome", Outcome(error_code="interrupted"))
+                record_finished(conn, row, "failed", "interrupted", outcome.server_stopped,
+                                None, outcome.duration_ms)
+                _warn_if_alive(outcome)
+                raise
+            return _finish(conn, row, server, tool, entry, declared.max_result_bytes, outcome)
+        finally:
+            lock.release()
+            forget_lock(data_dir, call_id)
     finally:
         conn.close()
 
@@ -205,8 +219,6 @@ def _finish(
     from harness.mcp.render import render_error, render_result
 
     _warn_if_alive(outcome)
-    if outcome.abandoned:
-        return _abandon(conn, row, outcome)
     if outcome.decision is not None and not outcome.decision.allowed:
         record_denied_after_listing(conn, row, outcome.decision.reason, outcome.server_stopped,
                                     outcome.duration_ms)
@@ -225,36 +237,22 @@ def _finish(
         message = render_error(result)
         record_finished(conn, row, "failed", "tool_error", outcome.server_stopped,
                         outcome.call_bytes, outcome.duration_ms)
-        print(f"error: the tool reported an error: {message.text}", file=sys.stderr)
+        print("error: the tool reported an error:", file=sys.stderr)
+        print(prefixed(message.text), file=sys.stderr)
         _summary(server, tool, "failed", outcome, message.redactions)
         return EXIT_ERROR
     rendered = render_result(result)
     record_finished(conn, row, "completed", None, outcome.server_stopped, outcome.call_bytes,
                     outcome.duration_ms)
-    print(rendered.text)
+    print(prefixed(rendered.text))
     _summary(server, tool, "completed", outcome, rendered.redactions)
     return EXIT_OK
 
 
-def _abandon(conn: sqlite3.Connection | None, row: CallRow | None, outcome: Outcome) -> int:
-    """The worker did not come back: record it, say it, and end the process here (D4)."""
-    if conn is not None and row is not None:
-        record_finished(conn, row, "abandoned", "abandoned", None, None, outcome.duration_ms)
-        conn.close()
-    print("error: the MCP server did not shut down in time; the harness stops here",
-          file=sys.stderr)
-    hard_exit(EXIT_ERROR)
-    return EXIT_ERROR  # only reached when hard_exit is replaced in a test
-
-
-def hard_exit(code: int) -> None:
-    """End the process without waiting for the stuck worker thread (the last barrier)."""
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.flush()
-        except (OSError, ValueError):
-            pass
-    os._exit(code)
+def prefixed(text: str) -> str:
+    """Every line of a tool's text after `RESULT_PREFIX` (an empty line: the bare bar)."""
+    bare = RESULT_PREFIX.rstrip()
+    return "\n".join(RESULT_PREFIX + line if line else bare for line in text.split("\n"))
 
 
 # -- messages ----------------------------------------------------------------------------------
@@ -274,6 +272,9 @@ def _explain(outcome: Outcome, entry: ServerEntry, limit: int | None) -> str:
     )
     if code == "timeout":
         seconds = entry.call_timeout_s if outcome.phase == "call" else entry.startup_timeout_s
+        if outcome.killed_at_deadline:
+            return (f"timeout: the MCP session did not end in time ({phase}); the harness "
+                    "killed it and everything it started")
         return f"timeout: the server did not answer in time ({phase}, {seconds} s)"
     if code in ("result_too_large", "message_too_large"):
         size = outcome.fault_bytes or 0
@@ -282,6 +283,10 @@ def _explain(outcome: Outcome, entry: ServerEntry, limit: int | None) -> str:
         return f"{code}: the server sent {amount} in one message; the limit is {bound} bytes"
     return {
         "server_exited": "server_exited: the server process ended before answering",
+        "server_error": "server_error: the server answered the request with an error; its "
+        "message is not shown",
+        "stderr_too_large": "stderr_too_large: the server wrote more than "
+        f"{_stderr_kill_bytes()} bytes on stderr; it was stopped",
         "protocol_error": "protocol_error: the server sent something that is not a valid MCP "
         "message; the session was closed",
         "invalid_result": "invalid_result: the structured result does not match the tool's "
@@ -302,8 +307,14 @@ def _summary(server: str, tool: str, status: str, outcome: Outcome, redactions: 
 
 def _warn_if_alive(outcome: Outcome) -> None:
     if outcome.server_stopped is False:
-        print("warning: the server process was still alive after the kill escalation",
+        print("warning: a process of the MCP session was still alive after the kill",
               file=sys.stderr)
+
+
+def _stderr_kill_bytes() -> int:
+    from harness.mcp.transport import STDERR_KILL_BYTES
+
+    return STDERR_KILL_BYTES
 
 
 def _shown(name: str) -> str:
@@ -311,11 +322,21 @@ def _shown(name: str) -> str:
 
 
 def _server_log(data_dir: Path, server: str) -> Path | None:
-    """`<data>/logs/mcp/<server>.stderr.log`, rotated once past 1 MiB; None if unusable."""
+    """`<data>/logs/mcp/<server>.stderr.log`; None if unusable.
+
+    Each session appends at most `transport.STDERR_KEEP_BYTES` (1 MiB) to it; before a session
+    a file past `LOG_ROTATE_BYTES` (1 MiB) becomes `.1`, replacing the previous one. So the two
+    files of a server never hold more than about 4 MiB. The directory and the files are
+    readable by their owner only where the system has mode bits.
+    """
     directory = data_dir / "logs" / "mcp"
     path = directory / f"{server}.stderr.log"
     try:
-        directory.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if hasattr(os, "getuid"):
+            os.chmod(directory, 0o700)
+            if path.exists():
+                os.chmod(path, 0o600)
         if path.exists() and path.stat().st_size > LOG_ROTATE_BYTES:
             os.replace(path, path.with_name(path.name + ".1"))
     except OSError:

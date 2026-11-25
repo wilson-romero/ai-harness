@@ -5,6 +5,8 @@ Usage: python driver.py MODE STATE_DIR ARGV...
 - `interrupt`: once the synthetic server has logged the call, deliver Ctrl+C to the main thread
   (`_thread.interrupt_main`, the same on every platform).
 - `sockets`: record every `socket.bind` audit event (SDK import included) in STATE_DIR.
+- `interrupt-stuck`: replace the harness's session process with `stuck_worker.py` (it hangs
+  in C code holding the GIL) and deliver Ctrl+C once it has started.
 The exit code is the CLI's.
 """
 
@@ -46,8 +48,24 @@ def _interrupt_when_called() -> None:
         time.sleep(0.05)
 
 
+def _interrupt_when_stuck() -> None:
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if (state / "stuck.log").exists():
+            time.sleep(0.5)
+            _thread.interrupt_main()
+            return
+        time.sleep(0.05)
+
+
 if mode == "sockets":
     sys.addaudithook(_socket_hook)
+elif mode == "interrupt-stuck":
+    import harness.mcp.client as client_module
+
+    stuck = Path(__file__).resolve().parent / "stuck_worker.py"
+    client_module.WORKER_ARGS = [str(stuck), str(state)]
+    threading.Thread(target=_interrupt_when_stuck, daemon=True).start()
 elif mode == "interrupt":
     threading.Thread(target=_interrupt_when_called, daemon=True).start()
 

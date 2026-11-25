@@ -134,6 +134,16 @@ def kill_survivors(server: Server) -> None:
             pass
 
 
+def result_lines(out: str) -> str:
+    """A tool result as printed on stdout, without the `| ` line prefix (review finding 7).
+    Fails if any line lacks the prefix."""
+    lines = []
+    for line in out.splitlines():
+        assert line.startswith("|"), f"unprefixed result line: {line!r}"
+        lines.append(line[2:])
+    return "\n".join(lines)
+
+
 def child_env(**extra: str) -> dict[str, str]:
     """The environment of a harness process run by a test: a copy of this one, never built."""
     env = {k: v for k, v in os.environ.items() if k not in HARNESS_VARS}

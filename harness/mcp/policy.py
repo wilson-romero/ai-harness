@@ -2,7 +2,9 @@
 
 The policy lives in the local allowlist. What a server says about a tool (description, input
 schema, annotations such as `readOnlyHint`) can only make a call fail (`tool_absent`,
-`schema_mismatch`); it can never allow anything the allowlist does not.
+`schema_mismatch`, `annotation_conflict`); it can never allow anything the allowlist does not.
+A server schema is only compared by shape (property names, `required`): no pattern, format or
+other construct a server sends is ever evaluated by the harness.
 
 Checks and reasons, in the order they are applied (the first failure wins):
 
@@ -12,7 +14,9 @@ Checks and reasons, in the order they are applied (the first failure wins):
 4. `tool_not_allowed`
 5. `argument_not_allowed`, `argument_missing`, `argument_invalid`
 6. `write_requires_approval`
-7. after `list_tools`: `tool_absent`, `schema_mismatch`
+7. after `list_tools`: `tool_absent`, `schema_mismatch`, `annotation_conflict` (a tool the
+   allowlist declares `read` that the server annotates `readOnlyHint: false` or
+   `destructiveHint: true`; added after the independent review of 2026-11-24)
 
 1 to 6 need no server, so a call they deny never starts a process.
 """
@@ -53,6 +57,7 @@ DENIAL_REASONS = (
     "write_requires_approval",
     "tool_absent",
     "schema_mismatch",
+    "annotation_conflict",
 )
 # Reasons that are a misuse of the command line (exit code 2) rather than a refusal.
 USAGE_REASONS = frozenset({"args_too_large", "args_not_json", "args_not_object"})
@@ -160,7 +165,9 @@ def _valid(spec: Any, value: Any) -> bool:
     return False
 
 
-def decide_offered(declared: ToolEntry, offered_schema: Any | None, tool: str) -> Decision:
+def decide_offered(
+    declared: ToolEntry, offered_schema: Any | None, tool: str, annotations: Any = None
+) -> Decision:
     """Check 7, once `list_tools` has answered: the server must offer the tool, compatibly.
 
     `offered_schema` is the input schema the server sent (untrusted), or None if the tool was
@@ -183,9 +190,97 @@ def decide_offered(declared: ToolEntry, offered_schema: Any | None, tool: str) -
         return Decision.deny(
             "schema_mismatch", f"tool {tool}: the server requires an argument the allowlist does not declare"
         )
+    if declared.operation == "read" and _says_it_writes(annotations):
+        return Decision.deny(
+            "annotation_conflict",
+            f"tool {tool}: the allowlist declares it read-only but the server says it writes",
+            operation=declared.operation,
+        )
     return Decision(True, ALLOWED, operation=declared.operation)
+
+
+def _says_it_writes(annotations: Any) -> bool:
+    """Only explicit statements count: MCP's defaults are not read as a claim either way."""
+    if not isinstance(annotations, Mapping):
+        return False
+    return annotations.get("readOnlyHint") is False or annotations.get("destructiveHint") is True
 
 
 def _name(text: str) -> str:
     """A name taken from the command line or a server, fit to print: cleaned and short."""
     return repr(safe_foreign_line(text).text[:64])
+
+
+# -- the shape of a structured result (independent review of 2026-11-24, finding 1) ------------
+
+SHAPE_MAX_DEPTH = 32
+SHAPE_MAX_STEPS = 1_000_000
+_JSON_TYPES = {
+    "object": lambda v: isinstance(v, dict),
+    "array": lambda v: isinstance(v, list),
+    "string": lambda v: isinstance(v, str),
+    "boolean": lambda v: isinstance(v, bool),
+    "null": lambda v: v is None,
+    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+}
+
+
+def matches_shape(schema: Any, value: Any) -> bool:
+    """Does `value` have the shape `schema` describes? A server's output schema is untrusted.
+
+    Only `type`, `required`, `properties`, `items` (one schema) and `additionalProperties:
+    false` are read. Everything else (`pattern`, `patternProperties`, `format`, `anyOf`,
+    `$ref`, ...) is ignored: nothing a server sends is ever compiled or run as a pattern. The
+    work is bounded by `SHAPE_MAX_STEPS` and the depth by `SHAPE_MAX_DEPTH`; past either the
+    answer is "no" (fail closed).
+    """
+    budget = [SHAPE_MAX_STEPS]
+    return _shape(schema, value, 0, budget) and budget[0] >= 0
+
+
+def _shape(schema: Any, value: Any, depth: int, budget: list[int]) -> bool:
+    budget[0] -= 1
+    if budget[0] < 0 or depth > SHAPE_MAX_DEPTH:
+        return False
+    if not isinstance(schema, Mapping):
+        return True  # `true`, or something that is not a schema: no constraint is read
+    if not _type_ok(schema.get("type"), value):
+        return False
+    if isinstance(value, dict):
+        return _object_ok(schema, value, depth, budget)
+    if isinstance(value, list):
+        items = schema.get("items")
+        if isinstance(items, Mapping):
+            return all(_shape(items, item, depth + 1, budget) for item in value)
+    return True
+
+
+def _type_ok(kind: Any, value: Any) -> bool:
+    if isinstance(kind, str):
+        check = _JSON_TYPES.get(kind)
+        return check is None or check(value)
+    if isinstance(kind, list):
+        known = [_JSON_TYPES[k] for k in kind[:8] if isinstance(k, str) and k in _JSON_TYPES]
+        return not known or any(check(value) for check in known)
+    return True
+
+
+def _object_ok(schema: Mapping, value: dict, depth: int, budget: list[int]) -> bool:
+    required = schema.get("required")
+    if isinstance(required, list):
+        budget[0] -= len(required)
+        if budget[0] < 0:
+            return False
+        if any(isinstance(name, str) and name not in value for name in required):
+            return False
+    properties = schema.get("properties")
+    properties = properties if isinstance(properties, Mapping) else {}
+    closed = schema.get("additionalProperties") is False
+    for key, item in value.items():
+        if key in properties:
+            if not _shape(properties[key], item, depth + 1, budget):
+                return False
+        elif closed:
+            return False
+    return True
