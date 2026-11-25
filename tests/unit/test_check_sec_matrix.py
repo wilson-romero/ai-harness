@@ -53,9 +53,9 @@ def project(tmp_path):
     spec.parent.mkdir(parents=True)
     spec.write_text(f"# demo\n\n### Requirement: {REQUIREMENT}\n\ntexto\n",
                     encoding="utf-8", newline="\n")
-    runbook = tmp_path / "docs" / "runbook"
-    runbook.mkdir(parents=True)
-    (runbook / "diagnostico.md").write_text(f"Lo produce `{TEST_A}`.\n", encoding="utf-8",
+    security = tmp_path / "docs" / "security"
+    security.mkdir(parents=True)
+    (security / "known-debt.md").write_text(f"Lo produce `{TEST_A}`.\n", encoding="utf-8",
                                             newline="\n")
     collected = tmp_path / "collected.txt"
     collected.write_text(COLLECTED, encoding="utf-8", newline="\n")
@@ -171,24 +171,24 @@ def test_a_missing_field(project, capsys):
     assert code == 1 and "SEC-01: field 'Límites' missing" in out
 
 
-def test_an_invented_id_in_the_diagnosis_guide(project, capsys):
-    guide = project / "docs" / "runbook" / "diagnostico.md"
+def test_an_invented_id_in_the_known_debt_list(project, capsys):
+    guide = project / "docs" / "security" / "known-debt.md"
     guide.write_text("Lo produce `tests/unit/test_demo.py::test_invented`.\n",
                      encoding="utf-8", newline="\n")
     code, out = check(project, matrix(), capsys)
     assert code == 1
-    assert "docs/runbook/diagnostico.md: test not collected by pytest: " \
+    assert "docs/security/known-debt.md: test not collected by pytest: " \
            "tests/unit/test_demo.py::test_invented" in out
 
 
 def test_a_broken_relative_link(project, capsys):
-    guide = project / "docs" / "runbook" / "diagnostico.md"
+    guide = project / "docs" / "security" / "known-debt.md"
     guide.write_text(f"`{TEST_A}`; ver [la matriz](../security/no-existe.md) y "
                      "[otra](https://example.com) y [aquí](#ancla).\n",
                      encoding="utf-8", newline="\n")
     code, out = check(project, matrix(), capsys)
     assert code == 1
-    assert "docs/runbook/diagnostico.md: broken link: ../security/no-existe.md" in out
+    assert "docs/security/known-debt.md: broken link: ../security/no-existe.md" in out
     assert "example.com" not in out and "#ancla" not in out
 
 

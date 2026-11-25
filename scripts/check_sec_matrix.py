@@ -13,9 +13,9 @@ It fails (exit code 1) unless `docs/security/sec-matrix.md`:
 - cites only pytest node ids that `pytest --collect-only -q` collects today;
 - cites only requirements that exist, by name, in the named spec under `openspec/`.
 
-It also checks that every pytest node id cited in the diagnosis guide is collected, and that
-every relative link of the security and runbook documents, `README.md` and `SECURITY.md`
-points to a file that exists.
+It also checks that every pytest node id cited in the known-debt list is collected, and that
+every relative link of the security documents, `README.md` and `SECURITY.md` points to a file
+that exists.
 
 What it does NOT check: that a cited test proves what the matrix says. That is the job of the
 review of the document and of the negative control each row cites (hardening design D2).
@@ -37,15 +37,13 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MATRIX = Path("docs") / "security" / "sec-matrix.md"
 # Documents whose pytest node ids must be collected (besides the matrix).
-CITING_DOCS = (Path("docs") / "runbook" / "diagnostico.md",)
+CITING_DOCS = (Path("docs") / "security" / "known-debt.md",)
 # Documents whose relative links must resolve.
 LINKED_DOCS = (
     Path("README.md"),
     Path("SECURITY.md"),
     Path("docs") / "security" / "sec-matrix.md",
     Path("docs") / "security" / "known-debt.md",
-    Path("docs") / "runbook" / "instalacion-y-uso.md",
-    Path("docs") / "runbook" / "diagnostico.md",
 )
 
 ROW_IDS = tuple(f"SEC-{n:02d}" for n in range(1, 16))

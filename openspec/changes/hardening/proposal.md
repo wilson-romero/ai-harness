@@ -12,8 +12,8 @@ Corte **8 · Cierre** de `docs/plan/2026-11-24-ai-harness-cortes.md`, en la part
 
 - **Matriz SEC viva** en `docs/security/sec-matrix.md`: por cada SEC-01..15, la capacidad y el requisito que lo cubren, los tests que lo prueban (por identificador de pytest), el control negativo (el recibo donde se vio fallar), el estado (`cubierto`, `parcial`, `pendiente de merge`, `no cubierto`, `BLOCKED`) y los límites escritos. Se rellena con lo que existe en `develop` el día que se implemente; lo de ramas sin mergear se marca `pendiente de merge`.
 - **Comprobación de que la matriz no se pudre** en `scripts/verify.sh`: un script que exige las 15 filas, un estado de la lista cerrada, al menos un test en cada fila `cubierto` o `parcial`, y que cada test citado exista y lo recoja `pytest --collect-only`.
-- **Runbook de instalación y uso** para macOS y Windows/PowerShell (`docs/runbook/instalacion-y-uso.md`).
-- **Guía de diagnóstico** (`docs/runbook/diagnostico.md`): qué significa cada estado incierto o en espera, qué hacer, dónde están los bloqueos, la base de datos y los logs, y qué no se debe borrar a mano.
+- **Runbook de instalación y uso** para macOS y Windows/PowerShell (`docs/runbook/instalacion-y-uso.md`). *Aplazada el 2026-11-25 por decisión de Wilson: la interfaz conversacional va antes (change `interactive-shell`); se escribirá cuando exista.*
+- **Guía de diagnóstico** (`docs/runbook/diagnostico.md`): qué significa cada estado incierto o en espera, qué hacer, dónde están los bloqueos, la base de datos y los logs, y qué no se debe borrar a mano. *Aplazada el 2026-11-25 por decisión de Wilson: la interfaz conversacional va antes (change `interactive-shell`); se escribirá cuando exista.*
 - **Lista de deuda conocida** (`docs/security/known-debt.md`) con dueño y decisión por cada punto.
 
 **No entra**, aunque un lector lo asumiría:
