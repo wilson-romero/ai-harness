@@ -36,7 +36,7 @@ Cada corte es demostrable por separado. Hecho = Wilson lo reproduce con el SHA i
 | 6 · EA escritura en pruebas (F06.3–4) | `ea_preview_diagram` y `ea_create_test_diagram`: cuatro componentes y tres relaciones, verificados releyendo el modelo; la escritura al target productivo se deniega | `ea-test-write` | Solo Windows | 11, 12 | N2 | **EN PAUSA** (sin EA) |
 | **Puerta MVP sin EA** (nueva, 2026-11-25) | Requerimiento → memoria del proyecto → Copilot real → revisión HLS → decisión aprobada y guardada en `Decisiones/` del vault; demo con el Mock y demo manual con Copilot real | `mvp-without-ea` | Mac; Windows como confirmación opcional | 01, 03, 06, 07, 12, 13 | N2 | Planificada; bloqueada por el merge del Corte 2 y de la segunda mitad del Corte 4 |
 | **7 · Puerta MVP** (F07) | `architecture-diagram` de punta a punta y `architecture-impact` | `architecture-skills-ea` | Windows | 03 | N2 | **EN PAUSA** (sin EA) |
-| 8 · Cierre (F09 y resto) | Matriz SEC-01..15 completa con recibos, runbook, backup y restauración, curador y Sueño asistidos, MCP Server propio del harness | `hardening`, `memory-curation`, `harness-mcp-server` | Mac y Windows | todas | N1 | Revisado el 2026-11-25: `harness-mcp-server` y la parte de `hardening` que no depende de EA se adelantan y van en paralelo a la Puerta MVP sin EA; `memory-curation` sigue después del MVP |
+| 8 · Cierre (F09 y resto) | Matriz SEC-01..15 completa con recibos, runbook, backup y restauración, curador y Sueño asistidos, MCP Server propio del harness | `hardening`, `memory-curation`, `harness-mcp-server` | Mac y Windows | todas | N1 | Revisado el 2026-11-25: `harness-mcp-server` y la parte de `hardening` que no depende de EA (sin copia y restauración, aplazada por ser un proyecto educativo) se adelantan y van en paralelo a la Puerta MVP sin EA; `memory-curation` sigue después del MVP |
 
 Los cortes 3–4 no dependen de 5–6: si EA bloquea, se sigue por memoria y Skills.
 
@@ -69,6 +69,7 @@ Los cortes 3–4 no dependen de 5–6: si EA bloquea, se sigue por memoria y Ski
 2. **Objetivo intermedio: Puerta MVP sin EA**, un flujo completo que no depende de EA y que se demuestra en macOS (Windows, confirmación opcional). Usa los cortes 2 y 4.
 3. **En paralelo:** el servidor MCP propio del harness (`harness-mcp-server`) y el cierre y endurecimiento que no depende de EA (`hardening`). Ninguno de los dos espera ya a EA.
 4. La integración con OpenCode se estudió y Wilson la descartó el 2026-11-25: sigue con el piloto del harness.
+5. **El proyecto es educativo:** sirve para aprender a construir un harness, no para producción. Desde el 2026-11-25 guía el alcance: se conserva lo que más enseña (las propiedades de seguridad nunca se aplazan) y se aplaza lo que solo tiene sentido en producción, como la copia y restauración de `HARNESS_DATA_DIR`.
 
 Decisiones vigentes que no cambian: repo público; sin código por plataforma fuera del paquete de EA; Windows no es puerta; sin perfiles; demos en Python; solo biblioteca estándar, pydantic y las dependencias ya aprobadas (`mcp==2.3.0`, `playwright`); la aprobación conserva su límite documentado (no prueba que haya una persona delante); git flow.
 
@@ -92,7 +93,7 @@ Decisiones vigentes que no cambian: repo público; sin código por plataforma fu
 ### Orden de lo que queda
 
 1. Terminar y mergear `copilot-web-provider` y `architecture-skills-llm` (en curso).
-2. En paralelo, sin esperar a 1: `harness-mcp-server` con el Mock (las herramientas que preguntan a Copilot real quedan BLOCKED por el merge del Corte 2 y por la confirmación de Wilson del alcance de la autorización) y `hardening` (matriz SEC viva, runbook, copia y restauración, diagnóstico, deuda conocida).
+2. En paralelo, sin esperar a 1: `harness-mcp-server` con el Mock (las herramientas que preguntan a Copilot real quedan BLOCKED por el merge del Corte 2 y por la confirmación de Wilson del alcance de la autorización) y `hardening` (matriz SEC viva, runbook de instalación y uso, guía de diagnóstico, deuda conocida).
 3. `mvp-without-ea`: la integración, la demo con el Mock y la demo manual con Copilot real, cuando 1 esté mergeado.
 4. Archivar los changes mergeados con su demo en PASS (`skill-engine`, `mcp-gateway`, después `architecture-skills-llm` y `copilot-web-provider`).
 5. EA (cortes 5 segunda mitad, 6 y 7) cuando Wilson lo tenga instalado.
@@ -101,6 +102,7 @@ Decisiones vigentes que no cambian: repo público; sin código por plataforma fu
 
 - Todo lo que necesita EA: `ea-read`, `ea-test-write`, `architecture-skills-ea` (`architecture-diagram`, `architecture-impact`), SEC-11 y la parte de COM de SEC-10.
 - `memory-curation` (curador y Sueño asistidos), Computer Use, sugerencia de Skill por IA.
+- Copia y restauración de `HARNESS_DATA_DIR` y cualquier tarea que solo sirva para operar en producción (proyecto educativo).
 - Guardar contenido real de Copilot y cifrar SQLite.
 - Escribir en el vault desde el servidor MCP (`memory_save_decision`): no entra en la primera versión de `harness-mcp-server` (ver su design).
 
