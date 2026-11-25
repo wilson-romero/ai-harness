@@ -85,7 +85,13 @@ Lo que **no** garantiza:
 
 ## Perfil dedicado de Edge (Copilot Web)
 
-El harness lanza Edge con su sandbox activado y sin las opciones de Playwright que solo apagan protecciones de fondo (bloqueo de ventanas emergentes, actualización de componentes y de listas de protección). Dos opciones predeterminadas de Playwright siguen, a la espera de una decisión: `--password-store=basic` y `--use-mock-keychain`. En macOS hacen que las cookies del perfil dedicado, y con ellas la sesión de Copilot, se cifren con una clave fija en vez de con el llavero del sistema: **quien pueda leer el directorio del perfil puede usar la sesión**. Mantén el perfil (por defecto `HARNESS_DATA_DIR/edge-profile`) fuera de copias de seguridad compartidas y de carpetas sincronizadas, y en un disco cifrado. En Windows no aplica: el cifrado usa DPAPI.
+El harness lanza Edge con su sandbox activado y sin las opciones de Playwright que solo apagan protecciones de fondo (bloqueo de ventanas emergentes, actualización de componentes y de listas de protección). Dos opciones predeterminadas de Playwright se mantienen por decisión de Wilson (2026-11-25), para conservar la sesión iniciada: `--password-store=basic` y `--use-mock-keychain`. En macOS hacen que las cookies del perfil dedicado, y con ellas la sesión de Copilot, se cifren con una clave fija en vez de con el llavero del sistema. Consecuencia: **quien pueda leer el directorio del perfil puede descifrar las cookies de sesión y usar la sesión**. Por eso:
+
+- Mantén `HARNESS_DATA_DIR` (el perfil está en `HARNESS_DATA_DIR/edge-profile`) en un disco local, legible solo por tu usuario, y fuera de copias de seguridad compartidas y de carpetas sincronizadas.
+- El harness crea el directorio del perfil con permisos solo para su dueño (0700) y estrecha a 0700 uno suyo que ya existiera. Eso no protege de otro proceso que corra con tu mismo usuario.
+- En Windows no aplica la clave fija: el cifrado usa DPAPI, y el directorio hereda las ACL de su carpeta padre.
+
+La decisión se puede revisar cuando la sesión caduque y haya que iniciar sesión de nuevo de todas formas.
 
 ## Si algo se filtra
 

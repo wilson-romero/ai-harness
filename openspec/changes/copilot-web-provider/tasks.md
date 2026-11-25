@@ -185,6 +185,9 @@ Wilson ejecutó la rama en Windows 11 AMD64 (Python 3.14.10, Edge 158, PowerShel
     - `wait_until`: el límite por defecto pasa de 10 a 60 s. Solo acota una prueba que ya falla; una que pasa vuelve en cuanto se cumple la condición.
     - Las pausas restantes (`asyncio.sleep` en `test_copilot_login.py` y `test_edge_launcher.py`) ordenan acciones de la «persona» tras un `wait_for`, o dan una ventana a una aserción negativa. No deciden el resultado de una prueba que pasa.
 
+- [x] 8.10 El directorio del perfil dedicado, solo para su dueño (D3 «Decidida el 2026-11-25»: `--password-store=basic` y `--use-mock-keychain` se quedan). Qué: `prepare_profile` crea el directorio con `mkdir(mode=0o700)` y `os.chmod(0o700)`, que también estrecha un perfil del harness creado antes con permisos más amplios; un directorio ajeno se rechaza antes y no se toca. Sin código por plataforma: en Windows `os.chmod` solo quita la marca de solo lectura. `SECURITY.md` y el runbook dicen la consecuencia: quien lea el directorio del perfil puede descifrar las cookies de sesión; `HARNESS_DATA_DIR` en un disco local legible solo por el usuario. Oráculo: `tests/unit/test_edge_profile.py` (perfil nuevo con `umask 022` → 0700; perfil del harness en 0755 → 0700). Control negativo: un directorio ajeno en 0755 se rechaza y sigue en 0755; y las dos primeras pruebas fallan contra el `profile.py` anterior.
+  - Recibo (2026-11-25, macOS-26.2 arm64, Python 3.14.8, Edge 158): contra el `profile.py` anterior, 2 FAILED y 6 PASSED; con el cambio, 8 PASSED. No se ejecutó nada sobre el perfil real.
+
 ## Workflow follow-up
 
 - Abrir el PR de `feature/copilot-web-provider` contra `develop` con descripción en español cuando las tareas estén cerradas; el merge lo aprueba Wilson.
