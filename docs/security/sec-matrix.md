@@ -11,23 +11,25 @@ Cada fila tiene los mismos campos:
 - **Propiedad:** lo que se promete, en una frase.
 - **Estado:** uno de `cubierto`, `parcial`, `pendiente de merge`, `no cubierto` o `BLOCKED`. `cubierto` quiere decir que la propiedad, tal como está escrita aquí (no la del plan maestro, si es más amplia), la prueba al menos un test de los citados en macOS. `parcial`: una parte la prueba un test y otra no existe todavía o no se prueba. `BLOCKED`: depende de Enterprise Architect, en pausa desde el 2026-11-25.
 - **Requisitos:** la spec y el nombre exacto del requisito. Las capacidades archivadas están en `openspec/specs/`; las de changes mergeados sin archivar (`skill-engine`, `mcp-gateway`, `architecture-skills-llm`), en `openspec/changes/<change>/specs/`.
-- **Tests:** identificadores de pytest. Un test parametrizado se cita por su función.
+- **Tests:** identificadores de pytest. Un test parametrizado se cita por su función (vale cualquiera de sus casos) o por un caso exacto (`fichero::test[caso]`), que tiene que existir tal cual.
 - **Control negativo:** dónde se vio fallar el test con la propiedad rota: el recibo de un `tasks.md` (change y tarea) o la mutación de la tabla de abajo.
 - **Windows:** qué se sabe de esa fila en Windows.
 - **Límites:** lo que la fila NO prueba.
 
-`scripts/check_sec_matrix.py` (en `scripts/verify.sh`) falla si falta o sobra una fila, si un estado no es de la lista, si una fila `cubierto` o `parcial` no cita tests, si un test citado no lo recoge `pytest --collect-only`, o si un requisito citado no está en su spec. **No comprueba que un test pruebe lo que dice la fila**: eso lo sostienen el control negativo citado y la revisión del documento.
+`scripts/check_sec_matrix.py` (en `scripts/verify.sh`) falla si falta o sobra una fila; si un estado no es de la lista o no es el fijado para esa fila en [`sec-states.json`](sec-states.json) (cambiar un estado exige dos ediciones); si una fila `cubierto` o `parcial` no cita tests o cita uno dos veces; si un identificador de test que aparece en cualquier parte del documento (listas, tabla de mutaciones, controles negativos, límites) no lo recoge `pytest --collect-only`; si un test citado está marcado `skip` o `xfail`, o se puede omitir y el campo `Windows` de su fila no dice que se omite; o si un requisito citado no está en su spec. **No comprueba que un test pruebe lo que dice la fila**: sustituir los tests de una fila por otro test que existe pasa la comprobación, y un test citado por su función sigue valiendo aunque se borren casos mientras quede uno. Eso lo sostienen el control negativo citado, la tabla de mutaciones y la revisión del documento.
 
 ## Windows: lo que se sabe
+
+Los campos `Windows` de cada fila describen `v0.2.0`; se actualizarán cuando se mergee `hotfix/0.2.1`.
 
 - Wilson ejecutó la batería de `v0.2.0` en Windows el 2026-11-25: 997 pasados, 13 fallados, 28 omitidos. El detalle test a test no está en el repositorio, así que **ninguna fila afirma que un test concreto pasó en Windows**.
 - Esa ejecución encontró un defecto de producto: `harness/mcp/audit.py` escribe la clave de los HMAC de argumentos MCP (`keys/mcp-args.key`) con `os.open` sin modo binario; en Windows un byte `0x0A` de la clave se escribe como `0x0D 0x0A`, la clave pasa de 32 bytes y todo `mcp call` termina con «the MCP argument key is damaged» antes de decidir nada. Falla cerrado (no arranca ningún servidor), pero la pasarela MCP no funciona en esa instalación. Se corrige en `0.2.1` (`hotfix/0.2.1`, sin publicar el 2026-11-25).
 - Y defectos de tests: `tests/unit/test_mcp_client.py` y `tests/unit/test_mcp_policy.py` declaraban una orden de servidor con ruta POSIX (`/opt/...`), que en Windows no es absoluta, y no se recogían allí. Corregido en `hotfix/0.2.1` (`871ab1b`, sin mergear en `develop`).
-- Los tests que dependen de una capacidad del sistema se omiten con un motivo visible cuando la cuenta no la tiene: crear enlaces simbólicos (`tests/conftest.py::make_symlink`), hacer ilegible una carpeta (`chmod 0`), los bits de permiso POSIX (`0600`/`0700` y el dueño de la lista MCP), `os.mkfifo` y `os.setsid`. Por eso **el rechazo de enlaces simbólicos, el informe de carpetas ilegibles y las comprobaciones de permisos están probados solo en macOS**. Las uniones de directorio (junctions) de Windows no las ejercita ningún test.
+- Los tests que dependen de una capacidad del sistema se omiten con un motivo visible cuando la cuenta no la tiene: crear enlaces simbólicos (`make_symlink` en `tests/conftest.py`), hacer ilegible una carpeta (`chmod 0`), los bits de permiso POSIX (`0600`/`0700` y el dueño de la lista MCP), `os.mkfifo` y `os.setsid`. Por eso **el rechazo de enlaces simbólicos, el informe de carpetas ilegibles y las comprobaciones de permisos están probados solo en macOS**. Las uniones de directorio (junctions) de Windows no las ejercita ningún test.
 
 ## Comprobación por mutación (2026-11-25)
 
-Para no repetir el error de un oráculo que pasa con la función quitada, se rompió a propósito una muestra de propiedades en una copia desechable de `ee550b6` (bajo `mktemp -d`) y se ejecutaron solo los tests citados. Todas las mutaciones hicieron fallar el test; restaurado el código, pasan.
+Para no repetir el error de un oráculo que pasa con la función quitada, se rompió a propósito una muestra de propiedades en una copia desechable (bajo `mktemp -d`) y se ejecutaron los tests citados. Todas las mutaciones de la tabla hicieron fallar el test que se nombra; restaurado el código, pasan. Las filas marcadas «revisión» son mutaciones de la revisión independiente del 2026-11-25 que sobrevivían con toda la batería en verde: el test que las mata se añadió entonces.
 
 | SEC | Mutación en el producto | Test que falla |
 |---|---|---|
@@ -40,15 +42,29 @@ Para no repetir el error de un oráculo que pasa con la función quitada, se rom
 | 07 | la reconciliación de un efecto interrumpido responde siempre `absent` | `tests/integration/test_skill_crash.py::test_killed_after_the_effect_is_not_applied_again` |
 | 09 | `harness/cli.py` hace `bind` de un socket al importarse | `tests/integration/test_mcp_review.py::test_no_socket_is_created_by_the_harness_or_its_session_process` |
 | 12 | el consumo acepta una aprobación ya `consumed` | `tests/unit/test_skill_approval.py::test_approval_reused` |
+| 12 (revisión) | el consumo deja de comprobar `expires_at > ?` | `tests/unit/test_skill_approval.py::test_granted_approval_that_expires_while_the_effect_is_busy_is_not_consumed` (nuevo; antes no fallaba ninguno) |
+| 12 (revisión) | el consumo deja de comprobar `proposal_hash = ?` | `tests/unit/test_skill_approval.py::test_approval_of_another_run` |
 | 13 | una función con `path.write_text` en `harness/memory/search.py` | `tests/security/test_memory_no_writes.py::test_memory_package_has_no_copy_upload_or_write_path` |
 | 14 | se admite cualquier fichero en las subcarpetas de un Skill | `tests/unit/test_skill_definition.py::test_invalid_fixtures` (`bad-helper`) |
+| 14 (revisión) | `fullmatch` → `match` en el nombre de un fichero de contenido | `tests/unit/test_skill_definition.py::test_a_file_outside_the_closed_list_invalidates_the_skill[templates/draft.md.py]` (nuevo, y sus casos `.mdx` y `.md.sh`) |
+| 14 (revisión) | se admite cualquier fichero en la raíz del Skill | `tests/unit/test_skill_definition.py::test_a_file_outside_the_closed_list_invalidates_the_skill[run.sh]` (nuevo, y el caso `helper.md`) |
 | 15 | el límite de pasos se multiplica por 10 | `tests/unit/test_skill_definition.py::test_too_many_steps` |
+| 15 | el límite de ficheros, de bytes totales o de entradas de un Skill se multiplica por 10 | `tests/unit/test_skill_definition.py::test_too_many_files`, `tests/unit/test_skill_definition.py::test_too_large_in_total`, `tests/unit/test_skill_definition.py::test_too_many_inputs` |
+| 15 | el límite del prompt compuesto se multiplica por 10 | `tests/unit/test_skill_limits.py::test_prompt_too_large` |
+| 15 | el límite de una entrada se multiplica por 10 (motor; `--input-file`) | `tests/unit/test_skill_engine.py::test_inputs_checked_before_the_run`; `tests/integration/test_skill_cli_run.py::test_input_file_too_large` |
+| 05 | `re.fullmatch` → `re.match` en el `pattern` de un argumento | `tests/unit/test_mcp_policy.py::test_each_reason_in_its_order[pattern is a full match]` |
+| 05 | el `max_length` de un argumento se multiplica por 10 | `tests/unit/test_mcp_policy.py::test_each_reason_in_its_order[too long]` |
+| 05 | se admite un argumento no declarado | `tests/unit/test_mcp_policy.py::test_each_reason_in_its_order[undeclared argument]`, `tests/unit/test_mcp_policy.py::test_undeclared_argument_is_named_in_the_detail` |
+| 05 | no se exige un argumento obligatorio | `tests/unit/test_mcp_policy.py::test_each_reason_in_its_order[missing required]` |
+| 05 | un booleano vale como entero | `tests/unit/test_mcp_policy.py::test_each_reason_in_its_order[boolean for integer]` |
+| 02 (revisión) | un proyecto se reconoce por subcadena de una etiqueta | `tests/unit/test_notes.py::test_a_project_named_inside_another_is_not_that_project` (nuevo; 3 casos fallan) |
+| 02 (revisión) | un proyecto se reconoce por prefijo de `project_slug` | `tests/unit/test_notes.py::test_a_project_named_inside_another_is_not_that_project[project_slug: demo-alpha-2-demo-alpha]` (nuevo) |
 
-No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en la fila.
+No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en la fila. La revisión independiente mutó SEC-01, 02, 05, 12, 14 y 15; **no mutó SEC-03, 04, 07, 08, 09, 10 ni 13**: para esas filas, las únicas mutaciones son las del autor de esta tabla.
 
 ## SEC-01 · Credenciales en logs/vault
 
-**Propiedad:** una credencial con un formato conocido no sale en claro hacia la terminal, el proveedor, SQLite, la auditoría ni la nota que el harness escribe en el vault.
+**Propiedad:** una credencial con un formato conocido que llega en un texto leído del vault, en el resultado de una herramienta MCP o en la salida del modelo que valida un Skill no sale en claro hacia la terminal, el proveedor, SQLite, la auditoría ni la nota que el harness escribe en el vault; los argumentos MCP se guardan solo como HMAC.
 **Estado:** parcial
 **Requisitos:**
 - `openspec/specs/secret-redaction/spec.md` · Formatos conocidos enmascarados
@@ -70,7 +86,7 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `tests/integration/test_architecture_memory.py::test_a_token_in_the_model_output_is_masked_in_what_is_shown_and_written`
 **Control negativo:** `project-memory` 8.2 y 8.3 (archivado); `mcp-gateway` 1.3 y 6.4; `architecture-skills-llm` 4.2; mutación SEC-01 de la tabla.
 **Windows:** la redacción es código puro, el mismo en las dos plataformas. Que la clave HMAC y los logs de stderr sean `0600` se prueba solo en macOS; en Windows el harness no fija ni comprueba ACL. En `v0.2.0` la clave HMAC se escribía mal en Windows (ver arriba).
-**Límites:** solo se reconocen formatos conocidos; una contraseña en prosa, una cadena de conexión o un token de formato desconocido pasan tal cual (lo dice el requisito «Límite declarado»). **No cubierto:** el stderr de un servidor MCP se guarda sin sanear ni redactar en `HARNESS_DATA_DIR/logs/mcp/<servidor>.stderr.log` (hasta 1 MiB por sesión); ningún test comprueba la rotación a `.1`. SQLite no está cifrado y, con el Mock, guarda prompts y respuestas (sintéticos por definición).
+**Límites:** **no cubre lo que escribe la persona:** el texto de `ask` llega al proveedor tal cual y, con el Mock, se guarda en `messages` y se ve en `history` (la respuesta de `ask` tampoco se redacta). Solo se reconocen formatos conocidos; una contraseña en prosa, una cadena de conexión o un token de formato desconocido pasan tal cual (lo dice el requisito «Límite declarado»). **No cubierto en `develop`:** el stderr de un servidor MCP se guarda sin sanear ni redactar en `HARNESS_DATA_DIR/logs/mcp/<servidor>.stderr.log` (hasta 1 MiB por sesión); su corrección vive en una rama sin mergear: pendiente de merge. Ningún test comprueba la rotación a `.1`. SQLite no está cifrado y, con el Mock, guarda prompts y respuestas (sintéticos por definición).
 
 ## SEC-02 · Cruce de sesiones/proyectos
 
@@ -94,6 +110,7 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `tests/unit/test_skill_approval.py::test_approval_of_another_run`
 - `tests/integration/test_architecture_memory.py::test_model_source_and_memory_text_never_approve_nor_choose_the_target`
 - `tests/integration/test_architecture_memory.py::test_an_approval_for_one_vault_is_never_written_into_another`
+- `tests/unit/test_notes.py::test_a_project_named_inside_another_is_not_that_project`
 **Control negativo:** `session-core` 2.4 (archivado); `skill-engine` 5.4; `architecture-skills-llm` 7.3; mutación SEC-02 de la tabla.
 **Windows:** código y SQL sin ramas por plataforma; no hay resultado por test en Windows.
 **Límites:** es aislamiento lógico dentro de una cuenta del sistema y una base SQLite: cualquier proceso con la misma cuenta lee todas las sesiones. No hay clientes externos (SEC-09), así que no se prueba el aislamiento a través de MCP.
@@ -167,7 +184,8 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `tests/unit/test_mcp_config.py::test_unknown_server_is_refused_without_starting_anything`
 - `tests/integration/test_mcp_cli.py::test_audit_rows_never_hold_argument_values_or_result_text`
 - `tests/integration/test_mcp_review.py::test_a_read_tool_the_server_calls_destructive_is_denied`
-**Control negativo:** `mcp-gateway` 2.3 (29 fallos con `deny` devolviendo `allowed`) y 2.4; mutación SEC-05 de la tabla.
+- `tests/unit/test_mcp_policy.py::test_undeclared_argument_is_named_in_the_detail`
+**Control negativo:** `mcp-gateway` 2.3 (29 fallos con `deny` devolviendo `allowed`) y 2.4; mutaciones SEC-05 de la tabla (cada caso de `test_each_reason_in_its_order` que mata una).
 **Windows:** en `v0.2.0`, `tests/unit/test_mcp_policy.py` no se recogía en Windows, y con la clave HMAC dañada todo `mcp call` fallaba antes de decidir (cerrado, pero sin denegación auditada). La comprobación de que la lista local no la pueden escribir otros es solo POSIX: en Windows no se comprueban ACL.
 **Límites:** solo con servidores sintéticos de los tests. El servidor MCP propio del harness no existe todavía (`harness-mcp-server`, planificado).
 
@@ -294,13 +312,15 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `tests/unit/test_skill_approval.py::test_fixed_vector`
 - `tests/unit/test_skill_approval.py::test_one_byte_different`
 - `tests/unit/test_skill_approval.py::test_granted_approval_expired_before_the_effect`
+- `tests/unit/test_skill_approval.py::test_granted_approval_that_expires_while_the_effect_is_busy_is_not_consumed`
+- `tests/unit/test_skill_approval.py::test_approval_of_another_run`
 - `tests/unit/test_skill_approval.py::test_the_code_never_leaves_the_interactive_prompt`
 - `tests/unit/test_skill_approval.py::test_the_model_says_it_is_approved`
 - `tests/integration/test_architecture_memory.py::test_a_consumed_approval_cannot_be_used_again`
 - `tests/integration/test_architecture_memory.py::test_validated_output_altered_after_the_approval_revokes_it`
 - `tests/integration/test_architecture_memory.py::test_apply_refuses_a_proposal_that_does_not_match_its_target`
 - `tests/unit/test_mcp_policy.py::test_what_the_server_says_never_allows_a_write`
-**Control negativo:** `skill-engine` 5.1, 5.3, 5.4 y 8.2; mutación SEC-12 de la tabla.
+**Control negativo:** `skill-engine` 5.1, 5.3, 5.4 y 8.2; mutaciones SEC-12 de la tabla (la caducidad en el momento de consumir y el hash de la propuesta, de la revisión independiente).
 **Windows:** código puro y SQL. `tests/unit/test_mcp_policy.py` no se recogía en Windows en `v0.2.0`.
 **Límites:** no prueba que haya una persona delante (límite aceptado por Wilson el 2026-11-24; ver la deuda conocida). Los tests inyectan una terminal falsa: el camino real con `isatty()` e `input()` no lo ejercita ningún test (no hay `pty` en Windows); lo cubren la demo de Wilson (`skill-engine` 7.7, abierta) y el test por subproceso de que sin terminal se espera (código 3).
 
@@ -337,12 +357,13 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `openspec/changes/skill-engine/specs/human-approval/spec.md` · Efectos de una lista cerrada
 **Tests:**
 - `tests/unit/test_skill_definition.py::test_invalid_fixtures`
+- `tests/unit/test_skill_definition.py::test_a_file_outside_the_closed_list_invalidates_the_skill`
 - `tests/unit/test_skill_definition.py::test_unknown_step_kind`
 - `tests/unit/test_skill_definition.py::test_expression_in_a_template`
 - `tests/unit/test_skill_engine.py::test_invalid_skill_is_not_run`
 - `tests/unit/test_skill_approval.py::test_unknown_effect`
 - `tests/security/test_mcp_structure.py::test_the_mcp_package_has_no_other_way_to_a_process_or_a_socket`
-**Control negativo:** `skill-engine` 2.2 y 2.3; mutación SEC-14 de la tabla.
+**Control negativo:** `skill-engine` 2.2 y 2.3; mutaciones SEC-14 de la tabla (dos de la revisión independiente).
 **Windows:** los casos con enlaces simbólicos en la carpeta del Skill se omiten donde no se pueden crear.
 **Límites:** un servidor MCP de la lista local es código arbitrario por diseño: corre con los permisos de la cuenta y el harness no lo encierra (lo dice `SECURITY.md`). La sugerencia de Skills por IA y los scripts dentro de un Skill están fuera del alcance hasta después del MVP.
 
@@ -360,12 +381,18 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `tests/unit/test_skill_limits.py::test_response_too_large`
 - `tests/unit/test_skill_limits.py::test_run_time_limit`
 - `tests/unit/test_skill_definition.py::test_too_many_steps`
+- `tests/unit/test_skill_definition.py::test_too_many_files`
+- `tests/unit/test_skill_definition.py::test_too_large_in_total`
+- `tests/unit/test_skill_definition.py::test_too_many_inputs`
+- `tests/unit/test_skill_limits.py::test_prompt_too_large`
+- `tests/unit/test_skill_engine.py::test_inputs_checked_before_the_run`
+- `tests/integration/test_skill_cli_run.py::test_input_file_too_large`
 - `tests/integration/test_mcp_cli.py::test_a_result_over_the_limit_is_refused_and_not_printed`
 - `tests/integration/test_mcp_cli.py::test_a_tool_that_never_ends`
 - `tests/integration/test_mcp_review.py::test_a_session_process_stuck_in_c_code_is_killed_at_the_deadline`
 - `tests/integration/test_mcp_review.py::test_a_server_flooding_stderr_is_capped_and_stopped`
 - `tests/unit/test_strict_json.py::test_deep_nesting_is_refused_without_recursion`
 - `tests/unit/test_decisions.py::test_escaping_is_linear_in_the_size_of_the_input`
-**Control negativo:** `skill-engine` 2.5 y 6.1; `mcp-gateway` 3.3 y 3.6; mutación SEC-15 de la tabla.
+**Control negativo:** `skill-engine` 2.5 y 6.1; `mcp-gateway` 3.3 y 3.6; mutaciones SEC-15 de la tabla.
 **Windows:** los tests de plazos usan márgenes de tiempo; no hay resultado por test en Windows.
-**Límites:** SQLite crece sin retención ni purga, y no hay rotación de logs salvo la de una generación (`.1`) de los logs de stderr MCP, que ningún test comprueba (aplazado, proyecto educativo). El plazo de `ask` solo se prueba con el Mock.
+**Límites:** SQLite crece sin retención ni purga, y no hay rotación de logs salvo la de una generación (`.1`) de los logs de stderr MCP, que ningún test comprueba (aplazado, proyecto educativo). `ask` no tiene límite de tamaño de la respuesta (los límites de respuesta son de los pasos de un Skill y de las llamadas MCP); su plazo solo se prueba con el Mock.

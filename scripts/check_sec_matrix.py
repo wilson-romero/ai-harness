@@ -10,15 +10,29 @@ It fails (exit code 1) unless `docs/security/sec-matrix.md`:
 - has exactly the sections SEC-01 to SEC-15, in order, each with every field;
 - gives each one a state from the closed list, at least one test when the state is `cubierto`
   or `parcial`, and a reason when it is `pendiente de merge`, `no cubierto` or `BLOCKED`;
-- cites only pytest node ids that `pytest --collect-only -q` collects today;
+- gives each row the state pinned for it in `docs/security/sec-states.json`, so that a state
+  change needs two edits (the row and the pin) and shows in two places of the diff;
+- cites each test at most once per row;
+- cites only pytest node ids that `pytest --collect-only -q` collects today, anywhere in the
+  document (the `Tests` lists, the mutation table, the negative controls, the limits). An id
+  with a parametrised case (`file::test[case]`) must be collected exactly; an id without one
+  stands for the function and is satisfied by any of its cases;
+- never cites a test marked `skip` or `xfail` (or that calls `pytest.xfail`), and, when a cited
+  test can be skipped (`skipif`, a `pytest.skip` call in the test, in a helper or in a fixture
+  of the test module or of `tests/*.py`), says so in the row's `Windows` field ("omite");
 - cites only requirements that exist, by name, in the named spec under `openspec/`.
 
 It also checks that every pytest node id cited in the known-debt list is collected, and that
 every relative link of the security documents, `README.md` and `SECURITY.md` points to a file
 that exists.
 
-What it does NOT check: that a cited test proves what the matrix says. That is the job of the
-review of the document and of the negative control each row cites (hardening design D2).
+What it does NOT check (written limits):
+- that a cited test proves what the matrix says: replacing the tests of a row by an unrelated
+  test that exists passes. That is the job of the review of the document, of the negative
+  control each row cites and of the mutation table (hardening design D2);
+- a test cited by its function whose individual cases are deleted, as long as one remains;
+- a skip decided at run time by code outside the test module and `tests/*.py`, or a mark
+  attached through `pytest.param(..., marks=...)`.
 
 Standard library only. Text is read as UTF-8 with universal newlines, so a checkout with CRLF
 line endings gives the same result.
@@ -27,6 +41,8 @@ line endings gives the same result.
 from __future__ import annotations
 
 import argparse
+import ast
+import json
 import re
 import subprocess
 import sys
@@ -36,6 +52,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MATRIX = Path("docs") / "security" / "sec-matrix.md"
+STATES_PIN = Path("docs") / "security" / "sec-states.json"
 # Documents whose pytest node ids must be collected (besides the matrix).
 CITING_DOCS = (Path("docs") / "security" / "known-debt.md",)
 # Documents whose relative links must resolve.
@@ -61,8 +78,10 @@ SEC_HEADING = re.compile(r"^## (SEC-\d+)\b(.*)$")
 ANY_H2 = re.compile(r"^#{1,2} ")
 FIELD_LINE = re.compile(r"^\*\*([^*]+):\*\*\s*(.*)$")
 BULLET = re.compile(r"^- (.*)$")
-TEST_ID = re.compile(r"^tests/[A-Za-z0-9_/]+\.py::[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)?$")
-TEST_ID_IN_TEXT = re.compile(r"tests/[A-Za-z0-9_/]+\.py::[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)?")
+_ID = r"tests/[A-Za-z0-9_/]+\.py::[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)?(?:\[[^\]\n`]+\])?"
+TEST_ID = re.compile(rf"^{_ID}$")
+TEST_ID_IN_TEXT = re.compile(_ID)
+SKIP_WORD = "omit"  # "omite", "omiten", "omitido": the Windows field says what is skipped
 REQUIREMENT_SEPARATOR = " · "
 LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 INLINE_CODE = re.compile(r"(`+)(?:(?!\1).)+?\1")
@@ -160,17 +179,148 @@ def check_rows(rows: list[Row]) -> list[str]:
             problems.append(f"{row.sec}: state {state!r} needs at least one test")
         if state in NEEDS_REASON and not row.fields.get(REASON_FIELD):
             problems.append(f"{row.sec}: state {state!r} needs a {REASON_FIELD!r} line")
-        for item in row.lists.get("Tests", []):
-            if not TEST_ID.match(strip_ticks(item)):
+        cited = [strip_ticks(item) for item in row.lists.get("Tests", [])]
+        for item in cited:
+            if not TEST_ID.match(item):
                 problems.append(f"{row.sec}: not a pytest node id: {item!r}")
+        for item in sorted({item for item in cited if cited.count(item) > 1}):
+            problems.append(f"{row.sec}: test cited more than once: {item}")
+    return problems
+
+
+def check_pinned_states(rows: list[Row], pin: Path) -> list[str]:
+    """Each row's state must be the one pinned in the data file, and the file must pin
+    exactly the 15 rows."""
+    if not pin.is_file():
+        return [f"state pin not found: {STATES_PIN.as_posix()}"]
+    try:
+        pinned = json.loads(read_text(pin))
+    except ValueError as exc:
+        return [f"{STATES_PIN.as_posix()}: not valid JSON: {exc}"]
+    if not isinstance(pinned, dict) or sorted(pinned) != list(ROW_IDS):
+        return [f"{STATES_PIN.as_posix()}: must map exactly SEC-01 to SEC-15 to a state"]
+    problems = []
+    for row in rows:
+        state = row.fields.get("Estado")
+        if row.sec in pinned and state is not None and state != pinned[row.sec]:
+            problems.append(f"{row.sec}: state {state!r} differs from the pinned "
+                            f"{pinned[row.sec]!r} in {STATES_PIN.as_posix()}")
     return problems
 
 
 def is_collected(test_id: str, collected: set[str]) -> bool:
-    """The id itself, or a parametrised case of it (`id[...]`)."""
+    """An id with a case must be collected exactly (no collected id starts with `id[case][`);
+    one without stands for the function and is satisfied by any of its cases (`id[...]`)."""
     if test_id in collected:
         return True
     return any(item.startswith(test_id + "[") for item in collected)
+
+
+# -- skip and xfail ---------------------------------------------------------------------------
+
+def _dotted(node: ast.AST) -> str:
+    try:
+        return ast.unparse(node)
+    except Exception:  # noqa: BLE001 - an odd node is simply not a mark
+        return ""
+
+
+def _mark_kind(expression: ast.AST) -> str | None:
+    """`never` for skip/xfail marks, `maybe` for skipif, None otherwise."""
+    text = _dotted(expression.func if isinstance(expression, ast.Call) else expression)
+    if text.endswith(("mark.xfail", "mark.skip")):
+        return "never"
+    if text.endswith("mark.skipif"):
+        return "maybe"
+    return None
+
+
+def _calls(function: ast.AST) -> set[str]:
+    return {_dotted(node.func) for node in ast.walk(function) if isinstance(node, ast.Call)}
+
+
+def _functions(tree: ast.AST) -> dict[str, ast.AST]:
+    return {node.name: node for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def _parse(path: Path) -> ast.AST | None:
+    try:
+        return ast.parse(read_text(path))
+    except (OSError, SyntaxError, ValueError):
+        return None
+
+
+def _skipping_helpers(root: Path, tree: ast.AST) -> set[str]:
+    """Names of the functions and fixtures, in the test module and in `tests/*.py`, that can
+    skip: they call `pytest.skip`, call one that can, or take one as a fixture."""
+    functions: dict[str, ast.AST] = {}
+    for path in sorted((root / "tests").glob("*.py")):
+        other = _parse(path)
+        if other is not None:
+            functions.update(_functions(other))
+    functions.update(_functions(tree))
+    skippers: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for name, function in functions.items():
+            if name in skippers:
+                continue
+            calls = _calls(function)
+            short = {call.split(".")[-1] for call in calls}
+            arguments = {arg.arg for arg in function.args.args}
+            if "pytest.skip" in calls or short & skippers or arguments & skippers:
+                skippers.add(name)
+                changed = True
+    return skippers
+
+
+def skip_kind(root: Path, test_id: str) -> str | None:
+    """`never` if the cited test can never pass (skip/xfail mark, `pytest.xfail`), `maybe` if
+    it can be skipped, None if not, or if its source cannot be read."""
+    file_part, _, rest = test_id.partition("::")
+    name = rest.split("[", 1)[0].split("::")[-1]
+    tree = _parse(root / Path(*file_part.split("/")))
+    if tree is None:
+        return None
+    function = _functions(tree).get(name)
+    if function is None:
+        return None
+    kinds = {_mark_kind(d) for d in function.decorator_list}
+    for node in tree.body:  # pytestmark = pytest.mark.skip(...) or a list of marks
+        if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "pytestmark"
+                for target in node.targets):
+            values = (node.value.elts if isinstance(node.value, (ast.List, ast.Tuple))
+                      else [node.value])
+            kinds |= {_mark_kind(value) for value in values}
+    calls = _calls(function)
+    if "pytest.xfail" in calls:
+        kinds.add("never")
+    if "never" in kinds:
+        return "never"
+    skippers = _skipping_helpers(root, tree)
+    short = {call.split(".")[-1] for call in calls}
+    arguments = {arg.arg for arg in function.args.args}
+    if "maybe" in kinds or "pytest.skip" in calls or short & skippers or arguments & skippers:
+        return "maybe"
+    return None
+
+
+def check_skips(rows: list[Row], root: Path) -> list[str]:
+    problems = []
+    for row in rows:
+        says_skipped = SKIP_WORD in row.fields.get("Windows", "").lower()
+        for item in row.lists.get("Tests", []):
+            test_id = strip_ticks(item)
+            kind = skip_kind(root, test_id)
+            if kind == "never":
+                problems.append(f"{row.sec}: cited test is marked skip or xfail: {test_id}")
+            elif kind == "maybe" and not says_skipped:
+                problems.append(f"{row.sec}: cited test can be skipped and the Windows field "
+                                f"does not say what is omitted: {test_id}")
+    return problems
 
 
 def check_tests(rows: list[Row], collected: set[str]) -> list[str]:
@@ -289,6 +439,10 @@ def run(matrix: Path, root: Path, collected: set[str] | None) -> tuple[list[str]
         except CollectError as exc:
             return [*problems, str(exc)], len(rows), 0
     problems += check_tests(rows, collected)
+    problems += [problem.replace("test not collected", "test cited in the text not collected")
+                 for problem in check_cited_ids(matrix, MATRIX.as_posix(), collected)]
+    problems += check_pinned_states(rows, root / STATES_PIN)
+    problems += check_skips(rows, root)
     for doc in CITING_DOCS:
         problems += check_cited_ids(root / doc, doc.as_posix(), collected)
     for doc in LINKED_DOCS:

@@ -19,11 +19,93 @@ SPEC_PATH = "openspec/specs/demo-cap/spec.md"
 REQUIREMENT = "Demo denegado"
 TEST_A = "tests/unit/test_demo.py::test_denied"
 TEST_B = "tests/unit/test_demo.py::test_param"
-COLLECTED = f"{TEST_A}\n{TEST_B}[case-1]\n{TEST_B}[case-2]\n\n3 tests collected in 0.01s\n"
+TEST_SKIP = "tests/unit/test_demo.py::test_always_skipped"
+TEST_XFAIL = "tests/unit/test_demo.py::test_expected_to_fail"
+TEST_MAYBE = "tests/unit/test_demo.py::test_skipped_on_some_systems"
+TEST_HELPER = "tests/unit/test_demo.py::test_needs_a_link"
+TEST_FIXTURE = "tests/unit/test_demo.py::test_needs_a_closed_folder"
+TEST_DEEP = "tests/unit/test_demo.py::test_needs_a_linked_vault"
+COLLECTED = "\n".join([TEST_A, f"{TEST_B}[case-1]", f"{TEST_B}[case-2]", TEST_SKIP, TEST_XFAIL,
+                       TEST_MAYBE, TEST_HELPER, TEST_FIXTURE, TEST_DEEP, "",
+                       "9 tests collected in 0.01s",
+                       ""])
+TEST_SOURCE = """import sys
+import pytest
+
+from tests.conftest import make_link
+
+
+def test_denied():
+    pass
+
+
+@pytest.mark.parametrize("case", [1, 2])
+def test_param(case):
+    pass
+
+
+@pytest.mark.skip(reason="never runs")
+def test_always_skipped():
+    pass
+
+
+def test_expected_to_fail():
+    pytest.xfail("known bug")
+
+
+@pytest.mark.skipif(sys.platform == "x", reason="not here")
+def test_skipped_on_some_systems():
+    pass
+
+
+def test_needs_a_link(tmp_path):
+    make_link(tmp_path)
+
+
+@pytest.fixture
+def closed_folder(tmp_path):
+    if not tmp_path.exists():
+        pytest.skip("cannot close a folder here")
+    return tmp_path
+
+
+def test_needs_a_closed_folder(closed_folder):
+    pass
+
+
+@pytest.fixture
+def linked_vault(tmp_path):
+    make_link(tmp_path)  # two levels: the fixture calls a helper that can skip
+    return tmp_path
+
+
+def test_needs_a_linked_vault(linked_vault):
+    pass
+"""
+CONFTEST_SOURCE = """import pytest
+
+
+def make_link(path):
+    try:
+        path.symlink_to(path)
+    except OSError:
+        pytest.skip("cannot create links here")
+"""
+
+
+def pin(project: Path, **states: str) -> None:
+    """Pin every row to `cubierto`, except the ones given (SEC_11="BLOCKED")."""
+    import json
+
+    pinned = {f"SEC-{n:02d}": "cubierto" for n in range(1, 16)}
+    pinned.update({key.replace("_", "-"): value for key, value in states.items()})
+    (project / "docs" / "security" / "sec-states.json").write_text(
+        json.dumps(pinned), encoding="utf-8", newline="\n")
 
 
 def section(sec: str, state: str = "cubierto", tests: tuple[str, ...] = (TEST_A,),
-            requirement: str = f"`{SPEC_PATH}` · {REQUIREMENT}", reason: str | None = None) -> str:
+            requirement: str = f"`{SPEC_PATH}` · {REQUIREMENT}", reason: str | None = None,
+            windows: str = "no ejecutado.", limits: str = "ninguno conocido.") -> str:
     lines = [f"## {sec} · Propiedad sintética", "",
              "**Propiedad:** algo se deniega.",
              f"**Estado:** {state}"]
@@ -34,8 +116,8 @@ def section(sec: str, state: str = "cubierto", tests: tuple[str, ...] = (TEST_A,
     lines.append("**Tests:**")
     lines += [f"- `{test}`" for test in tests] or ["- —"]
     lines += ["**Control negativo:** recibo sintético.",
-              "**Windows:** no ejecutado.",
-              "**Límites:** ninguno conocido.", ""]
+              f"**Windows:** {windows}",
+              f"**Límites:** {limits}", ""]
     return "\n".join(lines)
 
 
@@ -59,6 +141,12 @@ def project(tmp_path):
                                             newline="\n")
     collected = tmp_path / "collected.txt"
     collected.write_text(COLLECTED, encoding="utf-8", newline="\n")
+    (tmp_path / "tests" / "unit").mkdir(parents=True)
+    (tmp_path / "tests" / "unit" / "test_demo.py").write_text(TEST_SOURCE, encoding="utf-8",
+                                                              newline="\n")
+    (tmp_path / "tests" / "conftest.py").write_text(CONFTEST_SOURCE, encoding="utf-8",
+                                                    newline="\n")
+    pin(tmp_path)
     return tmp_path
 
 
@@ -154,12 +242,14 @@ def test_a_requirement_outside_openspec(project, capsys):
 
 
 def test_a_blocked_row_without_a_reason(project, capsys):
+    pin(project, SEC_11="BLOCKED")
     code, out = check(project, matrix({"SEC-11": section("SEC-11", state="BLOCKED", tests=())}),
                       capsys)
     assert code == 1 and "SEC-11: state 'BLOCKED' needs a 'Motivo' line" in out
 
 
 def test_a_blocked_row_with_a_reason_and_no_tests_passes(project, capsys):
+    pin(project, SEC_11="BLOCKED")
     row = section("SEC-11", state="BLOCKED", tests=(), requirement="", reason="EA en pausa.")
     code, out = check(project, matrix({"SEC-11": row}), capsys)
     assert code == 0, out
@@ -216,7 +306,7 @@ def test_a_collection_past_its_deadline_is_a_failure(tmp_path):
 
 
 def test_main_without_collected_fails_on_a_broken_collection(project, capsys):
-    (project / "tests").mkdir()
+    (project / "tests").mkdir(exist_ok=True)
     (project / "tests" / "test_broken.py").write_text("import no_such_module_here\n",
                                                       encoding="utf-8", newline="\n")
     path = project / "docs" / "security" / "sec-matrix.md"
@@ -226,3 +316,70 @@ def test_main_without_collected_fails_on_a_broken_collection(project, capsys):
     out = capsys.readouterr()
     assert code == 1 and "PASS" not in out.out
     assert "pytest --collect-only exited" in out.err
+
+
+# -- independent review of hardening (2026-11-25): holes that gave PASS -------------------------
+
+
+def test_a_state_changed_without_its_pin(project, capsys):
+    """A row flipped from `parcial` to `cubierto` in the document alone is a NO."""
+    pin(project, SEC_04="parcial")
+    code, out = check(project, matrix(), capsys)
+    assert code == 1
+    assert "SEC-04: state 'cubierto' differs from the pinned 'parcial'" in out
+    code, out = check(project, matrix({"SEC-04": section("SEC-04", state="parcial")}), capsys)
+    assert code == 0, out
+
+
+def test_a_missing_or_incomplete_pin(project, capsys):
+    (project / "docs" / "security" / "sec-states.json").unlink()
+    code, out = check(project, matrix(), capsys)
+    assert code == 1 and "state pin not found" in out
+    (project / "docs" / "security" / "sec-states.json").write_text('{"SEC-01": "cubierto"}',
+                                                                  encoding="utf-8")
+    code, out = check(project, matrix(), capsys)
+    assert code == 1 and "must map exactly SEC-01 to SEC-15" in out
+
+
+def test_the_same_test_cited_twice_in_a_row(project, capsys):
+    code, out = check(project, matrix({"SEC-06": section("SEC-06", tests=(TEST_A, TEST_A))}),
+                      capsys)
+    assert code == 1 and f"SEC-06: test cited more than once: {TEST_A}" in out
+
+
+def test_a_parametrised_case_is_cited_exactly(project, capsys):
+    code, out = check(project, matrix({"SEC-03": section("SEC-03", tests=(f"{TEST_B}[case-2]",))}),
+                      capsys)
+    assert code == 0, out
+    deleted = f"{TEST_B}[case-3]"
+    code, out = check(project, matrix({"SEC-03": section("SEC-03", tests=(deleted,))}), capsys)
+    assert code == 1 and f"SEC-03: test not collected by pytest: {deleted}" in out
+
+
+def test_an_id_in_the_text_of_the_document_is_checked(project, capsys):
+    ghost = "tests/unit/test_demo.py::test_gone"
+    table = f"\n## Comprobación por mutación\n\n| 01 | algo | `{ghost}` |\n"
+    text = matrix().replace("## Deuda", table + "\n## Deuda")
+    code, out = check(project, text, capsys)
+    assert code == 1 and f"test cited in the text not collected by pytest: {ghost}" in out
+    in_limits = section("SEC-08", limits=f"lo prueba a medias `{ghost}[x]`.")
+    code, out = check(project, matrix({"SEC-08": in_limits}), capsys)
+    assert code == 1 and f"{ghost}[x]" in out
+
+
+@pytest.mark.parametrize("test_id", [TEST_SKIP, TEST_XFAIL])
+def test_a_test_that_never_runs_cannot_be_cited(project, capsys, test_id):
+    row = section("SEC-10", tests=(test_id,), windows="se omite en Windows.")
+    code, out = check(project, matrix({"SEC-10": row}), capsys)
+    assert code == 1 and f"SEC-10: cited test is marked skip or xfail: {test_id}" in out
+
+
+@pytest.mark.parametrize("test_id", [TEST_MAYBE, TEST_HELPER, TEST_FIXTURE, TEST_DEEP])
+def test_a_test_that_can_be_skipped_needs_the_windows_field_to_say_so(project, capsys, test_id):
+    code, out = check(project, matrix({"SEC-10": section("SEC-10", tests=(test_id,))}), capsys)
+    assert code == 1
+    assert f"SEC-10: cited test can be skipped and the Windows field does not say what is " \
+           f"omitted: {test_id}" in out
+    said = section("SEC-10", tests=(test_id,), windows="se omite donde no hay enlaces.")
+    code, out = check(project, matrix({"SEC-10": said}), capsys)
+    assert code == 0, out
