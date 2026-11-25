@@ -44,7 +44,8 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
 EXIT_INTERRUPTED = 130
-CLOSE_TIMEOUT_S = 10.0  # harness/browser/edge.py: closing the browser has its own bound
+# harness/browser/edge.py SHUTDOWN_S, copied so that the CLI does not import Playwright.
+BROWSER_SHUTDOWN_S = 25.0
 WATCHDOG_MARGIN_S = 15.0
 
 
@@ -203,7 +204,7 @@ def _ask(
 ) -> int:
     # Last-resort bound on the whole question: the deadline, then the browser's own cleanup
     # time, then a margin. It fires even if the event loop is blocked (harness/core/watchdog.py).
-    limit_s = service.timeout_s + CLOSE_TIMEOUT_S + WATCHDOG_MARGIN_S
+    limit_s = service.timeout_s + BROWSER_SHUTDOWN_S + WATCHDOG_MARGIN_S
     with Watchdog(limit_s, "the question"):
         try:
             response = asyncio.run(_ask_quietly(service, session_id, prompt, context))

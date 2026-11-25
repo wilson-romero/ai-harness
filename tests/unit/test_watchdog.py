@@ -71,3 +71,11 @@ def test_finished_work_disarms_the_watchdog():
         [sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True, timeout=30
     )
     assert done.returncode == 0 and done.stdout.strip() == "still here"
+
+
+def test_the_cli_knows_how_long_putting_the_browser_away_can_take():
+    """The CLI keeps a copy so that it does not import Playwright; the copy must not drift."""
+    from harness.browser.edge import SHUTDOWN_S
+    from harness.cli import BROWSER_SHUTDOWN_S
+
+    assert BROWSER_SHUTDOWN_S == SHUTDOWN_S

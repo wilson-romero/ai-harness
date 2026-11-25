@@ -35,7 +35,14 @@ DROPPED_DEFAULT_ARGS = (
     "--disable-background-networking",
     "--disable-infobars",
 )
-CLOSE_TIMEOUT_S = 10.0
+# Bounds for putting the browser away. With background networking on (above), Edge took
+# 9.6 s to close once a page had been open a few seconds (2026-11-25, macOS arm64, Edge 158;
+# 0.1 s with Playwright's `--disable-background-networking`). The close gets about twice that.
+# Playwright's driver then stops at once, unless a browser is still shutting down: that wait
+# gets its own bound, so leaving the browser can never take longer than SHUTDOWN_S.
+CLOSE_TIMEOUT_S = 20.0
+STOP_TIMEOUT_S = 5.0
+SHUTDOWN_S = CLOSE_TIMEOUT_S + STOP_TIMEOUT_S
 LOCK_POLL_S = 0.25
 # Measured (P8, macOS arm64, Edge 158): a second launch on a profile already open fails at
 # once with this text in Playwright's error.
@@ -85,7 +92,8 @@ class EdgeLauncher:
         try:
             self._starting_or_open += 1
             self.peak_open = max(self.peak_open, self._starting_or_open)
-            async with async_playwright() as playwright:
+            playwright = await async_playwright().start()
+            try:
                 context = await self._launch(playwright, profile)
                 self.contexts.append(context)
                 try:
@@ -93,6 +101,8 @@ class EdgeLauncher:
                 finally:
                     self.contexts.remove(context)
                     await close_owned(context)
+            finally:
+                await stop_owned(playwright)
         finally:
             self._starting_or_open -= 1
             lock.release()
@@ -142,6 +152,24 @@ async def close_owned(context: BrowserContext) -> None:
     except asyncio.CancelledError:
         await asyncio.wait({closing}, timeout=CLOSE_TIMEOUT_S)
         raise
+
+
+async def stop_owned(playwright: Playwright) -> None:
+    """Stop Playwright's driver within STOP_TIMEOUT_S, even if the caller is being cancelled.
+    Past the bound the stop is left running: it ends with the event loop, whose closing ends
+    the driver, and the browser goes with its pipe."""
+    stopping = asyncio.ensure_future(playwright.stop())
+    stopping.add_done_callback(_consume_outcome)
+    try:
+        await asyncio.wait({stopping}, timeout=STOP_TIMEOUT_S)
+    except asyncio.CancelledError:
+        await asyncio.wait({stopping}, timeout=STOP_TIMEOUT_S)
+        raise
+
+
+def _consume_outcome(future: asyncio.Future) -> None:
+    if not future.cancelled():
+        future.exception()  # a driver that already died is not an error, and not a warning
 
 
 async def _close_quietly(context: BrowserContext) -> None:

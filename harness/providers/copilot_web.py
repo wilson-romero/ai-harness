@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Locator, Page
 
-from harness.browser.edge import EdgeLauncher
+from harness.browser.edge import SHUTDOWN_S, EdgeLauncher
 from harness.browser.login import recorded_ready_path
 from harness.browser.page_state import (
     PageState,
@@ -69,7 +69,7 @@ STATE_PERSIST_S = 3.0  # a sign-in or guest page must stay that long (redirects 
 SETTLE_S = 2.0  # the page's element count unchanged that long before typing
 RESUBMIT_AFTER_S = 4.0  # nothing left the editor and no turn was added: the key press was lost
 ID_WAIT_AFTER_END_S = 10.0  # the identifier arrives about 2 s after the reply ends (D6)
-CLOSE_RESERVE_S = 5.0  # of the request deadline, kept for closing the browser
+CLOSE_RESERVE_S = SHUTDOWN_S  # of the request deadline, kept for putting the browser away
 
 # Characters in the editor: a field's value, else the text content. Zero-width characters do
 # not count (a rich editor keeps some as cursor anchors) and neither do line breaks, which a

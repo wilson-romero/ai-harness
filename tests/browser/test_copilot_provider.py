@@ -12,9 +12,11 @@ import json
 import os
 import re
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
+from playwright._impl.out_of_process import PlaywrightClient
 from playwright.async_api import Error as PlaywrightError
 
 from harness.browser.edge import EdgeLauncher
@@ -473,6 +475,33 @@ async def test_nothing_is_left_open_after_a_deadline(harness, app):
     assert (await other.service.ask(str(second.session_id), "otra")).status == "completed"
     assert app.prompt_count == 2
 
+
+
+async def test_an_error_before_sending_survives_a_driver_slow_to_stop(harness, app, monkeypatch):
+    """Seen in two full runs on 2026-11-25: the lost conversation ended as `timeout`. Edge,
+    with background networking on (D3), takes about 10 s to close; past the close bound,
+    Playwright's driver waited for it with no bound of its own, and the request deadline
+    expired while the browser was being put away. Here the driver never stops: the launcher
+    gives up on it after its own bound, and the error found before sending is kept."""
+    real_stop = PlaywrightClient.stop
+
+    async def stuck(self):
+        try:
+            await asyncio.sleep(3600)
+        finally:
+            await real_stop(self)  # stopped for real when the test's loop ends
+
+    h = harness()
+    session = str(h.service.create_session("S").session_id)
+    assert (await h.service.ask(session, "primera")).status == "completed"
+    monkeypatch.setattr(PlaywrightClient, "stop", stuck)
+    lost = harness(HARNESS_COPILOT_URL=app.url("/app", forget="1"))
+    started = time.monotonic()
+    response = await asyncio.wait_for(lost.service.ask(session, "segunda"), 60)
+    assert response.status == "failed", response.detail
+    assert "Create a new session" in response.detail
+    assert time.monotonic() - started < lost.settings.request_timeout_s
+    assert app.prompt_count == 1
 
 def test_reply_that_never_ends_is_uncertain_and_never_resent(cli, env, data_dir, app):
     session_id = new_session(cli, env)
