@@ -89,7 +89,7 @@ Lo que el harness garantiza con un servidor MCP:
   - se mide antes de leerlo (también su stderr: se guarda 1 MiB por sesión y pasado 64 MiB se detiene el servidor);
   - nunca se interpreta: el harness no evalúa ningún patrón, formato ni esquema que mande el servidor, y el SDK no valida resultados en el proceso del harness;
   - se sanea y se redacta antes de imprimirlo o auditarlo;
-  - nunca se guarda.
+  - nunca se guarda, salvo el stderr del servidor, que se guarda tal cual, **sin sanear ni redactar**, en `HARNESS_DATA_DIR/logs/mcp/` (legible solo por su dueño en macOS y Linux; en Windows no se fijan ACL).
 
 Lo que **no** garantiza:
 
@@ -97,6 +97,10 @@ Lo que **no** garantiza:
 - El harness termina siempre el árbol del proceso de sesión (grupo de procesos o Job Object), que incluye al servidor y a lo que este lance. Un proceso que el servidor lance en otra sesión o grupo (`setsid`, un demonio) o fuera del Job Object escapa, y el harness no lo ve.
 - La lista local se rechaza si otro usuario, el grupo u otros pueden escribirla en macOS y Linux. En Windows no se comprueban las ACL.
 - La marca de recursión (`AI_HARNESS_MCP_CHILD`) evita encadenamientos accidentales. No detiene a un servidor malicioso que la borre.
+
+## Matriz SEC y deuda conocida
+
+Qué propiedad de seguridad (SEC-01..SEC-15) prueba qué test, con su control negativo y sus límites, está en [`docs/security/sec-matrix.md`](docs/security/sec-matrix.md); `scripts/verify.sh` comprueba que lo que cita existe. Lo que no se hace o no se prueba, con su decisión, está en [`docs/security/known-debt.md`](docs/security/known-debt.md).
 
 ## Si algo se filtra
 

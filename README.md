@@ -31,7 +31,7 @@ uv run python main.py history SESSION_ID
 
 ## Memoria del proyecto
 
-El harness lee un vault de Markdown con la estructura de `claude-memory-system` (`projects/<slug>/_project.md`, `projects/<slug>/sessions/`, `Decisiones/`, `Lecciones/`, `Memoria-CC/`…). **Solo lee**: ningún comando crea, modifica, mueve ni borra nada en el vault.
+El harness lee un vault de Markdown con la estructura de `claude-memory-system` (`projects/<slug>/_project.md`, `projects/<slug>/sessions/`, `Decisiones/`, `Lecciones/`, `Memoria-CC/`…). Los comandos `memory …` y `ask` **solo leen**: no crean, modifican, mueven ni borran nada en el vault. La única escritura del harness en el vault es la nota de decisión de `architecture-memory`, tras una aprobación (ver [Skills de arquitectura](#skills-de-arquitectura)).
 
 ```sh
 export HARNESS_VAULT_ROOT="$HOME/ruta/al/vault"   # ruta absoluta
@@ -337,7 +337,7 @@ Límite: un proceso que el servidor lance en **otra sesión o grupo** (`setsid`,
 - La tabla `tool_calls` de SQLite guarda:
   - servidor, herramienta y operación;
   - decisión y motivo;
-  - un HMAC-SHA-256 de los argumentos, con una clave aleatoria local (`HARNESS_DATA_DIR/keys/mcp-args.key`, solo legible por su dueño, nunca se imprime), y su tamaño;
+  - un HMAC-SHA-256 de los argumentos, con una clave aleatoria local (`HARNESS_DATA_DIR/keys/mcp-args.key`, nunca se imprime; en macOS y Linux es `0600`, solo legible por su dueño; en Windows el harness no fija ni comprueba sus ACL), y su tamaño;
   - estado, código de error y si el servidor quedó parado;
   - bytes del resultado y duración.
 
@@ -352,7 +352,7 @@ Por variables de entorno (ver `.env.example`):
 
 | Variable | Por defecto | Para qué |
 |---|---|---|
-| `HARNESS_DATA_DIR` | `./data` | Dónde viven SQLite y los bloqueos. Debe ser un **disco local**: en una unidad de red los bloqueos de fichero no son fiables. No puede estar dentro de `HARNESS_VAULT_ROOT`. |
+| `HARNESS_DATA_DIR` | `./data` | Dónde viven SQLite, los bloqueos, la clave de los HMAC de MCP (`keys/`) y los logs de stderr de los servidores MCP (`logs/mcp/`). Debe ser un **disco local**: en una unidad de red los bloqueos de fichero no son fiables. No puede estar dentro de `HARNESS_VAULT_ROOT`. |
 | `HARNESS_PROVIDER` | `mock` | Proveedor de las sesiones nuevas. Hoy solo existe `mock`. |
 | `HARNESS_REQUEST_TIMEOUT_S` | `120` | Plazo de cada pregunta. |
 | `HARNESS_MOCK_BEHAVIOR` | `ok` | `ok`, `fail`, `timeout_before_send` o `timeout_after_send`. Solo para pruebas y demos. |
