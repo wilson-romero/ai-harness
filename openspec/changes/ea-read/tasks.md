@@ -1,5 +1,7 @@
 # Tasks
 
+> **EN PAUSA desde el 2026-11-25 por decisión de Wilson:** no tiene Enterprise Architect instalado. Este change no se cancela ni se modifica: sus tareas siguen tal como están y se retoman, empezando por la 1.2 (la sonda), cuando EA esté instalado. Ver «Revisado el 2026-11-25 (Wilson)» en `docs/plan/2026-11-24-ai-harness-cortes.md`.
+
 Cada `[x]` lleva su recibo debajo (comando y salida relevante, o SHA). Los oráculos se nombran en cada tarea. Repo público: ningún recibo cita rutas personales, nombres ni GUID reales ni contenido de un modelo; las medidas de Wilson viven en `HARNESS_DATA_DIR` y aquí solo se copian sí/no, recuentos, tiempos y códigos.
 
 **Puerta:** la tarea 1.2 la ejecuta Wilson en Windows. **Todas las tareas desde la 2.1 están BLOCKED hasta que Wilson devuelva el resumen de la sonda** y se haya decidido con él, a la vista de P1–P6 de `design.md`, si el corte sigue como está, se ajusta o se replantea. El grupo 2 además necesita `mcp-gateway` implementado y mergeado.
