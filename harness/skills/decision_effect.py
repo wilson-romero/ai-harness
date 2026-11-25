@@ -256,10 +256,12 @@ def vault_digest(root: Path) -> str:
 
 
 def source_sha256(source: str) -> str:
-    """SHA-256 of a source text as the product reads a text file: BOM dropped and line ends
-    normalised to LF, so the same text typed or read from a CRLF file gives the same hash."""
+    """SHA-256 of a source text, for the early duplicate check only (D8, revised 2026-11-25):
+    BOM dropped, CRLF and lone CR turned into LF, and trailing line ends removed, so that
+    `--input source="X"`, a file with `X` and LF or CRLF line ends, and one ending in a newline
+    or not, all give the same hash. Nothing else is normalised (spaces, Unicode forms)."""
     text = source.removeprefix("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return hashlib.sha256(text.rstrip("\n").encode("utf-8")).hexdigest()
 
 
 def _fields(validated: str) -> DecisionFields:

@@ -58,6 +58,10 @@ Si el vault ya contiene una nota con el mismo identificador de decisión, la eje
 - **WHEN** la persona rechazó o dejó sin responder la aprobación de una decisión y se ejecuta `architecture-memory` otra vez con el mismo texto fuente (revisada el 2026-11-25)
 - **THEN** la nueva ejecución pregunta al proveedor como la primera vez
 
+#### Scenario: Aprobación reanudada sin entradas
+- **WHEN** la persona deja sin responder la aprobación de una decisión, la reanuda con `skill resume RUN_ID` sin pasar entradas y la aprueba, y después se ejecuta `architecture-memory` con el mismo texto fuente (revisada el 2026-11-25)
+- **THEN** la segunda ejecución queda `failed` con `duplicate_decision` sin que el proveedor reciba ninguna llamada
+
 ### Requirement: Credenciales enmascaradas en la nota
 Los campos de texto de la decisión SHALL pasar por la redacción de formatos de credenciales conocidos antes de preparar la nota, y la terminal SHALL indicar cuántas sustituciones hubo. Lo que se aprueba y se escribe es el texto ya enmascarado.
 

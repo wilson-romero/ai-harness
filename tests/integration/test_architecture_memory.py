@@ -877,6 +877,18 @@ def test_the_same_source_with_other_line_ends_is_the_same_source(conn, data_dir,
     assert (second.status, provider.calls) == ("failed", 0)
 
 
+@pytest.mark.parametrize("variant", ["cr", "no-final-newline", "extra-final-newlines"])
+def test_line_end_variants_of_the_source_are_the_same_source(conn, data_dir, vault, variant):
+    _saved(conn, data_dir, vault)
+    source = {
+        "cr": SOURCE.replace("\n", "\r"),
+        "no-final-newline": SOURCE.rstrip("\n"),
+        "extra-final-newlines": SOURCE + "\n\n",
+    }[variant]
+    second, provider = _again(conn, data_dir, vault, source=source)
+    assert (second.status, provider.calls) == ("failed", 0)
+
+
 def test_the_source_is_recorded_only_as_hashes_once_applied(conn, data_dir, vault):
     first = _saved(conn, data_dir, vault)
     rows = conn.execute("SELECT * FROM effect_sources").fetchall()
@@ -884,7 +896,9 @@ def test_the_source_is_recorded_only_as_hashes_once_applied(conn, data_dir, vaul
     row = rows[0]
     assert row["scope"] == "vault.save_decision" and row["run_id"] == first.run_id
     assert row["partition_key"].endswith("/demo-alpha")
-    assert row["source_sha256"] == hashlib.sha256(SOURCE.encode("utf-8")).hexdigest()
+    # BOM dropped, CR and CRLF to LF, trailing line ends removed (D8, revised 2026-11-25)
+    assert row["source_sha256"] == hashlib.sha256(
+        SOURCE.rstrip("\n").encode("utf-8")).hexdigest()
     assert first.applied[0].endswith(f"-{row['effect_ref'][4:12]}.md")
 
 
@@ -929,3 +943,48 @@ def test_the_same_source_in_another_project_is_not_refused_early(conn, data_dir,
     second, provider = _again(conn, data_dir, vault, project="demo-beta")
     assert provider.calls == 1
     assert second.status == "completed", second.message
+
+
+def test_an_approval_left_unanswered_and_resumed_without_inputs_records_its_source(
+        conn, data_dir, vault):
+    """The resume the product prints (`skill resume RUN_ID`) passes no input: the source key
+    fixed when the run was created is the one recorded (review of 2026-11-25, finding 4)."""
+    engine, sessions, _ = engine_for(conn, data_dir, vault, terminal=FakeTerminal([None]))
+    outcome = run(engine, sessions.create_session("Demo", "demo-alpha"))
+    assert outcome.status == "awaiting_approval"
+    engine.__dict__["_terminal"] = ApprovingTerminal()
+    resumed = asyncio.run(engine.resume(outcome.run_id, {}, None))
+    assert resumed.status == "completed", resumed.message
+    assert one(conn, "SELECT run_id FROM effect_sources") == (outcome.run_id,)
+    second, provider = _again(conn, data_dir, vault)
+    assert (second.status, provider.calls) == ("failed", 0)
+
+
+def test_an_uncertain_write_reconciled_by_a_resume_without_inputs_records_its_source(
+        conn, data_dir, vault, monkeypatch):
+    engine, run_id, _ = _uncertain_with_two_links(conn, data_dir, vault, monkeypatch)
+    outcome = asyncio.run(engine.resume(run_id, {}, None))
+    assert outcome.status == "completed", outcome.message
+    assert one(conn, "SELECT run_id FROM effect_sources") == (run_id,)
+
+
+def test_cancel_of_an_uncertain_run_whose_note_is_in_place_records_its_source(
+        conn, data_dir, vault, monkeypatch):
+    engine, run_id, _ = _uncertain_with_two_links(conn, data_dir, vault, monkeypatch)
+    assert engine.cancel(run_id).status == "cancelled"
+    assert one(conn, "SELECT run_id FROM effect_sources") == (run_id,)
+    second, provider = _again(conn, data_dir, vault)
+    assert (second.status, provider.calls) == ("failed", 0)
+
+
+def test_the_same_source_in_another_vault_is_not_refused_early(conn, data_dir, vault, tmp_path):
+    """The other vault is a copy made after the save, so it holds the same note: only the
+    vault digest in the key keeps the early check from answering for it."""
+    import shutil
+
+    _saved(conn, data_dir, vault)
+    other = tmp_path / "otro-vault"
+    shutil.copytree(vault, other)
+    second, provider = _again(conn, data_dir, other)
+    assert provider.calls == 1
+    assert second.status == "failed"  # the title check after the model, in the other vault

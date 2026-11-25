@@ -117,7 +117,10 @@ class Effect(Protocol):
         self, context: EffectContext, inputs: Mapping[str, str]
     ) -> tuple[str, str] | None:
         """(partition, SHA-256) of the run's source, or None: no early check for this run.
-        The engine stores it, with `effect_ref`, only once the effect is really applied."""
+        Called once, when the run is created, after `bind` (its result is in
+        `context.binding`); the engine keeps it with the run's binding, and stores it with
+        `effect_ref` in `effect_sources` only once the effect is really applied (by `apply`,
+        or by `reconcile` in `resume` or `cancel`)."""
         ...
 
     def early_refusal(
