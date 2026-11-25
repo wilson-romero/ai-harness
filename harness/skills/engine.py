@@ -250,7 +250,7 @@ class SkillEngine:
                 ) from None
             self._progress(f"run {run_id}: {skill.name} {skill.version}")
             state = _Run(run_id, session, provider, skill, inputs, started=self._monotonic())
-            return await self._advance(state)
+            return await self._advance_or_recover(state)
         finally:
             lock.release()
 
@@ -323,7 +323,7 @@ class SkillEngine:
                     self._audit("skill.step.reconciled", "retry", session, run_id,
                                 f"step={retry_step};attempt={attempt + 1}")
             self._set_run(run_id, "running")
-            return await self._advance(state)
+            return await self._advance_or_recover(state)
         finally:
             lock.release()
 
@@ -460,6 +460,19 @@ class SkillEngine:
             lock.release()
 
     # -- the loop -------------------------------------------------------------------------------
+
+    async def _advance_or_recover(self, state: _Run) -> RunOutcome:
+        """`_advance`; if the task is cancelled (Ctrl+C in a conversation, interactive-shell
+        2026-11-25), the run is left as `recover_runs` leaves the run of a dead process, now,
+        while the lock is still held: an LLM step that was in flight becomes `uncertain`
+        (never resent), and the run can be resumed or cancelled. Then the cancellation goes on."""
+        try:
+            return await self._advance(state)
+        except asyncio.CancelledError:
+            with transaction(self._conn):
+                if _needs_recovery(self._conn, state.run_id):
+                    _recover_run(self._conn, state.run_id, str(state.session.session_id))
+            raise
 
     async def _advance(self, state: _Run) -> RunOutcome:
         skill = state.skill
@@ -1222,6 +1235,20 @@ class SkillEngine:
                           session_id=session.session_id, run_id=run_id, detail=detail)
 
 
+# A run left half done: not finished, and running or with a step running or applying.
+_HALF_DONE = (
+    "r.status NOT IN ('completed', 'failed', 'cancelled') AND (r.status = 'running' OR EXISTS ("
+    "SELECT 1 FROM skill_steps s WHERE s.run_id = r.run_id AND s.status IN "
+    "('running', 'applying')))"
+)
+
+
+def _needs_recovery(conn: sqlite3.Connection, run_id: str) -> bool:
+    return conn.execute(
+        f"SELECT 1 FROM skill_runs r WHERE r.run_id = ? AND {_HALF_DONE}", (run_id,)  # noqa: S608
+    ).fetchone() is not None
+
+
 def recover_runs(conn: sqlite3.Connection, data_dir: Path) -> list[str]:
     """Runs left by a dead process (D10). A run whose session is locked is alive.
 
@@ -1230,12 +1257,7 @@ def recover_runs(conn: sqlite3.Connection, data_dir: Path) -> list[str]:
     becomes `uncertain`, so that its effect is reconciled and never simply applied again.
     """
     recovered = []
-    rows = conn.execute(
-        "SELECT run_id, session_id FROM skill_runs r WHERE r.status NOT IN "
-        "('completed', 'failed', 'cancelled') AND (r.status = 'running' OR EXISTS ("
-        "SELECT 1 FROM skill_steps s WHERE s.run_id = r.run_id AND s.status IN "
-        "('running', 'applying')))"
-    ).fetchall()
+    rows = conn.execute(f"SELECT run_id, session_id FROM skill_runs r WHERE {_HALF_DONE}").fetchall()
     for run in rows:
         lock = SessionLock(data_dir, UUID(run["session_id"]))
         if not lock.acquire():

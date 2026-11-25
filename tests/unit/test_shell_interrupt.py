@@ -13,6 +13,7 @@ import time
 from harness.shell.terminal import ConsoleTerminal, WaitInterrupted
 from tests.shell_support import (
     INTERRUPT,
+    Action,
     CountingProvider,
     ScriptedTerminal,
     make_conversation,
@@ -83,6 +84,27 @@ async def test_the_next_question_after_an_uncertain_one(conn, data_dir):
     second = terminal.shown.index("> segunda")
     assert any(line.startswith("warning: this session has an earlier uncertain request")
                for line in terminal.shown[second:])
+
+
+async def test_ctrl_c_before_the_question_starts_names_no_earlier_request(conn, data_dir):
+    """Review 2026-11-25: Ctrl+C right after Enter, before the question's task started. The
+    notice is about this line (nothing recorded, nothing sent), never about the request before."""
+    provider, holder = _interrupting("after")
+    terminal = ScriptedTerminal([
+        "primera",
+        Action(lambda _t: holder[0].interrupt()),  # lands before the next task starts
+        "segunda",
+        "/exit",
+    ])
+    conversation, _, _ = make_conversation(conn, data_dir, terminal, provider)
+    holder.append(conversation)
+    assert await conversation.run() == 0
+    assert statuses(conn) == ["uncertain"]
+    assert provider.calls == 1
+    second = terminal.shown.index("> segunda")
+    after = terminal.shown[second + 1:]
+    assert "interrupted: no request was recorded; nothing was sent" in after
+    assert not any(line.startswith("interrupted: request") for line in after)
 
 
 async def test_the_conversation_ignores_an_interrupt_when_no_loop_runs(conn, data_dir):

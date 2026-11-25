@@ -7,6 +7,9 @@ command, whatever it looks like.
 
 from __future__ import annotations
 
+import asyncio
+
+from harness.skills.engine import SkillEngine
 from tests.shell_support import (
     CODE,
     INTERRUPT,
@@ -19,15 +22,28 @@ from tests.skill_support import ScriptedProvider, WriteEffect, copy_skills, with
 LINE = "/skill demo-echo text=texto-sintetico"
 
 
-def _setup(conn, data_dir, tmp_path, lines, approvals):
+def _setup(conn, data_dir, tmp_path, lines, approvals, provider=None):
     root = copy_skills(tmp_path)
     with_effect(root, "demo-echo", "test.write")
     effect = WriteEffect(tmp_path / "efecto")
     terminal = ScriptedTerminal(lines, approvals)
     conversation, service, provider = make_conversation(
-        conn, data_dir, terminal, ScriptedProvider(), skills_dir=root,
+        conn, data_dir, terminal, provider or ScriptedProvider(), skills_dir=root,
         effects={"test.write": effect})
     return conversation, terminal, effect, provider
+
+
+class _CtrlCAfterSend(ScriptedProvider):
+    """Ctrl+C reaches the conversation once the step's prompt is out (the SIGINT handler's call)."""
+
+    conversation = None
+
+    async def ask(self, request, on_sent) -> str:
+        self.prompts.append(request.prompt)
+        on_sent()
+        self.conversation.interrupt()
+        await asyncio.sleep(3600)
+        raise AssertionError("not cancelled")
 
 
 def _run_status(conn) -> list[str]:
@@ -126,3 +142,31 @@ async def test_skill_inputs_from_a_file_and_bad_inputs(conn, data_dir, tmp_path)
     assert "invalid skill name" in terminal.text
     assert len(effect.written()) == 1
     assert any("texto-desde-fichero" in prompt for prompt in provider.prompts)
+
+
+async def test_ctrl_c_during_the_llm_step_leaves_a_run_that_can_be_ended(conn, data_dir,
+                                                                         tmp_path):
+    """Review 2026-11-25: Ctrl+C while a step's question is out. The run is left as
+    `recover_runs` leaves the run of a dead process (the step `uncertain`, never resent), the
+    person is told the exact next command, and that command works once the session is free."""
+    provider = _CtrlCAfterSend()
+    conversation, terminal, effect, _ = _setup(conn, data_dir, tmp_path,
+                                               [LINE, "/status", "/exit"], [], provider)
+    provider.conversation = conversation
+    assert await conversation.run() == 0
+    ((run_id, run_status, run_error),) = conn.execute(
+        "SELECT run_id, status, error_code FROM skill_runs").fetchall()
+    assert (run_status, run_error) == ("uncertain", "interrupted")
+    steps = {row[0]: row[1] for row in conn.execute(
+        "SELECT step_key, status FROM skill_steps WHERE kind = 'llm'")}
+    assert steps == {"draft": "uncertain"}
+    assert [tuple(row) for row in conn.execute("SELECT status FROM requests")] == [
+        ("uncertain",)]
+    assert provider.calls == 1  # never resent
+    told = next(line for line in terminal.shown if line.startswith("interrupted: skill run"))
+    assert f"`skill resume {run_id} --retry-step draft`" in told
+    assert f"`skill cancel {run_id}`" in told
+    assert any(line.startswith("last request:") for line in terminal.shown)  # still open
+    assert effect.written() == []
+    engine = SkillEngine(conn, data_dir, conversation._service, None, default_timeout_s=5.0)
+    assert engine.cancel(run_id).status == "cancelled"

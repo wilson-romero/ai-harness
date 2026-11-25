@@ -44,7 +44,7 @@ from harness.shell.terminal import ConversationTerminal, WaitInterrupted
 from harness.skills.config import SkillSettings
 from harness.skills.definition import skills_root
 from harness.skills.effects import Effect, default_effects
-from harness.skills.engine import MAX_INPUT_BYTES, RunOutcome, SkillEngine
+from harness.skills.engine import MAX_INPUT_BYTES, OPEN_RUN_STATES, RunOutcome, SkillEngine
 from harness.storage.locks import SessionLock
 from harness.text.safe_text import (
     neutralise_delimiters,
@@ -272,6 +272,7 @@ class Conversation:
             action = self._question(parsed.text)
         else:
             action = self._command(parsed)
+        before = (self._last_request(), self._open_run())
         task = asyncio.ensure_future(action)
         self._current = task
         try:
@@ -282,7 +283,7 @@ class Conversation:
         finally:
             self._current = None
         if task.cancelled():
-            self._interrupted(parsed)
+            self._interrupted(parsed, *before)
             return
         error = task.exception()
         if isinstance(error, HarnessError):
@@ -290,21 +291,69 @@ class Conversation:
         elif error is not None:
             raise error
 
-    def _interrupted(self, parsed: Question | Command) -> None:
+    def _last_request(self) -> tuple[str, str] | None:
+        """(id, status) of the last request recorded in this session."""
+        row = self._deps.conn.execute(
+            "SELECT request_id, status FROM requests WHERE session_id = ? "
+            "ORDER BY rowid DESC LIMIT 1",
+            (str(self._session_id),),
+        ).fetchone()
+        return (row[0], row[1]) if row is not None else None
+
+    def _open_run(self) -> tuple[str, str] | None:
+        """(id, status) of the skill run still open in this session (there is at most one)."""
+        row = self._deps.conn.execute(
+            f"SELECT run_id, status FROM skill_runs WHERE session_id = ? AND status IN "  # noqa: S608
+            f"({', '.join('?' for _ in OPEN_RUN_STATES)})",
+            (str(self._session_id), *OPEN_RUN_STATES),
+        ).fetchone()
+        return (row[0], row[1]) if row is not None else None
+
+    def _interrupted(self, parsed: Question | Command, request_before: tuple[str, str] | None,
+                     run_before: tuple[str, str] | None) -> None:
+        """Say what the interruption left, from what was recorded during this action only."""
         if isinstance(parsed, Command):
-            self._say(f"interrupted: /{parsed.name} was stopped")
+            if parsed.name == "skill":
+                self._skill_interrupted(run_before)
+            else:
+                self._say(f"interrupted: /{parsed.name} was stopped")
             return
-        entries = self._service.history(str(self._session_id))
-        last = next((e for e in reversed(entries) if e.role == "user"), None)
-        if last is None or last.request_status not in (RequestStatus.UNCERTAIN,
-                                                       RequestStatus.FAILED):
-            self._say("interrupted: no request was recorded")
-        elif last.request_status is RequestStatus.UNCERTAIN:
-            self._say(f"interrupted: request {last.request_id} is uncertain: the prompt may have "
+        last = self._last_request()
+        if last is None or last == request_before or last[1] not in (
+            RequestStatus.UNCERTAIN.value, RequestStatus.FAILED.value
+        ):
+            # Ctrl+C after Enter and before the question started: nothing was recorded or sent.
+            self._say("interrupted: no request was recorded; nothing was sent")
+        elif last[1] == RequestStatus.UNCERTAIN.value:
+            self._say(f"interrupted: request {last[0]} is uncertain: the prompt may have "
                       "reached the provider; it was not resent")
         else:
-            self._say(f"interrupted: request {last.request_id} failed before the prompt was "
+            self._say(f"interrupted: request {last[0]} failed before the prompt was "
                       "sent; nothing reached the provider")
+
+    def _skill_interrupted(self, run_before: tuple[str, str] | None) -> None:
+        run = self._open_run()
+        if run is None or run == run_before:
+            self._say("interrupted: /skill was stopped; no run was left open")
+            return
+        run_id, status = run
+        leave = "leave this session (/new, /resume or /exit), then run"
+        if status == "uncertain":
+            steps: dict[str, str] = {}
+            for key, step_status in self._deps.conn.execute(
+                "SELECT step_key, status FROM skill_steps WHERE run_id = ? "
+                "ORDER BY position, attempt",
+                (run_id,),
+            ):
+                steps[key] = step_status  # the last attempt wins
+            key = next((k for k, s in steps.items() if s == "uncertain"), "?")
+            self._say(f"interrupted: skill run {run_id} is uncertain: step {key!r} may have "
+                      f"reached the provider; it was not resent. To go on, {leave} "
+                      f"`skill resume {run_id} --retry-step {key}` (asks again) or "
+                      f"`skill cancel {run_id}`")
+            return
+        self._say(f"interrupted: skill run {run_id} is {status}; nothing was resent. To go on, "
+                  f"{leave} `skill resume {run_id}` or `skill cancel {run_id}`")
 
     # -- sessions (D4, D10) -----------------------------------------------------------------------
 
