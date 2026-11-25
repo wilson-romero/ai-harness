@@ -988,3 +988,20 @@ def test_the_same_source_in_another_vault_is_not_refused_early(conn, data_dir, v
     second, provider = _again(conn, data_dir, other)
     assert provider.calls == 1
     assert second.status == "failed"  # the title check after the model, in the other vault
+
+
+def test_resume_wants_the_exact_bytes_even_where_the_dedup_key_does_not(conn, data_dir, vault):
+    """Intended (D8, second review of 2026-11-25): `resume` checks the exact bytes the run
+    started with, because a retried step sends them again; the dedup key is deliberately
+    tolerant. The same text with CRLF is refused on resume and is a duplicate on a new run."""
+    from harness.core.errors import InvalidInput
+
+    engine, sessions, _ = engine_for(conn, data_dir, vault, terminal=FakeTerminal([None]))
+    outcome = run(engine, sessions.create_session("Demo", "demo-alpha"))
+    assert outcome.status == "awaiting_approval"
+    with pytest.raises(InvalidInput, match="not the one the run started with"):
+        resume(engine, outcome.run_id, SOURCE.replace("\n", "\r\n"))
+    engine.__dict__["_terminal"] = ApprovingTerminal()
+    assert resume(engine, outcome.run_id).status == "completed"
+    second, provider = _again(conn, data_dir, vault, source=SOURCE.replace("\n", "\r\n"))
+    assert (second.status, provider.calls) == ("failed", 0)
