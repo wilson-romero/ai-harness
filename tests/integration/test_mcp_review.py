@@ -170,7 +170,7 @@ def test_a_live_call_is_never_recovered_as_stale(ws, data_dir, tmp_path):  # noq
 
 
 def test_a_server_flooding_stderr_is_capped_and_stopped(mcp, ws, data_dir):  # noqa: F811
-    server = ws.server("stderr-flood", call=10)
+    server = ws.server("stderr-flood", call=60)  # only bounds a failing run
     code, out, err, _ = mcp("call", "synthetic", "get_project_metadata", "--args", ALPHA)
     log = data_dir / "logs" / "mcp" / "synthetic.stderr.log"
     size = log.stat().st_size

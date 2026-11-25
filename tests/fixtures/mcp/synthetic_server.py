@@ -122,6 +122,7 @@ class Server:
         self.state, self.mode, self.repo = state, mode, repo
         self.out = sys.stdout.buffer
         self.lock = threading.Lock()
+        self.flood: threading.Thread | None = None
 
     # -- bookkeeping ---------------------------------------------------------------------------
 
@@ -174,7 +175,8 @@ class Server:
             sys.stderr.write(STDERR_CANARY + "\n")
             sys.stderr.flush()
         if self.mode == "stderr-flood":
-            threading.Thread(target=self.flood_stderr, daemon=True).start()
+            self.flood = threading.Thread(target=self.flood_stderr, daemon=True)
+            self.flood.start()
         if self.mode in ("grandchild", "grandchild-escapes"):
             self.start_grandchild(escape=self.mode == "grandchild-escapes")
         stdin = sys.stdin.buffer
@@ -248,6 +250,10 @@ class Server:
 
     def call(self, request_id, name, arguments: dict) -> None:
         mode = self.mode
+        if self.flood is not None:
+            # Answer only once the flood is over: the cap on stderr, not the speed of this
+            # machine, decides how the call ends. Without the cap the call completes.
+            self.flood.join()
         if mode == "hang-call":
             while True:
                 time.sleep(1)
