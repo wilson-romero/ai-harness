@@ -58,21 +58,29 @@ El stderr de un servidor MCP que el sistema guarda en su log SHALL tener cada cr
 - **THEN** su log contiene `[REDACTED:private-key]` en lugar de todo el bloque y el texto que lo sigue sin cambios
 
 #### Scenario: Credencial en el corte de una línea larga sin final
-- **WHEN** un servidor MCP escribe en stderr una línea de 70 000 bytes sin salto con un token de GitHub que cruza el punto donde la línea se suelta por partes, o una barra de progreso que separa cada actualización con un CR suelto (revisada el 2026-11-25)
-- **THEN** su log contiene `[REDACTED:github]` en cada aparición y ningún fragmento del token
+- **WHEN** un servidor MCP escribe en stderr una línea de 70 000 bytes sin salto con un token de GitHub en cualquier punto, o una barra de progreso que separa cada actualización con un CR suelto (revisada el 2026-11-25, cuarta vez)
+- **THEN** en lugar de la línea larga su log contiene una sola marca que dice que se descartó por demasiado larga para redactarla, sin ningún fragmento de ella; en la barra de progreso contiene `[REDACTED:github]` en cada actualización
+
+#### Scenario: Línea en el límite
+- **WHEN** un servidor MCP escribe en stderr una línea de 16 384 bytes con su salto incluido, y otra de 16 385 (revisada el 2026-11-25)
+- **THEN** la primera llega al log redactada entera y la segunda se sustituye por la marca de línea descartada, que la línea final cuenta como ausente del log
 
 #### Scenario: Cabecera de clave privada sin final en el stderr del servidor
 - **WHEN** el stderr de un servidor MCP contiene la línea de inicio de una clave privada PEM sin su línea END, seguida de mucho más texto (revisada el 2026-11-25)
-- **THEN** su log contiene `[REDACTED:private-key]`, oculta como mucho 32 KiB en bytes desde el comienzo de la cabecera aunque lleguen en una sola línea, dice que el registro se reanuda y guarda redactado lo que sigue, y la línea final cuenta lo oculto como ausente del log
+- **THEN** su log contiene `[REDACTED:private-key]`, descarta las líneas siguientes hasta 32 KiB después de la cabecera, dice con una marca que no llegó la línea END y que el resto de esa línea se descarta, guarda redactadas las líneas que empiezan después, y la línea final cuenta lo descartado como ausente del log
 
 #### Scenario: Bytes de continuación UTF-8 en el stderr del servidor
 - **WHEN** un servidor MCP escribe en stderr 70 000 bytes de continuación UTF-8 (`0x80`) sin salto de línea (revisada el 2026-11-25)
-- **THEN** la sesión termina con normalidad y el log guarda esos bytes sin cambios
+- **THEN** la sesión termina con normalidad y el log contiene la marca de línea descartada y la línea final con el recuento, ninguno de esos bytes
 
 #### Scenario: Credencial más larga que el límite de una línea
 - **WHEN** un servidor MCP escribe en stderr un token de Slack de 100 000 caracteres leído en trozos de 4 KiB (revisada el 2026-11-25)
-- **THEN** su log contiene `[REDACTED:slack]` y ningún carácter del token
+- **THEN** su log contiene la marca de línea descartada y ningún carácter del token
 
 #### Scenario: Formatos que se solapan
-- **WHEN** un texto contiene una clave de Anthropic o de Slack cuya cola es el comienzo de un JWT completo (revisada el 2026-11-25)
-- **THEN** la redacción deja una sola marca y ninguna parte del JWT, también en el log del stderr de un servidor
+- **WHEN** un texto contiene una credencial pegada al final de otra, como un token de DigitalOcean seguido sin separador de una clave de Anthropic (revisada el 2026-11-25, cuarta vez)
+- **THEN** la redacción sustituye las dos, también en el log del stderr de un servidor, y enmascara al menos todo lo que enmascaraba la versión de una sola pasada
+
+#### Scenario: Fallo del registro del stderr
+- **WHEN** el registro del stderr de un servidor MCP falla por cualquier error que no sea una interrupción (revisada el 2026-11-25)
+- **THEN** la sesión sigue, el log dice dónde se paró, no se escribe nada sin redactar y la línea final cuenta el resto

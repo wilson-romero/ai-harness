@@ -44,8 +44,9 @@ REAP_WAIT_S = 2.0  # after the kill, for the process to be seen ended
 EXIT_POLL_S = 0.01
 STDERR_KEEP_BYTES = 1024 * 1024  # per session, written to the server's log
 STDERR_KILL_BYTES = 64 * 1024 * 1024  # per session: past this the server is stopped
-# per session: at most this much stderr is fed to the redactor (review of 2026-11-25)
-STDERR_WORK_BYTES = 4 * STDERR_KEEP_BYTES
+# per session: lines handed to the log, written or dropped. The redactor's cost is per line
+# and a dropped line uses none of the cap (review of 2026-11-25).
+STDERR_LOG_LINES = 64 * 1024
 
 
 @dataclass
@@ -219,73 +220,76 @@ async def bounded_stdio(
 class StderrLog:
     """The server's stderr as its log keeps it: redacted, and at most `STDERR_KEEP_BYTES`.
 
-    Text goes through `LineRedactor` (SEC-01), so a credential split across reads is still
-    masked, and text is written only once its line is complete or the redactor's bound
-    releases it. Two budgets stop the work: the cap counts what is written, and
-    `STDERR_WORK_BYTES` counts what is fed to the redactor (withheld text does not reach the
-    cap, so without it a server could buy unbounded redaction work on the event loop). Past
-    either, nothing more is fed and what the redactor holds is dropped. A failure inside the
-    logging never ends the session: a marker says the log stopped and the stream is still
-    read and counted (review of 2026-11-25). The closing line counts the bytes of the server's
-    stderr that are in no form in the log (past a budget, still buffered, a withheld private
-    key block, the cut part of a changed line); a redacted credential is in the log as its
-    marker. It is written when the stream ends or the session is stopped; a process killed
-    outright writes neither it nor the unfinished line. `errlog` None: nothing is written.
+    Text goes through `LineRedactor` (SEC-01): a line is written only once it is complete and
+    redacted; a line too long to redact, or inside a private key block, is dropped. One rule
+    ends the writing: once a piece does not fit in what is left of `STDERR_KEEP_BYTES`, or the
+    stream has passed `STDERR_LOG_LINES` lines, nothing more is written (what the redactor
+    holds is dropped, never written). A failure inside the logging stops the writing the same
+    way, with a marker, and never ends the session. The closing line counts the bytes of the server's stderr that are in no form
+    in the log (a redacted credential is in it, as its marker). It is written when the stream
+    ends or the session is stopped; a process killed outright writes neither it nor the
+    unfinished line. `errlog` None: nothing is written.
     """
 
     def __init__(self, errlog: int | None) -> None:
         self._errlog = errlog
         self._room = STDERR_KEEP_BYTES
-        self._fed = 0
         self._kept = 0  # bytes of the server's stderr whose (redacted) text is in the log
-        self._broken = False
+        self._lines = 0
+        self._writing = errlog is not None
         self._redactor = LineRedactor()
 
     def feed(self, chunk: bytes) -> None:
-        if (self._errlog is None or self._broken or self._room <= 0
-                or self._fed >= STDERR_WORK_BYTES):
+        if not self._writing:
             return
-        self._fed += len(chunk)
         try:
-            self._write(self._redactor.feed(chunk))
+            pieces = self._redactor.feed(chunk)
+            self._lines += len(pieces)
+            if self._lines > STDERR_LOG_LINES:
+                self._writing = False  # the same rule as a full log
+                return
+            self._write(pieces)
         except Exception as exc:  # noqa: BLE001 - the log must never end the session
             self._fail(exc)
 
     def close(self, total: int) -> None:
         """The stream ended (or was abandoned) after `total` bytes."""
-        if self._errlog is None:
-            return
-        if self._room > 0 and not self._broken:
-            try:
-                self._write(self._redactor.finish())
-            except Exception as exc:  # noqa: BLE001
-                self._fail(exc)
+        try:
+            self._write(self._redactor.finish())  # writes nothing once the writing has stopped
+        except Exception as exc:  # noqa: BLE001
+            self._fail(exc)
+        self._writing = False
         dropped = total - self._kept
-        if dropped > 0:
+        if self._errlog is not None and dropped > 0:
             self._append(f"\n[ai-harness: {dropped} more bytes of stderr were "
                          "dropped]\n".encode("ascii"))
 
     def _write(self, pieces: list[Piece]) -> None:
         for piece in pieces:
-            if self._room <= 0:
+            if not self._writing:
                 return
-            part = piece.output[: self._room]
-            self._kept += piece.kept_within(self._room)
-            self._room -= len(part)
-            self._append(part)
+            if len(piece.output) > self._room:
+                self._writing = False  # full: what follows is dropped and counted
+                return
+            self._room -= len(piece.output)
+            if self._append(piece.output) and piece.kept:
+                self._kept += piece.raw
 
     def _fail(self, exc: Exception) -> None:
-        self._broken = True  # the exception's text is never written: it may quote the input
+        self._writing = False  # the exception's text is never written: it may quote the input
         self._append(f"\n[ai-harness: the stderr log stopped here ({type(exc).__name__}); "
                      "the rest is counted, not kept]\n".encode("ascii"))
 
-    def _append(self, data: bytes) -> None:
+    def _append(self, data: bytes) -> bool:
+        """Write `data`; any failure stops the writing and is not raised."""
         if not data:
-            return
+            return True
         try:
             os.write(self._errlog, data)  # type: ignore[arg-type]
-        except OSError:
-            pass
+        except Exception:  # noqa: BLE001 - a log that cannot be written ends only the log
+            self._writing = False
+            return False
+        return True
 
 
 async def _close(stream: object) -> None:

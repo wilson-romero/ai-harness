@@ -140,13 +140,14 @@ def test_a_credential_split_across_two_stderr_writes_is_redacted_in_the_log(mcp,
 def test_a_burst_of_utf8_continuation_bytes_on_stderr_does_not_end_the_session(mcp, ws,
                                                                                data_dir):
     """Second review of 2026-11-25, finding 1: this input made the redactor raise and the
-    session die with an ExceptionGroup."""
+    session die with an ExceptionGroup. Now it is one line over the limit: dropped, marked."""
     server = ws.server("stderr-continuation-bytes")
     code, out, err, _ = mcp("tools", "synthetic")
     assert code == 0, err
     assert "get_project_metadata" in out
     log = (data_dir / "logs" / "mcp" / "synthetic.stderr.log").read_bytes()
-    assert log == b"\x80" * 70_000
+    assert log == (b"[ai-harness: a line of 70000 bytes was dropped: too long to redact]\n"
+                   b"\n[ai-harness: 70000 more bytes of stderr were dropped]\n")
     assert server.stopped()
 
 

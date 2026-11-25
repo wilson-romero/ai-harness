@@ -345,8 +345,9 @@ class Server:
             time.sleep(0.2)  # makes two reads likely; the unit tests prove the split exactly
 
     def flood_stderr(self, mebibytes: int) -> None:
-        """Write to stderr in the calling thread: nothing else happens until it is written."""
-        chunk = b"E" * (1024 * 1024)
+        """Write to stderr in the calling thread: nothing else happens until it is written.
+        Lines of 1 KiB (revised 2026-11-25): a line over 16 KiB is dropped whole by the log."""
+        chunk = (b"E" * 1023 + b"\n") * 1024
         for _ in range(mebibytes):
             try:
                 sys.stderr.buffer.write(chunk)

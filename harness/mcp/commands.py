@@ -312,8 +312,9 @@ def _warn_if_alive(outcome: Outcome) -> None:
     from harness.mcp.transport import STDERR_KEEP_BYTES
 
     if outcome.stderr_bytes > STDERR_KEEP_BYTES:
-        print(f"warning: the server wrote {outcome.stderr_bytes} bytes on stderr; only the "
-              f"first {STDERR_KEEP_BYTES} were kept in its log", file=sys.stderr)
+        print(f"warning: the server wrote {outcome.stderr_bytes} bytes on stderr; its log keeps "
+              f"at most {STDERR_KEEP_BYTES} bytes of redacted lines, and a last line counts "
+              "whatever it dropped", file=sys.stderr)
 
 
 def _stderr_kill_bytes() -> int:
