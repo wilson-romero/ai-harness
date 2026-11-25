@@ -1,10 +1,10 @@
 # ai-harness
 
-Copiloto de arquitectura que se ejecuta en local. Mantiene varias conversaciones persistentes con un proveedor de lenguaje y, en cortes posteriores, usará Microsoft Copilot Web, herramientas MCP, Skills, una segunda memoria en Markdown y Enterprise Architect.
+Copiloto de arquitectura que se ejecuta en local. Mantiene varias conversaciones persistentes con un proveedor de lenguaje, lee una segunda memoria en Markdown, ejecuta Skills declarativos y llama a herramientas de solo lectura de servidores MCP. En cortes posteriores usará Microsoft Copilot Web y Enterprise Architect.
 
 **Es un proyecto educativo:** sirve para aprender a construir un harness, no está pensado para uso en producción. Se ejercita solo con prompts sintéticos y no guarda contenido real. Quien lo use para automatizar un servicio real es responsable de cumplir las condiciones de uso de ese servicio.
 
-Estado: **Corte 1 · Esqueleto**, **Corte 3 · Memoria** y **Corte 4 · Skills**. Sesiones, historial y recuperación funcionan con un proveedor Mock; el harness lee una segunda memoria en Markdown compatible con `claude-memory-system` y ejecuta Skills declarativos. Su única escritura en esa memoria es una nota de decisión nueva en `Decisiones/`, después de una aprobación humana (ver [Skills de arquitectura](#skills-de-arquitectura)). El plan de entregas está en [`docs/plan/2026-11-24-ai-harness-cortes.md`](docs/plan/2026-11-24-ai-harness-cortes.md).
+Estado (revisado el 2026-11-25): **Corte 1 · Esqueleto**, **Corte 3 · Memoria**, **Corte 4 · Skills** y, del Corte 5, la **pasarela MCP** (`mcp-gateway`); la lectura de Enterprise Architect (`ea-read`) está en pausa. Sesiones, historial y recuperación funcionan con un proveedor Mock, el único disponible hoy: el proveedor de Copilot Web está en desarrollo y no forma parte de esta versión. El harness lee una segunda memoria en Markdown compatible con `claude-memory-system`, ejecuta Skills declarativos y llama por stdio a herramientas de solo lectura de servidores MCP declarados en una lista local (ver [Herramientas MCP](#herramientas-mcp)). Su única escritura en esa memoria es una nota de decisión nueva en `Decisiones/`, después de una aprobación humana (ver [Skills de arquitectura](#skills-de-arquitectura)). El plan de entregas está en [`docs/plan/2026-11-24-ai-harness-cortes.md`](docs/plan/2026-11-24-ai-harness-cortes.md).
 
 ## Requisitos
 
@@ -31,7 +31,7 @@ uv run python main.py history SESSION_ID
 
 ## Memoria del proyecto
 
-El harness lee un vault de Markdown con la estructura de `claude-memory-system` (`projects/<slug>/_project.md`, `projects/<slug>/sessions/`, `Decisiones/`, `Lecciones/`, `Memoria-CC/`…). **Solo lee**: ningún comando crea, modifica, mueve ni borra nada en el vault.
+El harness lee un vault de Markdown con la estructura de `claude-memory-system` (`projects/<slug>/_project.md`, `projects/<slug>/sessions/`, `Decisiones/`, `Lecciones/`, `Memoria-CC/`…). Los comandos `memory …` y `ask --project` **solo leen**: no crean, modifican, mueven ni borran nada en el vault. La única escritura del harness en el vault es la del Skill `architecture-memory`: una nota de decisión nueva en `Decisiones/` (y la carpeta, si no existe), solo después de que una persona apruebe en la terminal el contenido exacto; nunca modifica ni borra una nota existente (ver [Skills de arquitectura](#skills-de-arquitectura)).
 
 ```sh
 export HARNESS_VAULT_ROOT="$HOME/ruta/al/vault"   # ruta absoluta
@@ -337,7 +337,7 @@ Límite: un proceso que el servidor lance en **otra sesión o grupo** (`setsid`,
 - La tabla `tool_calls` de SQLite guarda:
   - servidor, herramienta y operación;
   - decisión y motivo;
-  - un HMAC-SHA-256 de los argumentos, con una clave aleatoria local (`HARNESS_DATA_DIR/keys/mcp-args.key`, solo legible por su dueño, nunca se imprime), y su tamaño;
+  - un HMAC-SHA-256 de los argumentos, con una clave aleatoria local (`HARNESS_DATA_DIR/keys/mcp-args.key`, nunca se imprime; en macOS y Linux el fichero es `0600` y su carpeta `0700`; en Windows el harness no fija ninguna ACL y el fichero hereda los permisos de la carpeta donde esté `HARNESS_DATA_DIR`), y su tamaño;
   - estado, código de error y si el servidor quedó parado;
   - bytes del resultado y duración.
 
@@ -382,6 +382,8 @@ Solo una pregunta a la vez por sesión: una segunda pregunta mientras la primera
 - SQLite en `HARNESS_DATA_DIR/harness.sqlite3`, sin cifrar.
 - El texto de prompts y respuestas se guarda solo si el proveedor declara que su contenido es sintético (el Mock). Con cualquier otro proveedor se guardan la solicitud, su estado y sus fechas, sin el texto.
 - La auditoría registra qué pasó y cuándo, nunca el texto.
+- De cada decisión que `architecture-memory` escribe, SQLite guarda su identificador y el SHA-256 de su texto fuente, nunca el texto (ver [Skills de arquitectura](#skills-de-arquitectura)).
+- El stderr de cada servidor MCP, redactado, en `HARNESS_DATA_DIR/logs/mcp/` (ver [Herramientas MCP](#herramientas-mcp)).
 
 ## Desarrollo
 
