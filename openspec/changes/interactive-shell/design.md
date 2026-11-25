@@ -145,8 +145,11 @@ Premisas **sin medir**, cada una con su tarea:
   - **Alternativas rechazadas:**
     - Vaciar el búfer con código de plataforma: rompe la regla de no tener código condicionado por plataforma.
     - Descartar las líneas que lleguen en un margen corto tras mostrar el aviso: depende de tiempos (una persona rápida o una terminal lenta lo confunden) y no se puede probar sin reloj.
-    - Que `n` dentro de la conversación deje la aprobación `pending` en vez de cancelar la ejecución (lo que propuso la revisión): el mecanismo existente lo permite sin tocar el uso único ni la caducidad (`pending` conserva su caducidad), pero contradice el escenario «Aprobación rechazada» de la spec («la ejecución queda cancelada») y dejaría la conversación sin forma de rechazar. Es un cambio de producto: **pendiente de decisión de Wilson**, con las opciones en el informe de la revisión.
-  - **Impacto:** spec sin cambios (el escenario «Aprobación rechazada» sigue como está). README, sección «Conversación». El rechazo accidental no aplica nada: el peor caso es una ejecución cancelada que hay que lanzar otra vez.
+    - Que `n` dentro de la conversación deje siempre la aprobación `pending` (lo que propuso la revisión): la conversación se quedaría sin forma de rechazar.
+    - Dejarlo como límite sin más: una `n` escrita de más cancela una ejecución que hay que lanzar otra vez.
+  - **Decisión de Wilson (2026-11-25): confirmar el rechazo.** Solo en el aviso dentro de la conversación (`SkillEngine(confirm_rejection=True)`, que solo pasa la conversación); `skill run` y `skill resume` desde la línea de órdenes siguen igual. Tras `n`, el aviso pide la palabra `reject` escrita completa y en minúsculas (`REJECT` no vale; se ignoran los espacios de los extremos). Con `reject`, el rechazo es el de siempre: aprobación `rejected`, ejecución `cancelled`. Con cualquier otra cosa, o con fin de entrada o Ctrl+C, la respuesta es «sin decidir»: la aprobación queda `pending` (se reanuda con `skill resume`), la ejecución no se cancela, no se gasta ningún intento (el aviso termina sin decidir y `skill resume` vuelve a preguntar con tres) y lo escrito en la confirmación lo consume el aviso: no se envía al proveedor ni se ejecuta como comando. El uso único, la caducidad y el hash no cambian.
+  - **Límite que queda:** un pegado de varias líneas que contenga `n` y después `reject` rechaza. Nunca puede aprobar.
+  - **Impacto:** spec: escenario «Aprobación rechazada» con la confirmación y escenario nuevo «Rechazo sin confirmar». README, sección «Conversación». Tests: `test_a_rejected_approval`, `test_n_alone_leaves_the_approval_pending`, `test_n_then_other_text_is_pending_and_the_text_goes_nowhere` y, sobre pseudoterminal real, `test_an_n_typed_ahead_cannot_reject_the_approval`.
 
 ### D9 · Texto ajeno marcado y saneado al mostrarlo
 
@@ -175,7 +178,7 @@ Premisas **sin medir**, cada una con su tarea:
 - [Sin edición de línea ni historial de entradas en Windows] → se usa lo que da la terminal. Mejorarlo es parte del change de apariencia.
 - [La terminal real no se puede probar de forma portable] → el bucle se prueba con la terminal inyectada; la implementación real sobre `input()` se cubre con la demo de Wilson, y así se dice en los recibos.
 - [Una respuesta larga llena la pantalla] → sin paginación en esta versión; `/history` permite volver a verla.
-- [Lo escrito por adelantado contesta el aviso de aprobación siguiente (2026-11-25)] → no puede aprobar; puede rechazar o gastar intentos. Límite descrito en D8; la decisión sobre el rechazo dentro de la conversación queda para Wilson.
+- [Lo escrito por adelantado contesta el aviso de aprobación siguiente (2026-11-25)] → no puede aprobar; puede gastar los intentos de ese aviso (queda `pending`). Rechazar exige además la palabra `reject` (decisión de Wilson, D8); solo un pegado con `n` y `reject` rechaza.
 
 ## Open Questions
 

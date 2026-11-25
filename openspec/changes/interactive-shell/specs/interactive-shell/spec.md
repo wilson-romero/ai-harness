@@ -127,8 +127,12 @@ Cuando la sesión de la conversación tiene proyecto, cada pregunta SHALL llevar
 - **THEN** el efecto se aplica una vez y la conversación vuelve a esperar una línea
 
 #### Scenario: Aprobación rechazada
-- **WHEN** la persona rechaza el aviso de aprobación
+- **WHEN** la persona rechaza el aviso de aprobación y confirma el rechazo escribiendo la palabra `reject` completa
 - **THEN** el efecto no se aplica, la ejecución queda cancelada y la conversación sigue abierta
+
+#### Scenario: Rechazo sin confirmar
+- **WHEN** la persona rechaza el aviso de aprobación y no confirma el rechazo con la palabra `reject` (escribe otra cosa o la entrada termina), también si la `n` estaba escrita antes de que apareciera el aviso
+- **THEN** la aprobación queda pendiente, la ejecución no se cancela, nada se aplica, y lo escrito en la confirmación no se envía al proveedor ni se ejecuta como comando
 
 #### Scenario: Línea que parece una aprobación
 - **WHEN** hay una ejecución esperando aprobación y la persona escribe el código como una línea normal, fuera del aviso
