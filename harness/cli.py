@@ -34,6 +34,7 @@ from harness.memory.search import (
     validate_limit,
 )
 from harness.providers.registry import provider_factory
+from harness.shell.app import add_chat_parser, run_chat, stdio_is_terminal
 from harness.skills.commands import add_skill_parser, run_skill_command
 from harness.skills.engine import recover_runs
 from harness.storage.database import open_database
@@ -86,6 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
     maintain.add_argument("--dry-run", action="store_true", help="report only (required)")
     add_skill_parser(commands)
     add_mcp_parser(commands)
+    add_chat_parser(commands)
     return parser
 
 
@@ -103,7 +105,10 @@ def _utf8_output() -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     _utf8_output()
-    args = build_parser().parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if not raw and stdio_is_terminal():
+        raw = ["chat"]  # at a console, the program alone opens the conversation (D1)
+    args = build_parser().parse_args(raw)
     try:
         return _run(args)
     except UsageError as exc:
@@ -120,6 +125,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _run(args: argparse.Namespace) -> int:
     if args.command == "mcp":
         return run_mcp_command(args)
+    if args.command == "chat":
+        return run_chat(args)
     settings = Settings.from_env(os.environ)
     if args.command == "memory":
         return _memory(args)

@@ -152,6 +152,13 @@ def step_marker(skill: str, step: str, attempt: int) -> str:
     return f"[skill {skill}/{step} intento {attempt}]"
 
 
+class _HeldLock:
+    """The session lock held by the caller (a conversation): releasing it is the caller's job."""
+
+    def release(self) -> None:
+        pass
+
+
 class SkillEngine:
     def __init__(
         self,
@@ -170,6 +177,7 @@ class SkillEngine:
         progress: Callable[[str], None] | None = None,
         run_time_limit_s: float = MAX_RUN_TIME_S,
         busy_retry_s: float = BUSY_RETRY_S,
+        held_session: UUID | None = None,
     ) -> None:
         self._busy_retry_s = busy_retry_s
         self._conn = conn
@@ -185,6 +193,9 @@ class SkillEngine:
         self._context_builder = context_builder
         self._progress = progress or (lambda _message: None)
         self._run_time_limit_s = run_time_limit_s
+        # A conversation that already holds this session's lock (interactive-shell D4, D8):
+        # its runs use that lock instead of taking a second one, which would be refused.
+        self._held_session = held_session
 
     # -- commands -------------------------------------------------------------------------------
 
@@ -1125,7 +1136,9 @@ class SkillEngine:
 
     # -- storage helpers ------------------------------------------------------------------------
 
-    def _lock(self, session: Session) -> SessionLock:
+    def _lock(self, session: Session) -> SessionLock | _HeldLock:
+        if self._held_session is not None and session.session_id == self._held_session:
+            return _HeldLock()
         lock = SessionLock(self._data_dir, session.session_id)
         if not lock.acquire():
             raise SessionBusy(f"session {session.session_id} is busy in another process")
