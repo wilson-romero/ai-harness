@@ -173,8 +173,7 @@ class DecisionEffect:
         lock = NamedLock(self._data_dir, LOCK_NAME)
         if not lock.acquire(self._lock_wait_s):
             raise EffectBusy(
-                f"another harness process is writing a decision (waited {self._lock_wait_s:g} s); "
-                "the approval is still granted: run `skill resume` again"
+                f"another harness process is writing a decision (waited {self._lock_wait_s:g} s)"
             )
         try:
             yield

@@ -10,6 +10,7 @@ that marks the step as applying.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import json
@@ -66,6 +67,10 @@ MAX_PROMPT_BYTES = 64 * 1024
 MAX_RESPONSE_BYTES = 128 * 1024
 MAX_RUN_TIME_S = 1800
 MAX_ATTEMPTS = 3
+# With a provider whose outputs are not stored, how long an effect's busy exclusive section is
+# retried in the same invocation before the approval is revoked (2026-11-25).
+BUSY_RETRY_S = 30.0
+BUSY_PAUSE_S = 0.2
 
 OPEN_RUN_STATES = ("pending", "running", "awaiting_approval", "uncertain")
 FINAL_RUN_STATES = ("completed", "failed", "cancelled")
@@ -163,7 +168,9 @@ class SkillEngine:
         context_builder: ContextBuilder | None = None,
         progress: Callable[[str], None] | None = None,
         run_time_limit_s: float = MAX_RUN_TIME_S,
+        busy_retry_s: float = BUSY_RETRY_S,
     ) -> None:
+        self._busy_retry_s = busy_retry_s
         self._conn = conn
         self._data_dir = data_dir
         self._sessions = sessions
@@ -286,7 +293,8 @@ class SkillEngine:
                 return RunOutcome(
                     run_id, "failed",
                     message=f"the outputs of step(s) {', '.join(missing)} were not stored "
-                    "(the provider's content is not synthetic); the run cannot continue",
+                    "(the provider's content is not synthetic); the run cannot continue and "
+                    "nothing was applied: start it again with `skill run`",
                 )
             if retry_step is not None:
                 attempt = latest[retry_step]["attempt"]
@@ -699,17 +707,46 @@ class SkillEngine:
             return self._revoke(state, step, row, approval)
         effect = self._effects[step.effect]
         effect_context = self._effect_context(state, step)
+        deadline = self._monotonic() + self._busy_retry_s
         with contextlib.ExitStack() as held:
-            try:
-                # Taken before the approval is consumed: if the effect cannot have its turn,
-                # the approval stays `granted` and nothing is applied (architecture-skills-llm).
-                held.enter_context(effect.exclusive(effect_context))
-            except EffectBusy:
-                if own and row["status"] not in ("completed", "failed"):
-                    self._set_awaiting(state, row)
-                raise
+            while True:
+                try:
+                    # Taken before the approval is consumed: if the effect cannot have its turn,
+                    # nothing is consumed or applied (architecture-skills-llm).
+                    held.enter_context(effect.exclusive(effect_context))
+                    break
+                except EffectBusy as busy:
+                    if not own or row["status"] in ("completed", "failed"):
+                        raise
+                    if state.provider.synthetic_content:
+                        # The outputs are stored: the approval stays `granted` for a resume.
+                        self._set_awaiting(state, row)
+                        raise EffectBusy(f"{busy}; the approval is still granted: run `skill "
+                                         f"resume {state.run_id}` again") from None
+                    # A real provider: the outputs exist only in this process, so a later
+                    # resume could not use them (2026-11-25, independent review). Wait here, a
+                    # bounded time, then revoke: never a granted approval on a finished run.
+                    if self._monotonic() >= deadline:
+                        return self._give_up_busy(state, step, row, approval, busy)
+                    await asyncio.sleep(BUSY_PAUSE_S)
             return self._consume_and_apply(state, step, approval_id, proposed, approval, own,
                                            row, effect, effect_context)
+
+    def _give_up_busy(self, state: _Run, step: ApprovalStep, row: sqlite3.Row,
+                      approval: sqlite3.Row, busy: EffectBusy) -> RunOutcome:
+        with transaction(self._conn):
+            self._set_approval(approval["approval_id"], "revoked",
+                               decided_at=utc_iso(self._clock()))
+            self._audit("approval.revoked", "busy", state.session, state.run_id,
+                        self._approval_detail(approval))
+            self._set_step(row, "failed", error_code="effect_busy", finished=True)
+            self._finish_run_locked(state.run_id, state.session, "failed", "effect_busy")
+        return RunOutcome(
+            state.run_id, "failed",
+            message=f"step {step.id!r}: {busy} for {self._busy_retry_s:g} s; the approval was "
+            "revoked and nothing was applied. This provider's outputs are not stored, so the "
+            "run cannot be resumed: start it again with `skill run`",
+        )
 
     def _consume_and_apply(
         self, state: _Run, step: ApprovalStep, approval_id: str, proposed: _Proposed,

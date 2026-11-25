@@ -91,11 +91,15 @@ La ejecución SHALL quedar ligada, al crearse, al vault resuelto en ese momento,
 - **THEN** la ejecución queda `failed` con `vault_changed`, la aprobación `revoked`, la huella de los dos vaults no cambia y ni el mensaje ni SQLite contienen ninguna de las dos rutas
 
 ### Requirement: Escrituras serializadas
-Dos procesos del harness SHALL NOT escribir decisiones en el mismo vault a la vez; el segundo SHALL esperar como mucho un plazo corto y, si no obtiene el turno, SHALL fallar sin escribir y sin consumir su aprobación.
+Dos procesos del harness SHALL NOT escribir decisiones en el mismo vault a la vez; el segundo SHALL esperar como mucho un plazo corto y, si no obtiene el turno, SHALL fallar sin escribir y sin consumir su aprobación. Con un proveedor sintético la aprobación SHALL seguir `granted` para un `resume`; con un proveedor que no guarda sus salidas, el motor SHALL reintentar en la misma invocación durante un tiempo acotado y, si sigue sin turno, SHALL revocar la aprobación y decirlo: ninguna ejecución terminada SHALL conservar una aprobación `granted`.
 
 #### Scenario: Escritor ocupado
-- **WHEN** otro proceso tiene tomado el bloqueo de escritura del vault durante todo el plazo
+- **WHEN** con un proveedor sintético, otro proceso tiene tomado el bloqueo de escritura del vault durante todo el plazo
 - **THEN** la escritura falla con un error controlado, la aprobación sigue `granted` y el vault queda intacto
+
+#### Scenario: Escritor ocupado con proveedor real
+- **WHEN** con un proveedor que no guarda sus salidas, el escritor está ocupado unos intentos y después queda libre, o sigue ocupado durante todo el tiempo de reintento
+- **THEN** en el primer caso la nota se escribe en la misma invocación con la misma aprobación; en el segundo la ejecución queda `failed` con `effect_busy`, la aprobación `revoked`, el mensaje dice que hay que repetir la ejecución con `skill run` y el vault queda intacto
 
 ### Requirement: Escritura interrumpida se reconcilia sin repetir
 Si el proceso muere después de consumir la aprobación y antes de registrar el final de la escritura, el paso SHALL quedar `uncertain`. Una vez creado el enlace de la nota, el resultado SHALL ser «escrita» o `uncertain`, nunca `failed`: un fallo posterior (comprobar la nota publicada, borrar el temporal) deja el paso `uncertain`. Mientras el temporal propio siga sin poder borrarse, la reconciliación SHALL dejar el paso `uncertain` y `resume` SHALL negarse con código 1 diciéndolo, porque la nota con dos enlaces no la lee la memoria. Al reanudar, el sistema SHALL comprobar el vault sin escribir: si existe la nota con ese identificador y los bytes aprobados, el paso se completa; si no existe, se pide una aprobación nueva; si existe con otros bytes, el paso SHALL seguir `uncertain` y `resume` SHALL negarse con código 1 sin escribir nada, para que una persona revise el vault.
@@ -105,8 +109,12 @@ Si el proceso muere después de consumir la aprobación y antes de registrar el 
 - **THEN** el paso queda `completed` sin escribir otra vez y el vault tiene una sola nota con ese identificador
 
 #### Scenario: Muerte antes del renombrado
-- **WHEN** el proceso muere después de consumir la aprobación y antes de publicar la nota (con o sin temporal escrito), y se reanuda en una terminal
+- **WHEN** con un proveedor sintético (las salidas de los pasos se guardan), el proceso muere después de consumir la aprobación y antes de publicar la nota (con o sin temporal escrito), y se reanuda en una terminal
 - **THEN** se pide una aprobación nueva para los mismos bytes y solo con ella se escribe la nota
+
+#### Scenario: Muerte antes del renombrado con proveedor real
+- **WHEN** con un proveedor que no guarda sus salidas, el proceso muere después de consumir la aprobación y antes de publicar la nota, y se reanuda
+- **THEN** la ejecución queda `failed` con `outputs_not_retained`, el mensaje dice que hay que repetirla con `skill run`, no queda ninguna aprobación `pending` ni `granted` y el vault queda intacto
 
 #### Scenario: Temporal retenido tras publicar
 - **WHEN** la nota se publica pero su temporal no se puede borrar porque otro programa lo tiene abierto

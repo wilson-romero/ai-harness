@@ -649,3 +649,73 @@ def test_cancel_of_an_uncertain_run_without_a_note_says_nothing_was_written(conn
     outcome = engine.cancel(run_id)
     assert outcome.status == "cancelled"
     assert outcome.message and "nothing was written" in outcome.message
+
+
+# -- 7.5 with a real provider, a busy writer or a crash before publishing ----------------------------
+
+
+class BusyFor(DecisionEffect):
+    """The vault writer is busy for the first `times` attempts (or always, with None)."""
+
+    def __init__(self, *args, times=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.times = times
+        self.attempts = 0
+
+    def exclusive(self, context):
+        self.attempts += 1
+        if self.times is None or self.attempts <= self.times:
+            raise EffectBusy("another harness process is writing a decision")
+        return super().exclusive(context)
+
+
+def _real_provider_engine(conn, data_dir, vault, effect, **kwargs):
+    engine, sessions, _ = engine_for(conn, data_dir, vault, terminal=ApprovingTerminal(),
+                                     synthetic=False, **kwargs)
+    engine.__dict__["_effects"] = {DecisionEffect.scope: effect}
+    return engine, sessions
+
+
+def test_real_provider_waits_for_a_busy_writer_in_the_same_invocation(conn, data_dir, vault):
+    effect = BusyFor(data_dir, env={"HARNESS_VAULT_ROOT": str(vault)}, lock_wait_s=0.1, times=2)
+    engine, sessions = _real_provider_engine(conn, data_dir, vault, effect, busy_retry_s=5.0)
+    outcome = run(engine, sessions.create_session("Demo", "demo-alpha"))
+    assert outcome.status == "completed", outcome.message
+    assert effect.attempts == 3
+    assert one(conn, "SELECT status FROM approvals") == ("consumed",)
+
+
+def test_real_provider_revokes_the_approval_when_the_writer_stays_busy(conn, data_dir, vault):
+    effect = BusyFor(data_dir, env={"HARNESS_VAULT_ROOT": str(vault)}, lock_wait_s=0.1)
+    engine, sessions = _real_provider_engine(conn, data_dir, vault, effect, busy_retry_s=0.3)
+    before = fingerprint(vault)
+    outcome = run(engine, sessions.create_session("Demo", "demo-alpha"))
+    assert outcome.status == "failed"
+    assert "revoked" in outcome.message and "skill run" in outcome.message
+    assert one(conn, "SELECT status, error_code FROM skill_runs") == ("failed", "effect_busy")
+    assert one(conn, "SELECT status FROM approvals") == ("revoked",)
+    assert fingerprint(vault) == before
+
+
+def test_real_provider_crash_before_publishing_asks_to_repeat_the_run(conn, data_dir, vault,
+                                                                      monkeypatch):
+    """«Muerte antes del renombrado» with a real provider: the outputs were not stored, so the
+    step cannot be asked again; the run fails saying so, with no approval left usable."""
+    from harness.memory import decisions
+
+    def dies(*args, **kwargs):
+        raise SystemExit("killed before the link")
+
+    monkeypatch.setattr(decisions, "_write_temp", dies)
+    engine, sessions, _ = engine_for(conn, data_dir, vault, terminal=ApprovingTerminal(),
+                                     synthetic=False)
+    before = fingerprint(vault)
+    with pytest.raises(SystemExit):
+        run(engine, sessions.create_session("Demo", "demo-alpha"))
+    monkeypatch.undo()
+    run_id = one(conn, "SELECT run_id FROM skill_runs")[0]
+    outcome = resume(engine, run_id)
+    assert outcome.status == "failed"
+    assert "skill run" in outcome.message
+    assert one(conn, "SELECT count(*) FROM approvals WHERE status IN ('pending', 'granted')") == (0,)
+    assert fingerprint(vault) == before
