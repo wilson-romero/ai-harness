@@ -8,14 +8,13 @@ here reads a model output as a decision: the only input that can grant is the te
 
 from __future__ import annotations
 
-import getpass
 import hashlib
 import json
-import sys
 import unicodedata
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal
 
+from harness.shell.terminal import Terminal, TtyTerminal  # the common interface (re-exported)
 from harness.text.redaction import redact
 from harness.text.safe_text import strip_controls, terminal_safe
 
@@ -132,38 +131,6 @@ class Proposal:
 def proposal_hash(proposal: dict) -> str:
     canonical = json.dumps(proposal, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(HASH_DOMAIN + canonical.encode("utf-8")).hexdigest()
-
-
-class Terminal(Protocol):
-    """Where a person sees a proposal and answers. Tests inject a fake one."""
-
-    def is_interactive(self) -> bool: ...
-
-    def show(self, text: str) -> None: ...
-
-    def ask(self, question: str) -> str | None:  # None: end of input
-        ...
-
-    def identity(self) -> str: ...
-
-
-class TtyTerminal:
-    """The only object that reads stdin to decide an approval."""
-
-    def is_interactive(self) -> bool:
-        return sys.stdin.isatty() and sys.stdout.isatty()
-
-    def show(self, text: str) -> None:
-        print(text, flush=True)
-
-    def ask(self, question: str) -> str | None:
-        try:
-            return input(question)
-        except EOFError:
-            return None
-
-    def identity(self) -> str:
-        return getpass.getuser()
 
 
 def render_for_terminal(proposal: Proposal, approval_hash: str, expires_at: str,
