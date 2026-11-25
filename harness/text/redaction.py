@@ -140,76 +140,145 @@ def secret_kinds(text: str) -> Counter[str]:
     return Counter(redact(text).kinds)
 
 
-# A line longer than this, still without its newline, is cut before it is complete; the last
-# `STREAM_HOLD_BYTES` stay buffered, so a credential up to that long is never split by the cut.
+# The stream redactor (mcp-gateway D3, revised 2026-11-25 twice). A line longer than
+# `STREAM_LINE_BYTES` without its end is released in parts; the cut is never placed inside a
+# credential found in the whole pending text, and the last `STREAM_HOLD_BYTES` always wait.
 STREAM_LINE_BYTES = 64 * 1024
 STREAM_HOLD_BYTES = 8 * 1024
+# A private key header without its END line drops what follows for at most this many bytes
+# (a 16384-bit RSA key in PEM is about 13 KiB); past it, logging resumes after a marker.
+STREAM_KEY_BYTES = 32 * 1024
+
+
+@dataclass(frozen=True)
+class Piece:
+    """What `LineRedactor` releases: `output` stands for `raw` input bytes, of which `withheld`
+    (the body of a private key block) are in no form in it."""
+
+    raw: int
+    output: bytes
+    withheld: int = 0
+
+
+def _line_end(buffer: bytearray, pos: int) -> int:
+    """End (exclusive) of the first complete line at or after `pos`, or -1. A line ends with
+    LF, CRLF or a lone CR (a progress bar); a CR at the very end waits for the next byte."""
+    newline = buffer.find(b"\n", pos)
+    cr = buffer.find(b"\r", pos, newline if newline >= 0 else len(buffer))
+    if cr < 0:
+        return newline + 1 if newline >= 0 else -1
+    if cr + 1 == len(buffer):
+        return -1
+    return cr + 2 if buffer[cr + 1] == 0x0A else cr + 1
+
+
+def _encoded(text: str) -> bytes:
+    return text.encode("utf-8", "surrogateescape")
 
 
 class LineRedactor:
-    """`redact` over a byte stream that arrives in arbitrary chunks (mcp-gateway D4, SEC-01).
+    """`redact` over a byte stream that arrives in arbitrary chunks (mcp-gateway D3, SEC-01).
 
-    A credential can straddle two chunks, so text is redacted one complete line at a time; the
-    unfinished tail stays buffered. The buffer is bounded: a line that passes
-    `STREAM_LINE_BYTES` without a newline is redacted and released up to its last
-    `STREAM_HOLD_BYTES`, which stay for the next chunk. Only a credential longer than that
-    hold, in a line longer than the bound, can be split by the cut (documented limit).
+    Text is redacted one complete line at a time (LF, CRLF or a lone CR end a line), so a
+    credential split across reads is still found; the unfinished tail waits in a buffer. The
+    buffer is bounded: when an unfinished line passes `line_bytes`, the credentials are found
+    in the whole pending text and the text is released up to a cut that leaves at least
+    `hold_bytes` waiting and never falls inside a credential (the cut moves back to the start
+    of the credential). So a credential no longer than `hold_bytes` is never split. One that
+    starts the buffer and is longer than `line_bytes - hold_bytes` is released whole, as its
+    redaction marker, at once.
 
-    A PEM private key spans lines: from a BEGIN line without its END, every following line is
-    dropped until the END line, as `redact` masks the block as a whole. Bytes that are not
+    A PEM private key spans lines: as in `redact`, a BEGIN header anywhere in a line masks the
+    rest of that line, and the following lines are withheld until the END line, for at most
+    `key_bytes`; past that, a marker says so and redacted logging resumes. Bytes that are not
     UTF-8 pass through unchanged (`surrogateescape`) and never raise.
 
-    `feed` and `finish` return `(raw_bytes, output)` pairs: how many input bytes each output
-    stands for, so that a writer with a size cap can say how much of the input it kept.
+    Not covered: a credential longer than `hold_bytes` that straddles a cut; a format that
+    `redact` does not know; whatever is still buffered if the process dies before `finish`.
     """
 
     def __init__(self, line_bytes: int = STREAM_LINE_BYTES,
-                 hold_bytes: int = STREAM_HOLD_BYTES) -> None:
+                 hold_bytes: int = STREAM_HOLD_BYTES, key_bytes: int = STREAM_KEY_BYTES) -> None:
         if not 0 < hold_bytes < line_bytes:
             raise ValueError("the hold must be smaller than the line bound")
-        self._line_bytes, self._hold_bytes = line_bytes, hold_bytes
+        self._line_bytes, self._hold_bytes, self._key_bytes = line_bytes, hold_bytes, key_bytes
         self._pending = bytearray()
-        self._scanned = 0  # bytes at the start of `_pending` known to hold no newline
+        self._scanned = 0  # bytes at the start of `_pending` known to hold no line end
         self._in_key = False  # inside a private key block whose END has not been seen
+        self._key_seen = 0  # bytes withheld in the current key block
 
     @property
     def pending(self) -> int:
         return len(self._pending)
 
-    def feed(self, data: bytes) -> list[tuple[int, bytes]]:
+    def feed(self, data: bytes) -> list[Piece]:
         self._pending += data
-        out: list[tuple[int, bytes]] = []
+        out: list[Piece] = []
         start = 0
-        while (newline := self._pending.find(b"\n", max(self._scanned, start))) >= 0:
-            out.append(self._emit(bytes(self._pending[start:newline + 1])))
-            start = self._scanned = newline + 1
+        while (end := _line_end(self._pending, max(self._scanned, start))) >= 0:
+            out.append(self._emit(_text(self._pending[start:end])))
+            start = end
         del self._pending[:start]
-        self._scanned = len(self._pending)
-        if len(self._pending) > self._line_bytes:
-            cut = len(self._pending) - self._hold_bytes
-            out.append(self._emit(bytes(self._pending[:cut])))
-            del self._pending[:cut]
-            self._scanned = len(self._pending)
+        self._scanned = max(0, len(self._pending) - 1)  # a final CR is looked at again
+        while len(self._pending) > self._line_bytes:
+            out.append(self._cut())
         return out
 
-    def finish(self) -> list[tuple[int, bytes]]:
-        """The stream ended: its last line, even without a newline, is complete."""
+    def finish(self) -> list[Piece]:
+        """The stream ended: its last line, even without a line end, is complete."""
         if not self._pending:
             return []
-        out = [self._emit(bytes(self._pending))]
+        out = [self._emit(_text(self._pending))]
         self._pending.clear()
         self._scanned = 0
         return out
 
-    def _emit(self, raw: bytes) -> tuple[int, bytes]:
-        text = raw.decode("utf-8", "surrogateescape")
+    def _cut(self) -> Piece:
+        text = _text(self._pending)
+        cut = len(self._pending) - self._hold_bytes
+        while cut > 0 and self._pending[cut] & 0xC0 == 0x80:  # not inside a UTF-8 character
+            cut -= 1
+        at = len(_text(self._pending[:cut]))
+        spans = [span for _, spans_of in PATTERNS for span in spans_of(text)]
+        moved = True
+        while moved:  # back to the start of any credential the cut would split
+            moved = False
+            for start, end in spans:
+                if start < at < end:
+                    at, moved = start, True
+        if at == 0:  # a credential starts the buffer and is longer than the bound
+            at = max(end for start, end in spans if start == 0)
+            moved = True
+            while moved:
+                moved = False
+                for start, end in spans:
+                    if start < at < end:
+                        at, moved = end, True
+        self._pending = bytearray(_encoded(text[at:]))
+        self._scanned = max(0, len(self._pending) - 1)
+        return self._emit(text[:at])
+
+    def _emit(self, text: str) -> Piece:
+        raw = len(_encoded(text))
+        withheld = 0
         if self._in_key:
             footer = _PEM_END.search(text)
             if footer is None:
-                return len(raw), b""  # the body of a key already masked
+                self._key_seen += raw
+                if self._key_seen <= self._key_bytes:
+                    return Piece(raw, b"", raw)
+                self._in_key = False  # bounded: this part is withheld, what follows is logged
+                return Piece(raw, _encoded(
+                    f"[ai-harness: no END line within {self._key_bytes} bytes of a private key "
+                    "header; logging resumes]\n"), raw)
+            withheld = len(_encoded(text[:footer.end()]))
             text = text[footer.end():]
             self._in_key = False
         spans = private_key_spans(text)
         if spans and spans[-1][1] == len(text) and _PEM_END.search(text, spans[-1][0]) is None:
-            self._in_key = True  # its END comes in a later line
-        return len(raw), redact(text).text.encode("utf-8", "surrogateescape")
+            self._in_key, self._key_seen = True, 0  # its END comes in a later line
+        return Piece(raw, _encoded(redact(text).text), withheld)
+
+
+def _text(data: bytes | bytearray) -> str:
+    return bytes(data).decode("utf-8", "surrogateescape")

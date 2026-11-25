@@ -56,3 +56,11 @@ El stderr de un servidor MCP que el sistema guarda en su log SHALL tener cada cr
 #### Scenario: Clave privada en el stderr del servidor
 - **WHEN** el stderr de un servidor MCP contiene un bloque de clave privada PEM completo, leído en trozos de cualquier tamaño
 - **THEN** su log contiene `[REDACTED:private-key]` en lugar de todo el bloque y el texto que lo sigue sin cambios
+
+#### Scenario: Credencial en el corte de una línea larga sin final
+- **WHEN** un servidor MCP escribe en stderr una línea de 70 000 bytes sin salto con un token de GitHub que cruza el punto donde la línea se suelta por partes, o una barra de progreso que separa cada actualización con un CR suelto (revisada el 2026-11-25)
+- **THEN** su log contiene `[REDACTED:github]` en cada aparición y ningún fragmento del token
+
+#### Scenario: Cabecera de clave privada sin final en el stderr del servidor
+- **WHEN** el stderr de un servidor MCP contiene la línea de inicio de una clave privada PEM sin su línea END, seguida de mucho más texto (revisada el 2026-11-25)
+- **THEN** su log contiene `[REDACTED:private-key]`, retiene como mucho 32 KiB después de la cabecera, dice que el registro se reanuda y guarda redactado lo que sigue, y la línea final cuenta lo retenido como ausente del log

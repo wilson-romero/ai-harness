@@ -32,7 +32,7 @@ import mcp_types as types
 from mcp.client.stdio import _drain_stdout, _get_executable_command
 from mcp.shared.message import SessionMessage
 
-from harness.text.redaction import LineRedactor
+from harness.text.redaction import LineRedactor, Piece
 
 # The rest of an oversized message is counted (not kept) up to this size or for this long, to
 # report its size; past either bound it is reported as "at least" what was seen.
@@ -220,8 +220,11 @@ class StderrLog:
     Text goes through `LineRedactor` (SEC-01), so a credential split across two reads is
     still masked, and a line is written only once it is complete or once the redactor's bound
     releases it. The cap counts what is written; once it is reached nothing more is fed to the
-    redactor, and what it still holds is dropped. The closing line says how many bytes of the
-    server's stderr are not in the log. `errlog` None: everything is dropped, nothing written.
+    redactor, and what it still holds is dropped. The closing line counts the bytes of the
+    server's stderr that are in no form in the log: past the cap, still buffered, or a withheld
+    private key body (a redacted credential is in the log as its marker). It is written when
+    the stream ends or the session is stopped; a process killed outright writes neither it nor
+    the unfinished line. `errlog` None: everything is dropped, nothing written.
     """
 
     def __init__(self, errlog: int | None) -> None:
@@ -245,14 +248,15 @@ class StderrLog:
             self._append(f"\n[ai-harness: {dropped} more bytes of stderr were "
                          "dropped]\n".encode("ascii"))
 
-    def _write(self, pieces: list[tuple[int, bytes]]) -> None:
-        for raw_bytes, output in pieces:
+    def _write(self, pieces: list[Piece]) -> None:
+        for piece in pieces:
             if self._room <= 0:
                 return
-            part = output[: self._room]
+            part = piece.output[: self._room]
             self._room -= len(part)
+            shown = piece.raw - piece.withheld  # a withheld key body is not in the log
             # A piece cut by the cap: exact when redaction did not change it (the usual case).
-            self._kept += raw_bytes if len(part) == len(output) else min(raw_bytes, len(part))
+            self._kept += shown if len(part) == len(piece.output) else min(shown, len(part))
             self._append(part)
 
     def _append(self, data: bytes) -> None:
