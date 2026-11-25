@@ -20,6 +20,7 @@
 <style>
   body { font-family: sans-serif; display: flex; gap: 1rem; }
   nav { width: 12rem; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .turn { border: 1px solid #ccc; margin: .25rem 0; padding: .25rem; white-space: pre-wrap; }
   #synthetic-composer { width: 30rem; height: 4rem; }
 </style>
@@ -111,6 +112,12 @@
     if (idDelay === null && !idNever) showConversation(data.conversation);
     if (startMs) await sleep(startMs);
     const turn = addTurn("assistant", "");
+    // A screen-reader label, visually hidden, before the reply (as real chat pages have).
+    const label = document.createElement("h6");
+    label.className = "sr-only";
+    label.textContent = "ZZ-SR-LABEL said:";
+    const body = document.createTextNode("");
+    turn.append(label, body);
     turn.setAttribute("aria-busy", "true");
     const reply = data.reply;
     const half = Math.floor(reply.length / 2);
@@ -121,8 +128,7 @@
         if (neverFinish) return;
         if (pauseMs) await sleep(pauseMs);
       }
-      turn.firstChild ? (turn.firstChild.textContent = reply.slice(0, i + step))
-                      : turn.prepend(document.createTextNode(reply.slice(0, i + step)));
+      body.textContent = reply.slice(0, i + step);
       await sleep(chunkMs);
     }
     turn.setAttribute("aria-busy", "false");

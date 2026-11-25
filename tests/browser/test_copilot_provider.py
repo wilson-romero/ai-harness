@@ -209,7 +209,9 @@ def test_three_sessions_three_conversations(cli, env, data_dir, app):
     for n, session_id in enumerate(sessions):
         code, out, err = cli("ask", session_id, f"pregunta sintetica {n} ZQX-END-{n}", **env)
         assert code == 0, err
-        assert f"ZQX-END-{n}" in out and CANARY_REPLY in out
+        assert f"ZQX-END-{n}" in out
+        # The visually hidden label before the reply is not part of the answer.
+        assert out.startswith(CANARY_REPLY) and "ZZ-SR-LABEL" not in out
     refs = [session_row(data_dir, s)[1] for s in sessions]
     assert len(set(refs)) == 3 and None not in refs
     for n, ref in enumerate(refs):

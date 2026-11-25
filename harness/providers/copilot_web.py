@@ -78,11 +78,35 @@ EDITOR_LENGTH_JS = (
     "el => (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' ? el.value : el.textContent)"
     ".replace(/[\\u200B-\\u200D\\u2060\\uFEFF\\r\\n]/g, '').length"
 )
-# The reply's rendered text, capped in the page: what crosses to Python is never larger than
-# the cap, however long the reply. Read only; nothing is changed in the page.
-REPLY_TEXT_JS = (
-    "(el, max) => { const t = el.innerText; return [t.length, t.length > max ? t.slice(0, max) : t]; }"
-)
+# The reply as a sighted reader sees it, capped in the page: what crosses to Python is never
+# larger than the cap. Text of visually hidden elements (a box of at most 1 px or clipped
+# away, as screen-reader labels are: on the real page a hidden heading before every reply) is
+# taken out, in document order. Read only; nothing is changed in the page.
+REPLY_TEXT_JS = r"""
+(el, max) => {
+  const all = el.innerText || "";
+  const hidden = [];
+  for (const d of el.querySelectorAll("*")) {
+    if (!d.textContent.trim() || hidden.some((h) => h.contains(d))) continue;
+    const r = d.getBoundingClientRect(); const s = getComputedStyle(d);
+    if (r.width <= 1 || r.height <= 1 || s.clipPath === "inset(50%)" || s.clip.startsWith("rect(0")) {
+      hidden.push(d);
+    }
+  }
+  let cursor = 0, out = "";
+  for (const d of hidden) {
+    const t = d.innerText;
+    if (!t) continue;
+    const at = all.indexOf(t, cursor);
+    if (at < 0) continue;
+    out += all.slice(cursor, at);
+    cursor = at + t.length;
+    if (all[cursor] === "\n") cursor += 1;
+  }
+  out += all.slice(cursor);
+  return [out.length, out.length > max ? out.slice(0, max) : out];
+}
+"""
 
 
 class PromptTooLong(InvalidInput):
