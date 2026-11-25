@@ -4,9 +4,14 @@
 
 Everything runs on a temporary copy of the synthetic vault and a temporary data directory.
 Granting the approval needs a person at a terminal: the demo never simulates it. It prints the
-exact commands to approve this very run (PowerShell and a POSIX shell), and what the approval
-proves is run as the end-to-end test that drives the engine with the test terminal. Every other
+exact commands to approve this very run (PowerShell and a POSIX shell); the approval itself, the
+note coming back through `memory context`, the duplicate and the check that the project memory
+is in the prompt run in `tests/integration/test_mvp_flow.py`, which the demo runs. Every other
 step runs the real CLI in a separate process and checks the vault's fingerprint around it.
+
+The Mock answers by the first key (alphabetical) contained in the prompt. Here the keys are the
+unique phrases of the requirement and of the person's decision, so a scripted answer comes back
+only if that input reached the provider; otherwise the Mock's unscripted answer fails `validate`.
 
 Usage:
     uv run python scripts/demo_mvp_without_ea.py           # cancels the run and cleans up
@@ -17,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import shutil
 import sqlite3
@@ -29,11 +35,11 @@ from demo_common import ROOT, base_env, check, harness, header, run, step
 
 VAULT_FIXTURE = ROOT / "tests" / "fixtures" / "vault-synthetic"
 FIXTURES = ROOT / "tests" / "fixtures" / "mvp"
-REVIEW_KEY = "tarea: hls-review/review"
-EXTRACT_KEY = "tarea: architecture-memory/extract"
+REQUIREMENT_CANARY = "R1-7Q4"  # only in the requirement (and in the decision, which says so)
+DECISION_CANARY = "D-5K2"  # only in the person's decision; sorts before the other key
 HEADINGS = ("Resumen", "Alternativas", "Restricciones", "Requisitos no funcionales",
             "Supuestos", "Preguntas pendientes")
-CANARIES = ("R1-7Q4", "D-5K2")  # unique phrases of the requirement and of the person's decision
+CANARIES = (REQUIREMENT_CANARY, DECISION_CANARY)
 
 
 def fingerprint(root: Path) -> dict[str, tuple]:
@@ -128,7 +134,11 @@ def _demo(work: Path, keep: bool) -> list[str]:
     vault = work / "vault"
     shutil.copytree(VAULT_FIXTURE, vault)
     data = work / "data"
-    responses = copy_lf(FIXTURES / "respuestas-mock.json", work / "respuestas-mock.json")
+    responses = work / "respuestas-por-entrada.json"
+    responses.write_text(json.dumps({
+        REQUIREMENT_CANARY: (FIXTURES / "revision-mock.md").read_text(encoding="utf-8"),
+        DECISION_CANARY: (FIXTURES / "decision-mock.json").read_text(encoding="utf-8"),
+    }, ensure_ascii=False), encoding="utf-8", newline="\n")
     requirement = copy_lf(FIXTURES / "requerimiento-1-eventos-pedidos.md",
                           work / "requerimiento.md")
     env = base_env(HARNESS_DATA_DIR=str(data), HARNESS_VAULT_ROOT=str(vault),
@@ -173,8 +183,9 @@ def _demo(work: Path, keep: bool) -> list[str]:
         data, "SELECT c.note_path FROM request_context c JOIN skill_steps s ON "
               "s.request_id = c.request_id WHERE s.run_id = ? AND s.step_key = 'review'",
         review_run)}
-    print(f"project memory in the prompt: {len(sent)} note(s)")
-    check("projects/demo-alpha/_project.md" in sent, "the project memory was not sent")
+    print(f"scripted review returned: the requirement ({REQUIREMENT_CANARY}) reached the provider")
+    print(f"notes recorded as sent (request_context, not the prompt itself): {len(sent)}")
+    check("projects/demo-alpha/_project.md" in sent, "the project note is not recorded as sent")
     check(query(data, "SELECT count(*) FROM approvals")[0][0] == 0, "an approval appeared")
     untouched("hls-review")
 
@@ -192,9 +203,11 @@ def _demo(work: Path, keep: bool) -> list[str]:
     status = harness(env, "skill", "status", run_id)
     check(f"session: {session}" in status.stdout, "the run is not in the same session")
     check("approval: save pending" in status.stdout, "no pending approval")
+    print(f"scripted decision returned: the person's decision ({DECISION_CANARY}) reached the "
+          "provider")
     untouched("architecture-memory without a terminal")
 
-    step("(f) approve at a terminal: needs a person, printed as instructions")
+    step("(f) the approval: printed as instructions for a person; the flow test approves")
     approval_instructions(data, vault, responses, run_id, decision)
     if keep:
         print("--keep: the run stays waiting for your approval.")
@@ -204,8 +217,9 @@ def _demo(work: Path, keep: bool) -> list[str]:
         print("terminal (note written once, back in memory context, duplicate refused).")
         cancelled = harness(env, "skill", "cancel", run_id)
         check(cancelled.returncode == 0, "the run could not be cancelled")
+        untouched("the cancellation")
+    print("tests/integration/test_mvp_flow.py (on its own copy of the vault):")
     pytest(env, "tests/integration/test_mvp_flow.py")
-    untouched("the approval step of the demo")
 
     step("(g) history: the step markers, never the requirement nor the decision text")
     history = harness(env, "history", session, show=False)
