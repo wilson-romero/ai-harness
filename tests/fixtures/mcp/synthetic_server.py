@@ -35,6 +35,8 @@ MODES = (
     "stderr-noisy", "stderr-after-answer",
     # added on 2026-11-25: a credential on stderr, split across two writes
     "stderr-split-secret",
+    # added on 2026-11-25 (second review): 70 000 UTF-8 continuation bytes, no line end
+    "stderr-continuation-bytes",
 )
 # A pattern with catastrophic backtracking and the subject that triggers it: a regex engine
 # that runs it never finishes (seconds per extra character, exponential).
@@ -179,6 +181,9 @@ class Server:
             sys.stderr.flush()
         if self.mode == "stderr-split-secret":
             self.split_secret()
+        if self.mode == "stderr-continuation-bytes":
+            sys.stderr.buffer.write(b"\x80" * 70_000)
+            sys.stderr.buffer.flush()
         if self.mode in ("grandchild", "grandchild-escapes"):
             self.start_grandchild(escape=self.mode == "grandchild-escapes")
         stdin = sys.stdin.buffer

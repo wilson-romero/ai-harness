@@ -117,22 +117,39 @@ class Redacted:
         return len(self.kinds)
 
 
+def _groups(text: str, first: int = 0) -> list[tuple[int, int, int]]:
+    """Every credential span of every pattern from `PATTERNS[first]` on, found on the
+    original text, merged where they overlap: (start, end, index of the first pattern in
+    `PATTERNS` order among them)."""
+    found = sorted((start, end, order) for order, (_, spans_of) in enumerate(PATTERNS)
+                   if order >= first for start, end in spans_of(text))
+    groups: list[tuple[int, int, int]] = []
+    for start, end, order in found:
+        if groups and start < groups[-1][1]:
+            last_start, last_end, last_order = groups[-1]
+            groups[-1] = (last_start, max(last_end, end), min(last_order, order))
+        else:
+            groups.append((start, end, order))
+    return groups
+
+
 def redact(text: str) -> Redacted:
-    """Replace every known credential with `[REDACTED:<kind>]`."""
-    kinds: list[str] = []
-    for kind, spans_of in PATTERNS:
-        spans = spans_of(text)
-        if not spans:
-            continue
-        parts: list[str] = []
-        last = 0
-        for start, end in spans:
-            parts += [text[last:start], f"[REDACTED:{kind}]"]
-            last = end
-        parts.append(text[last:])
-        text = "".join(parts)
-        kinds.extend([kind] * len(spans))
-    return Redacted(text=text, kinds=tuple(kinds))
+    """Replace every known credential with `[REDACTED:<kind>]`.
+
+    All patterns run on the original text and overlapping matches become one substitution
+    (revised 2026-11-25): replacing one pattern's match first could leave the rest of an
+    overlapping one (half a JWT after an Anthropic key) that no pattern matches any more. The
+    kind is that of the first pattern, in `PATTERNS` order, among the overlapping ones.
+    """
+    groups = _groups(text)
+    parts: list[str] = []
+    last = 0
+    for start, end, order in groups:
+        parts += [text[last:start], f"[REDACTED:{PATTERNS[order][0]}]"]
+        last = end
+    parts.append(text[last:])
+    kinds = tuple(PATTERNS[order][0] for order in sorted(order for _, _, order in groups))
+    return Redacted(text="".join(parts), kinds=kinds)
 
 
 def secret_kinds(text: str) -> Counter[str]:
@@ -140,61 +157,119 @@ def secret_kinds(text: str) -> Counter[str]:
     return Counter(redact(text).kinds)
 
 
-# The stream redactor (mcp-gateway D3, revised 2026-11-25 twice). A line longer than
-# `STREAM_LINE_BYTES` without its end is released in parts; the cut is never placed inside a
-# credential found in the whole pending text, and the last `STREAM_HOLD_BYTES` always wait.
+# The stream redactor (mcp-gateway D3, revised 2026-11-25 three times). Complete lines are
+# redacted in batches; a line longer than `STREAM_LINE_BYTES` without its end is released in
+# parts, cut outside every credential found in the whole pending text, and the last
+# `STREAM_HOLD_BYTES` always wait.
 STREAM_LINE_BYTES = 64 * 1024
 STREAM_HOLD_BYTES = 8 * 1024
-# A private key header without its END line drops what follows for at most this many bytes
-# (a 16384-bit RSA key in PEM is about 13 KiB); past it, logging resumes after a marker.
+# A private key block hides at most this many bytes from the start of its header (a 16384-bit
+# RSA key in PEM is about 13 KiB); a block whose END comes later is cut there, with a marker.
 STREAM_KEY_BYTES = 32 * 1024
+KEY_BOUND_MARKER = ("[ai-harness: no END line within {limit} bytes of a private key header; "
+                    "logging resumes]\n")
+# What can continue a credential released before it ended: the characters of every format
+# but the private key.
+_NOT_CREDENTIAL = re.compile(rb"[^A-Za-z0-9_.\-]")
 
 
 @dataclass(frozen=True)
 class Piece:
-    """What `LineRedactor` releases: `output` stands for `raw` input bytes, of which `withheld`
-    (the body of a private key block) are in no form in it."""
+    """What `LineRedactor` releases: `output` stands for `raw` input bytes (`source`), of
+    which `withheld` (a private key block, the rest of an oversized credential) are in it at
+    most as a marker."""
 
     raw: int
     output: bytes
     withheld: int = 0
+    source: bytes = b""
+
+    def kept_within(self, room: int) -> int:
+        """Input bytes represented by the first `room` bytes of `output`. Exact, except when
+        the cut falls on a piece with withheld bytes or inside a changed line: those count as
+        absent (it can over-count what is missing, never under-count)."""
+        if room >= len(self.output):
+            return self.raw - self.withheld
+        if self.withheld:
+            return 0
+        sources = self.source.splitlines(keepends=True)
+        outputs = self.output.splitlines(keepends=True)
+        if len(sources) != len(outputs):
+            return 0
+        kept, left = 0, room
+        for source, output in zip(sources, outputs):
+            if len(output) <= left:
+                kept, left = kept + len(source), left - len(output)
+                continue
+            if source == output:
+                kept += left
+            break
+        return kept
 
 
-def _line_end(buffer: bytearray, pos: int) -> int:
-    """End (exclusive) of the first complete line at or after `pos`, or -1. A line ends with
-    LF, CRLF or a lone CR (a progress bar); a CR at the very end waits for the next byte."""
-    newline = buffer.find(b"\n", pos)
-    cr = buffer.find(b"\r", pos, newline if newline >= 0 else len(buffer))
-    if cr < 0:
-        return newline + 1 if newline >= 0 else -1
-    if cr + 1 == len(buffer):
+def _batch_end(buffer: bytearray, start: int) -> int:
+    """End (exclusive) of the last complete line in `buffer`, or -1. A line ends with LF,
+    CRLF or a lone CR (a progress bar); a CR at the very end waits for the next byte."""
+    last = max(buffer.rfind(b"\n", start), buffer.rfind(b"\r", start))
+    if last < 0:
         return -1
-    return cr + 2 if buffer[cr + 1] == 0x0A else cr + 1
+    if last + 1 == len(buffer) and buffer[last] == 0x0D:
+        last = max(buffer.rfind(b"\n", start, last), buffer.rfind(b"\r", start, last))
+        return last + 1 if last >= 0 else -1
+    return last + 1
+
+
+def _char_boundary(data: bytes, cut: int) -> int:
+    """`cut`, moved back to the start of the valid UTF-8 character it would split, if any. A
+    character has at most four bytes, so it looks back at most three: a longer run of
+    continuation bytes is invalid and may be cut anywhere (review of 2026-11-25, finding 1)."""
+    for back in range(1, 4):
+        lead = cut - back
+        if lead < 0:
+            return cut
+        byte = data[lead]
+        if byte & 0xC0 == 0x80:
+            continue
+        size = 2 if byte >> 5 == 0b110 else 3 if byte >> 4 == 0b1110 else (
+            4 if byte >> 3 == 0b11110 else 1)
+        if lead + size > cut:
+            try:
+                data[lead:lead + size].decode("utf-8")
+            except UnicodeDecodeError:
+                return cut
+            return lead
+        return cut
+    return cut
 
 
 def _encoded(text: str) -> bytes:
     return text.encode("utf-8", "surrogateescape")
 
 
+def _text(data: bytes | bytearray) -> str:
+    return bytes(data).decode("utf-8", "surrogateescape")
+
+
 class LineRedactor:
     """`redact` over a byte stream that arrives in arbitrary chunks (mcp-gateway D3, SEC-01).
 
-    Text is redacted one complete line at a time (LF, CRLF or a lone CR end a line), so a
-    credential split across reads is still found; the unfinished tail waits in a buffer. The
-    buffer is bounded: when an unfinished line passes `line_bytes`, the credentials are found
-    in the whole pending text and the text is released up to a cut that leaves at least
-    `hold_bytes` waiting and never falls inside a credential (the cut moves back to the start
-    of the credential). So a credential no longer than `hold_bytes` is never split. One that
-    starts the buffer and is longer than `line_bytes - hold_bytes` is released whole, as its
-    redaction marker, at once.
+    Complete lines (ending in LF, CRLF or a lone CR) are redacted as a batch, so a credential
+    split across reads is still found; the unfinished tail waits. When it passes `line_bytes`,
+    the credentials are found in the whole pending text and it is released up to a cut that
+    leaves `hold_bytes` waiting and never falls inside a credential: a credential no longer
+    than `hold_bytes` is never split. A credential that starts the pending text and runs past
+    the bound is released as its marker, and what continues it (letters, digits, `_`, `-`,
+    `.`) is withheld until another character arrives.
 
-    A PEM private key spans lines: as in `redact`, a BEGIN header anywhere in a line masks the
-    rest of that line, and the following lines are withheld until the END line, for at most
-    `key_bytes`; past that, a marker says so and redacted logging resumes. Bytes that are not
-    UTF-8 pass through unchanged (`surrogateescape`) and never raise.
+    A private key block is replaced by one marker from its BEGIN header to its END line, as
+    `redact` does, but hides at most `key_bytes` from the start of the header: past that, a
+    marker says so and redacted logging resumes (later only to finish a credential that
+    crosses the bound). Bytes that are not UTF-8 pass through unchanged (`surrogateescape`);
+    no input makes it raise.
 
-    Not covered: a credential longer than `hold_bytes` that straddles a cut; a format that
-    `redact` does not know; whatever is still buffered if the process dies before `finish`.
+    Not covered: a credential longer than `hold_bytes` that crosses a cut (its start is
+    released as text); a private key block longer than `key_bytes`; a format that `redact`
+    does not know; whatever is still buffered if the process dies before `finish`.
     """
 
     def __init__(self, line_bytes: int = STREAM_LINE_BYTES,
@@ -205,20 +280,27 @@ class LineRedactor:
         self._pending = bytearray()
         self._scanned = 0  # bytes at the start of `_pending` known to hold no line end
         self._in_key = False  # inside a private key block whose END has not been seen
-        self._key_seen = 0  # bytes withheld in the current key block
+        self._key_seen = 0  # bytes of the current key block hidden so far
+        self._swallow = False  # inside the rest of a credential already released as a marker
 
     @property
     def pending(self) -> int:
         return len(self._pending)
 
     def feed(self, data: bytes) -> list[Piece]:
-        self._pending += data
         out: list[Piece] = []
-        start = 0
-        while (end := _line_end(self._pending, max(self._scanned, start))) >= 0:
-            out.append(self._emit(_text(self._pending[start:end])))
-            start = end
-        del self._pending[:start]
+        if self._swallow and data:
+            other = _NOT_CREDENTIAL.search(data)
+            taken = other.start() if other else len(data)
+            if taken:
+                out.append(Piece(taken, b"", taken, bytes(data[:taken])))
+            self._swallow = other is None
+            data = data[taken:]
+        self._pending += data
+        end = _batch_end(self._pending, self._scanned)
+        if end > 0:
+            out.append(self._emit(bytes(self._pending[:end])))
+            del self._pending[:end]
         self._scanned = max(0, len(self._pending) - 1)  # a final CR is looked at again
         while len(self._pending) > self._line_bytes:
             out.append(self._cut())
@@ -226,59 +308,69 @@ class LineRedactor:
 
     def finish(self) -> list[Piece]:
         """The stream ended: its last line, even without a line end, is complete."""
+        self._swallow = False
         if not self._pending:
             return []
-        out = [self._emit(_text(self._pending))]
+        out = [self._emit(bytes(self._pending))]
         self._pending.clear()
         self._scanned = 0
         return out
 
     def _cut(self) -> Piece:
-        text = _text(self._pending)
-        cut = len(self._pending) - self._hold_bytes
-        while cut > 0 and self._pending[cut] & 0xC0 == 0x80:  # not inside a UTF-8 character
-            cut -= 1
-        at = len(_text(self._pending[:cut]))
-        spans = [span for _, spans_of in PATTERNS for span in spans_of(text)]
-        moved = True
-        while moved:  # back to the start of any credential the cut would split
-            moved = False
-            for start, end in spans:
-                if start < at < end:
-                    at, moved = start, True
-        if at == 0:  # a credential starts the buffer and is longer than the bound
-            at = max(end for start, end in spans if start == 0)
-            moved = True
-            while moved:
-                moved = False
-                for start, end in spans:
-                    if start < at < end:
-                        at, moved = end, True
+        data = bytes(self._pending)
+        text = _text(data)
+        at = len(_text(data[:_char_boundary(data, len(data) - self._hold_bytes)]))
+        groups = _groups(text)
+        for start, end, _ in groups:  # merged spans are disjoint: one pass is enough
+            if start < at < end:
+                at = start
+                break
+        if at == 0:  # a credential starts the buffer and runs past the bound
+            at = groups[0][1] if groups and groups[0][0] == 0 else max(1, at)
+        piece = self._emit(_encoded(text[:at]))
         self._pending = bytearray(_encoded(text[at:]))
         self._scanned = max(0, len(self._pending) - 1)
-        return self._emit(text[:at])
+        if not self._pending and not self._in_key:
+            self._swallow = True  # what arrives next may still be that credential
+        return piece
 
-    def _emit(self, text: str) -> Piece:
-        raw = len(_encoded(text))
+    def _emit(self, data: bytes) -> Piece:
+        text = _text(data)
+        parts: list[str] = []
         withheld = 0
-        if self._in_key:
-            footer = _PEM_END.search(text)
-            if footer is None:
-                self._key_seen += raw
-                if self._key_seen <= self._key_bytes:
-                    return Piece(raw, b"", raw)
-                self._in_key = False  # bounded: this part is withheld, what follows is logged
-                return Piece(raw, _encoded(
-                    f"[ai-harness: no END line within {self._key_bytes} bytes of a private key "
-                    "header; logging resumes]\n"), raw)
-            withheld = len(_encoded(text[:footer.end()]))
-            text = text[footer.end():]
-            self._in_key = False
-        spans = private_key_spans(text)
-        if spans and spans[-1][1] == len(text) and _PEM_END.search(text, spans[-1][0]) is None:
-            self._in_key, self._key_seen = True, 0  # its END comes in a later line
-        return Piece(raw, _encoded(redact(text).text), withheld)
+        pos = 0
+        while pos < len(text):
+            if self._in_key:
+                pos, hidden, marker = self._withhold(text, pos)
+                withheld += hidden
+                parts.append(marker)
+                continue
+            header = _PEM_BEGIN.search(text, pos)
+            if header is None:
+                parts.append(redact(text[pos:]).text)
+                break
+            parts += [redact(text[pos:header.start()]).text, "[REDACTED:private-key]"]
+            self._in_key, self._key_seen = True, 0
+            pos = header.start()
+        return Piece(len(data), _encoded("".join(parts)), withheld, data)
 
-
-def _text(data: bytes | bytearray) -> str:
-    return bytes(data).decode("utf-8", "surrogateescape")
+    def _withhold(self, text: str, pos: int) -> tuple[int, int, str]:
+        """Hide the key block from `pos`: to its END if that is within the bound, else up to
+        the bound. Returns where to go on, the bytes hidden and the marker to write."""
+        budget = self._key_bytes - self._key_seen
+        footer = _PEM_END.search(text, pos)
+        stop = footer.end() if footer else len(text)
+        size = len(_encoded(text[pos:stop]))
+        if size <= budget:
+            self._key_seen += size
+            self._in_key = footer is None
+            return stop, size, ""
+        rest = _encoded(text[pos:])
+        at = pos + len(_text(rest[:_char_boundary(rest, max(0, budget))]))
+        for start, end, _ in _groups(text, first=1):  # never resume inside a credential
+            # (the key's own span, which runs to the end, is not one of them)
+            if start < at < end:
+                at = end
+                break
+        self._in_key = False
+        return at, len(_encoded(text[pos:at])), KEY_BOUND_MARKER.format(limit=self._key_bytes)

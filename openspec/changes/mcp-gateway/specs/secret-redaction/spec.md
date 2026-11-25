@@ -63,4 +63,16 @@ El stderr de un servidor MCP que el sistema guarda en su log SHALL tener cada cr
 
 #### Scenario: Cabecera de clave privada sin final en el stderr del servidor
 - **WHEN** el stderr de un servidor MCP contiene la línea de inicio de una clave privada PEM sin su línea END, seguida de mucho más texto (revisada el 2026-11-25)
-- **THEN** su log contiene `[REDACTED:private-key]`, retiene como mucho 32 KiB después de la cabecera, dice que el registro se reanuda y guarda redactado lo que sigue, y la línea final cuenta lo retenido como ausente del log
+- **THEN** su log contiene `[REDACTED:private-key]`, oculta como mucho 32 KiB en bytes desde el comienzo de la cabecera aunque lleguen en una sola línea, dice que el registro se reanuda y guarda redactado lo que sigue, y la línea final cuenta lo oculto como ausente del log
+
+#### Scenario: Bytes de continuación UTF-8 en el stderr del servidor
+- **WHEN** un servidor MCP escribe en stderr 70 000 bytes de continuación UTF-8 (`0x80`) sin salto de línea (revisada el 2026-11-25)
+- **THEN** la sesión termina con normalidad y el log guarda esos bytes sin cambios
+
+#### Scenario: Credencial más larga que el límite de una línea
+- **WHEN** un servidor MCP escribe en stderr un token de Slack de 100 000 caracteres leído en trozos de 4 KiB (revisada el 2026-11-25)
+- **THEN** su log contiene `[REDACTED:slack]` y ningún carácter del token
+
+#### Scenario: Formatos que se solapan
+- **WHEN** un texto contiene una clave de Anthropic o de Slack cuya cola es el comienzo de un JWT completo (revisada el 2026-11-25)
+- **THEN** la redacción deja una sola marca y ninguna parte del JWT, también en el log del stderr de un servidor
