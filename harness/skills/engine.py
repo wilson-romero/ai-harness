@@ -211,14 +211,15 @@ class SkillEngine:
                 )
             run_id = str(uuid7())
             now = utc_iso(self._clock())
+            bindings = self._bind(skill, session, run_id, now, manifest)
             try:
                 with transaction(self._conn):
                     self._conn.execute(
                         "INSERT INTO skill_runs (run_id, session_id, skill_name, skill_version, "
-                        "skill_sha256, status, inputs_manifest, created_at, updated_at) "
-                        "VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?)",
+                        "skill_sha256, status, inputs_manifest, created_at, updated_at, "
+                        "effect_bindings) VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)",
                         (run_id, str(session.session_id), skill.name, skill.version,
-                         skill.sha256, manifest, now, now),
+                         skill.sha256, manifest, now, now, bindings),
                     )
                     for position, step in enumerate(skill.workflow.steps):
                         self._insert_step(run_id, step.id, position, step.kind, 1)
@@ -507,7 +508,9 @@ class SkillEngine:
             prepared = effect.prepare(self._effect_context(state, step), source)
         except EffectRefused as refused:
             return _Proposed(None, None, source, refused.code, str(refused))
-        if prepared.target is not None and not valid_target(prepared.target):
+        if (prepared.target is not None and not valid_target(prepared.target)) or (
+            prepared.destination is not None and not valid_target(prepared.destination)
+        ):
             # A target is never cleaned for display: shown, hashed and applied are one string,
             # so one that cannot be shown as it is is refused (review 8.4).
             return _Proposed(None, prepared.effect_ref, source, "invalid_target")
@@ -524,6 +527,7 @@ class SkillEngine:
             skill_sha256=state.skill.sha256,
             target=prepared.target,
             content=content,
+            destination=prepared.destination,
         )
         return _Proposed(proposal, prepared.effect_ref, source, redactions=prepared.redactions)
 
@@ -848,8 +852,28 @@ class SkillEngine:
         return (f"approval={approval['approval_id']};step={approval['step_key']};"
                 f"hash={approval['proposal_hash']}")
 
+    def _bind(self, skill: Skill, session: Session, run_id: str, now: str, manifest: str) -> str:
+        """What each effect of the skill fixes for the whole run, as canonical JSON (2026-11-25).
+
+        Asked before the run exists: an effect that refuses (no vault configured, say) leaves
+        nothing behind. Values are short strings, never a path or content."""
+        bindings: dict[str, dict[str, str]] = {}
+        for step in skill.workflow.steps:
+            if not isinstance(step, ApprovalStep) or step.effect in bindings:
+                continue
+            context = EffectContext(
+                str(session.session_id), run_id, step.id, skill.name,
+                project_slug=session.project_id, run_created_at=now,
+                skill_version=skill.version, skill_sha256=skill.sha256,
+                inputs=json.loads(manifest),
+            )
+            bound = self._effects[step.effect].bind(context)
+            bindings[step.effect] = {str(k): str(v) for k, v in bound.items()}
+        return json.dumps(bindings, sort_keys=True, separators=(",", ":"))
+
     def _effect_context(self, state: _Run, step: ApprovalStep) -> EffectContext:
         run = self._require_run(state.run_id)
+        bindings = json.loads(run["effect_bindings"] or "{}")
         notes = self._conn.execute(
             "SELECT DISTINCT rc.note_path, rc.sha256 FROM request_context rc JOIN skill_steps s "
             "ON s.request_id = rc.request_id WHERE s.run_id = ? AND s.status = 'completed' "
@@ -864,6 +888,7 @@ class SkillEngine:
             skill_sha256=run["skill_sha256"],
             inputs=json.loads(run["inputs_manifest"]),
             memory_notes=tuple((note["note_path"], note["sha256"]) for note in notes),
+            binding=bindings.get(step.effect, {}),
         )
 
     # -- values and outputs ---------------------------------------------------------------------
@@ -1046,7 +1071,17 @@ class SkillEngine:
         )
 
     def _finish_run_locked(self, run_id: str, session: Session, status: str, code: str) -> None:
+        """Finish the run; an approval still `pending` or `granted` is revoked with it, so that
+        no finished run keeps a usable approval (2026-11-25, independent review)."""
         now = utc_iso(self._clock())
+        for approval in self._conn.execute(
+            "SELECT approval_id, step_key, proposal_hash FROM approvals "
+            "WHERE run_id = ? AND status IN ('pending', 'granted')",
+            (run_id,),
+        ).fetchall():
+            self._set_approval(approval["approval_id"], "revoked", decided_at=now)
+            self._audit("approval.revoked", "run_finished", session, run_id,
+                        self._approval_detail(approval))
         self._conn.execute(
             "UPDATE skill_runs SET status = ?, error_code = ?, updated_at = ?, finished_at = ? "
             "WHERE run_id = ?",

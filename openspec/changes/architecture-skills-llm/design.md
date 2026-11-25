@@ -188,12 +188,16 @@ Premisas heredadas, **vueltas a medir** el 2026-11-24:
 
 ### D11 · Lo que este change añade al motor de `skill-engine`
 
-- **Qué (2026-11-24, implementación):** cuatro ampliaciones pequeñas del motor mergeado, sin cambiar su esquema SQLite:
+- **Qué (2026-11-24, implementación):** cuatro ampliaciones pequeñas del motor mergeado, sin cambiar su esquema SQLite (la revisión de abajo añade una columna):
   - `EffectContext` gana `project_slug`, `run_created_at`, `skill_version`, `skill_sha256`, `inputs` (el manifiesto: nombre, SHA-256 y bytes de cada entrada) y `memory_notes` (ruta y SHA-256 de las notas de `request_context` de las peticiones de la ejecución). Todo sale de SQLite y no cambia al reanudar.
   - `EffectRefused(code, message)`: lo que `prepare` o `apply` lanzan para rehusar de forma controlada. En `prepare`, el paso y la ejecución quedan `failed` con `code` sin crear aprobación; en `apply`, el paso queda `failed` con `code` (la aprobación ya está consumida y no vuelve a servir).
   - `Effect.exclusive(contexto)`: un gestor de contexto que el motor abre antes de consumir la aprobación y cierra después de `apply`; `NoEffect` devuelve uno vacío. Si lanza `EffectBusy`, nada se consume.
   - `Prepared.redactions` (número de credenciales enmascaradas, se muestra en la cabecera de la aprobación) y `RunOutcome.applied` (los destinos escritos en esta invocación, que el CLI imprime por stdout como `applied: <ruta relativa>`).
   - `FieldSpec.min_length` para el límite inferior del título (D2).
+- **Revisada el 2026-11-25 (revisión independiente, hallazgos 1, 3 y 5):**
+  - `Effect.bind(contexto)`: se llama una vez, al crear la ejecución y antes de insertarla, y lo que devuelve (cadenas cortas, nunca una ruta ni contenido) se guarda en `skill_runs.effect_bindings` (migración `004`, JSON canónico por efecto) y vuelve en `EffectContext.binding` en cada llamada. El efecto de decisiones liga ahí el vault (hallazgo 3) y la fecha de la nota (7.7). Motivo del hallazgo 3: `_root()` se recalculaba en cada llamada, la cabecera no mostraba el vault y ni el destino ni el hash dependían de él, así que una aprobación `granted` (tras `EffectBusy`) se consumía en un `resume` no interactivo con otro `HARNESS_VAULT_ROOT` y la nota aparecía en el vault B. Ahora `prepare`, `apply` y `reconcile` comparan el resumen guardado con el del vault actual y rehúsan con `vault_changed`; además `Prepared.destination`/`Proposal.destination` (la raíz resuelta) se muestra en la cabecera (`vault:`) y entra en el hash, pero no se guarda: en SQLite solo queda `sha256("ai-harness/vault-root/v1\n" + raíz)`. No es un hash con clave: el directorio de datos es local y el resumen solo sirve para comparar; quien pueda leer SQLite y adivinar la ruta podría confirmarla.
+  - `_finish_run_locked` revoca cualquier aprobación `pending` o `granted` de la ejecución que termina: ninguna ejecución terminada conserva una aprobación usable.
+  - Cualquier excepción de `apply` que no sea `EffectRefused` deja el paso `uncertain` (`effect_uncertain`); `EffectRefused` desde `apply` solo antes de cualquier efecto (hallazgo 1). `EffectRefused` desde `reconcile` deja el paso `uncertain` con su mensaje.
 - **Por qué:** son las piezas mínimas para que un efecto con escritura real cumpla lo que exige la revisión: una sola preparación, la aprobación consumida con el bloqueo tomado y rehúses controlados antes de pedir nada.
 - **Alternativas rechazadas:** que el efecto lea SQLite por su cuenta para conocer el proyecto o la procedencia: duplicaría consultas y daría al efecto una conexión que no necesita.
 - **Impacto:** `harness/skills/effects.py`, `engine.py`, `approvals.py`, `definition.py`, `checks.py`, `commands.py`; los tests de `skill-engine` siguen pasando sin cambios de comportamiento.
@@ -212,7 +216,7 @@ Premisas heredadas, **vueltas a medir** el 2026-11-24:
 
 ## Migration Plan
 
-Sin migración de esquema. Añade dos carpetas a `skills/`, un módulo y un efecto. Sin `HARNESS_VAULT_ROOT`, `architecture-memory` y `hls-review` fallan de forma controlada antes de preguntar. Vuelta atrás: revertir el change; las notas ya escritas en `Decisiones/` siguen siendo notas válidas del vault y nadie las borra.
+**Revisado el 2026-11-25:** una migración, `004_effect_bindings.sql`, que añade `skill_runs.effect_bindings` (nula para ejecuciones anteriores; una ejecución de `architecture-memory` sin ella rehúsa con `invalid_run` y hay que empezarla de nuevo). Añade dos carpetas a `skills/`, un módulo y un efecto. Sin `HARNESS_VAULT_ROOT`, `architecture-memory` y `hls-review` fallan de forma controlada antes de preguntar. Vuelta atrás: revertir el change; las notas ya escritas en `Decisiones/` siguen siendo notas válidas del vault y nadie las borra.
 
 ## Open Questions
 

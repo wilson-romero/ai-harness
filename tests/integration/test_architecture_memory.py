@@ -553,3 +553,49 @@ def test_active_obsidian_content_from_the_model_is_written_inert(conn, data_dir,
     assert outcome.applied[0] in context
     for forbidden in ("<%", "%%", "<!--", "<script", "```", "![", "[["):
         assert forbidden not in context, forbidden
+
+
+# -- 7.3 the run is bound to the vault it started with ----------------------------------------------
+
+
+class BusyOnce(DecisionEffect):
+    """The vault writer is busy the first time: the approval stays `granted`."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.busy = True
+
+    def exclusive(self, context):
+        if self.busy:
+            self.busy = False
+            raise EffectBusy("busy")
+        return super().exclusive(context)
+
+
+def test_an_approval_for_one_vault_is_never_written_into_another(conn, data_dir, vault, tmp_path):
+    import shutil
+
+    other = tmp_path / "otro-vault"
+    shutil.copytree(vault, other)
+    terminal = ApprovingTerminal()
+    engine, sessions, _ = engine_for(conn, data_dir, vault, terminal=terminal)
+    busy = BusyOnce(data_dir, env={"HARNESS_VAULT_ROOT": str(vault)}, lock_wait_s=0.3)
+    engine.__dict__["_effects"] = {DecisionEffect.scope: busy}
+    with pytest.raises(EffectBusy):
+        run(engine, sessions.create_session("Demo", "demo-alpha"))
+    assert one(conn, "SELECT status FROM approvals") == ("granted",)
+    # The header named the vault the person approved for.
+    vault_line = next(l for l in terminal.shown[-1].splitlines() if l.strip().startswith("vault:"))
+    assert vault_line.split(":", 1)[1].strip() == str(vault.resolve())
+    # A non-interactive resume under another HARNESS_VAULT_ROOT.
+    run_id = one(conn, "SELECT run_id FROM skill_runs")[0]
+    before_a, before_b = fingerprint(vault), fingerprint(other)
+    moved, _, _ = engine_for(conn, data_dir, other, terminal=FakeTerminal(interactive=False))
+    outcome = resume(moved, run_id)
+    assert outcome.status == "failed"
+    assert one(conn, "SELECT error_code FROM skill_runs") == ("vault_changed",)
+    assert one(conn, "SELECT status FROM approvals") == ("revoked",)
+    assert fingerprint(vault) == before_a and fingerprint(other) == before_b
+    assert str(other) not in (outcome.message or "") and str(vault) not in (outcome.message or "")
+    stored = all_text(conn)
+    assert str(vault.resolve()) not in stored and str(other.resolve()) not in stored

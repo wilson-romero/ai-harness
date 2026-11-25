@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import hmac
 import os
 from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager
@@ -56,6 +57,7 @@ LOCK_NAME = "vault-decisions"
 LOCK_WAIT_S = 5.0
 REDACTION_MARK = "[REDACTED:"
 SOURCE_INPUT = "source"
+VAULT_DOMAIN = "ai-harness/vault-root/v1\n"
 
 
 class DecisionEffect:
@@ -69,11 +71,15 @@ class DecisionEffect:
 
     # -- the effect protocol --------------------------------------------------------------------
 
+    def bind(self, context: EffectContext) -> Mapping[str, str]:
+        """The vault this run writes to, as a digest of its resolved root (never the path)."""
+        return {"vault": vault_digest(self._root())}
+
     def prepare(self, context: EffectContext, validated: str) -> Prepared:
         project = context.project_slug
         if project is None:
             raise EffectRefused("no_project", "a decision needs a session with a project")
-        root = self._root()
+        root = self._bound_root(context)
         try:
             resolve_project(root, project)
         except HarnessError as exc:
@@ -111,13 +117,15 @@ class DecisionEffect:
                     f"decision {ident} is already recorded in {where}",
                 )
         return Prepared(content=content, target=f"{DECISIONS_DIR}/{name}", effect_ref=ident,
-                        redactions=redactions)
+                        redactions=redactions, destination=str(root))
 
     def exclusive(self, context: EffectContext) -> AbstractContextManager[None]:
         return self._held()
 
     def apply(self, context: EffectContext, proposal: Proposal) -> None:
-        root = self._root()
+        root = self._bound_root(context)
+        if proposal.destination != str(root):
+            raise EffectRefused("vault_changed", "the approved note is for another vault")
         folder, _, name = (proposal.target or "").partition("/")
         frontmatter, _ = parse_frontmatter(proposal.content)
         ident = frontmatter.fields.get("decision_id") if frontmatter.syntax_ok else None
@@ -142,7 +150,7 @@ class DecisionEffect:
     ) -> Reconciled:
         if effect_ref is None or not is_decision_id(effect_ref):
             return "conflict"
-        root = self._root()
+        root = self._bound_root(context)  # another vault: refused, the step stays uncertain
         temp_name = temp_name_for(context.run_id, context.step)
         result = reconcile_decision(root, effect_ref, content_sha256, temp_name)
         if result == "blocked":
@@ -173,6 +181,20 @@ class DecisionEffect:
         finally:
             lock.release()
 
+    def _bound_root(self, context: EffectContext) -> Path:
+        """The vault root, only if it is the one the run was created with (2026-11-25)."""
+        root = self._root()
+        bound = context.binding.get("vault")
+        if bound is None:
+            raise EffectRefused("invalid_run", "the run has no vault binding; start it again")
+        if not hmac.compare_digest(bound, vault_digest(root)):
+            raise EffectRefused(
+                "vault_changed",
+                "HARNESS_VAULT_ROOT now resolves to another vault than the one this run started "
+                "with; nothing was written. Set it back, or start the run again",
+            )
+        return root
+
     def _root(self) -> Path:
         """The real vault root, with the data directory outside it, as for every read."""
         if self._data_dir is None:
@@ -183,6 +205,12 @@ class DecisionEffect:
         except HarnessError as exc:
             raise EffectRefused("vault_unavailable", str(exc)) from None
         return settings.vault_root
+
+
+def vault_digest(root: Path) -> str:
+    """What a run stores to recognise its vault: a domain-separated SHA-256 of the resolved
+    root, so that the path itself never reaches SQLite (it can name a person or a company)."""
+    return hashlib.sha256(f"{VAULT_DOMAIN}{root}".encode()).hexdigest()
 
 
 def _fields(validated: str) -> DecisionFields:

@@ -83,6 +83,13 @@ Los bytes escritos SHALL ser exactamente los del contenido de la propuesta aprob
 - **WHEN** se aprueba y se escribe una decisión
 - **THEN** el SHA-256 del fichero escrito es el de la propuesta aprobada y su contenido es el que mostró la terminal
 
+### Requirement: Aprobación ligada al vault de la ejecución
+La ejecución SHALL quedar ligada, al crearse, al vault resuelto en ese momento, guardando en SQLite solo un resumen (SHA-256 con dominio) de su raíz, nunca la ruta. La cabecera de la aprobación SHALL mostrar la raíz del vault y el hash aprobado SHALL incluirla. Si al preparar, aplicar o reconciliar el vault configurado es otro, el efecto SHALL rehusar con `vault_changed` sin escribir en ninguno de los dos, y una aprobación viva de esa ejecución SHALL quedar revocada al terminar la ejecución. Ningún mensaje fuera de la vista interactiva de la aprobación SHALL imprimir la ruta.
+
+#### Scenario: Aprobada para un vault, reanudada con otro
+- **WHEN** una aprobación queda `granted` (el escritor estaba ocupado) y la ejecución se reanuda sin terminal con `HARNESS_VAULT_ROOT` apuntando a otro vault
+- **THEN** la ejecución queda `failed` con `vault_changed`, la aprobación `revoked`, la huella de los dos vaults no cambia y ni el mensaje ni SQLite contienen ninguna de las dos rutas
+
 ### Requirement: Escrituras serializadas
 Dos procesos del harness SHALL NOT escribir decisiones en el mismo vault a la vez; el segundo SHALL esperar como mucho un plazo corto y, si no obtiene el turno, SHALL fallar sin escribir y sin consumir su aprobación.
 

@@ -50,6 +50,9 @@ class Prepared:
     target: str | None
     effect_ref: str | None
     redactions: int = 0  # credentials masked in `content`, shown in the approval header
+    # Where the target lives (for the decision effect, the resolved vault root): shown in the
+    # approval header and part of the approval hash, never stored (2026-11-25).
+    destination: str | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +69,8 @@ class EffectContext:
     skill_sha256: str = ""
     inputs: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)  # name -> sha256, bytes
     memory_notes: tuple[tuple[str, str], ...] = ()  # (path, sha256) from request_context
+    # What `bind` returned when the run was created, from skill_runs.effect_bindings.
+    binding: Mapping[str, str] = field(default_factory=dict)
 
 
 class Effect(Protocol):
@@ -81,6 +86,12 @@ class Effect(Protocol):
     """
 
     scope: str
+
+    def bind(self, context: EffectContext) -> Mapping[str, str]:
+        """Called once, when the run is created: short strings (never a path or content) that
+        the engine stores with the run and hands back as `context.binding` on every call. May
+        raise `EffectRefused`, and then the run is not created (2026-11-25)."""
+        ...
 
     def prepare(self, context: EffectContext, validated: str) -> Prepared: ...
 
@@ -100,6 +111,9 @@ class NoEffect:
     """Approves the validated text itself; consuming the approval lets the run go on."""
 
     scope = "none"
+
+    def bind(self, context: EffectContext) -> Mapping[str, str]:
+        return {}
 
     def prepare(self, context: EffectContext, validated: str) -> Prepared:
         return Prepared(content=validated, target=None, effect_ref=None)
