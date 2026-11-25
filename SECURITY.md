@@ -57,6 +57,10 @@ Se garantiza:
 
 **No** se garantiza que haya una persona delante. Un proceso que corre con tu misma cuenta y maneja una pseudoterminal puede leer la propuesta y escribir el código: puede hacerse pasar por ti. Si alguien o algo controla tu cuenta, las aprobaciones no lo detienen. Un canal más fuerte (un diálogo del sistema operativo, un segundo dispositivo) es una decisión abierta antes del efecto que escribe en el vault.
 
+## Perfil dedicado de Edge (Copilot Web)
+
+El harness lanza Edge con su sandbox activado y sin las opciones de Playwright que solo apagan protecciones de fondo (bloqueo de ventanas emergentes, actualización de componentes y de listas de protección). Dos opciones predeterminadas de Playwright siguen, a la espera de una decisión: `--password-store=basic` y `--use-mock-keychain`. En macOS hacen que las cookies del perfil dedicado, y con ellas la sesión de Copilot, se cifren con una clave fija en vez de con el llavero del sistema: **quien pueda leer el directorio del perfil puede usar la sesión**. Mantén el perfil (por defecto `HARNESS_DATA_DIR/edge-profile`) fuera de copias de seguridad compartidas y de carpetas sincronizadas, y en un disco cifrado. En Windows no aplica: el cifrado usa DPAPI.
+
 ## Si algo se filtra
 
 Un secreto publicado se da por comprometido aunque se borre el commit: primero se **revoca o rota**, después se limpia el historial. Para avisar de un problema de seguridad, usa los *security advisories* privados de GitHub en este repositorio, no un issue público.

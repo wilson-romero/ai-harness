@@ -111,6 +111,13 @@ Nadie en esta planificación ha visto la UI real. Cada premisa tiene la tarea qu
       - `--enable-unsafe-swiftshader`: WebGL por software como respaldo.
     - **No rebajan la seguridad:** `--remote-debugging-pipe` (el canal de control es una tubería, no un puerto de red) y `--disable-extensions`. Tampoco el resto: desactivan el primer arranque, la sincronización, las métricas, los informes de fallos y el estrangulamiento de pestañas en segundo plano, o ajustan la apariencia.
     - **Aviso visible:** solo se observó el de `--no-sandbox`. `--disable-infobars` oculta además la barra de «controlado por software automatizado»; ese aviso sería aceptable, pero lo quita Playwright, no el harness.
+- **Revisada el 2026-11-25 (petición de Wilson): fuera las opciones que solo apagan protecciones de fondo.**
+  - **Qué:** el lanzador pasa `ignore_default_args` con cuatro opciones de Playwright (`DROPPED_DEFAULT_ARGS` en `harness/browser/edge.py`): `--disable-popup-blocking`, `--disable-component-update`, `--disable-background-networking` y `--disable-infobars`. La documentación de Playwright para Python (consultada con context7) dice que una lista en `ignore_default_args` filtra esas opciones exactas de las predeterminadas y deja las demás. Con ello Edge vuelve a bloquear ventanas emergentes, actualiza sus componentes y sus listas de protección, y no oculta la barra de automatización (en Edge esa opción no tiene efecto, según el propio código de Playwright; quitarla no cambia nada visible, pero tampoco hay motivo para pedirla).
+  - **Se quedan:**
+    - `HttpsUpgrades` y `HttpsFirstBalancedModeAutoEnable`. Van dentro de un único `--disable-features=…` junto con otras doce funciones que Playwright necesita apagar. `ignore_default_args` solo quita opciones completas: quitarlo exigiría copiar la lista interna de Playwright, que cambia con cada versión, y un fallo de esa copia no se notaría. Copilot es `https`, así que la mejora a `https` no tiene nada que hacer allí.
+    - `--password-store=basic` y `--use-mock-keychain`. Es decisión de Wilson (ver Open Questions); el coste está en `SECURITY.md` y en el runbook.
+    - `--enable-unsafe-swiftshader`: sin cambio, como estaba.
+  - **Comprobación:** `test_background_protections_are_not_switched_off` lee `edge://version` del Edge lanzado y exige que las cuatro opciones no estén y que una predeterminada no tocada (`--no-first-run`) siga. Control negativo: sin `ignore_default_args`, el test falla. Las 63 pruebas `edge` pasan, y un `structure` real en macOS con la sesión de prueba sigue con la sesión iniciada: `signed-out hints: 0  on Copilot host: yes  startup_ms: 8011` (sin envíos).
 
 ### D4 · Perfil dedicado con marca y un único navegador a la vez
 
@@ -268,3 +275,6 @@ Sin migración de esquema (`remote_ref`, `authentication_required` y `closed` ya
 ## Open Questions
 
 - ¿Se borran a mano las conversaciones sintéticas de la sonda o se dejan? No cambia specs ni tareas.
+- **`--password-store=basic` y `--use-mock-keychain` (decisión de Wilson, abierta el 2026-11-25).** Playwright las pasa por defecto y hoy se quedan.
+  - **Mantenerlas (estado actual):** en macOS las cookies del perfil dedicado, y con ellas la sesión de Copilot, se cifran con una clave fija y conocida en vez de con el llavero del sistema. Cualquiera que pueda leer el directorio del perfil (otro proceso con tu usuario, una copia de seguridad, un disco sin cifrar) puede descifrar la sesión y usarla. A cambio, Edge nunca pide acceso al llavero y la sesión actual sigue valiendo. En Windows no aplican: el cifrado usa DPAPI, ligado a la cuenta del usuario.
+  - **Quitarlas:** la sesión queda cifrada con el llavero, como en un Edge normal. Coste: la sesión guardada deja de valer y hay que repetir `copilot login`. macOS puede pedir permiso de llavero la primera vez, y quizá en cada arranque si el binario cambia con una actualización, lo que bloquearía un `ask` sin nadie delante. Habría que medir ese comportamiento (sin envíos) antes de decidir.

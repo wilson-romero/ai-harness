@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from playwright.async_api import async_playwright
 
-from harness.browser.edge import EdgeLauncher, edge_version
+from harness.browser.edge import DROPPED_DEFAULT_ARGS, EdgeLauncher, edge_version
 from harness.browser.errors import BrowserBusy, BrowserLaunchFailed, ProfileInUse, ProfileRejected
 from harness.storage.locks import NamedLock
 from tests.conftest import REPO_ROOT
@@ -70,15 +70,28 @@ async def test_installed_edge_opens_a_synthetic_page_and_reads_its_title(launche
     assert launcher.contexts == []
 
 
-async def test_edge_runs_with_its_sandbox_on(launcher):
-    """Playwright starts Chromium-family browsers with `--no-sandbox` unless told otherwise.
-    The browser's own version page reports the command line it was started with."""
+async def command_line(launcher) -> list[str]:
+    """The browser's own version page reports the command line it was started with."""
     async with launcher.open() as context:
         page = context.pages[0]
         await page.goto("edge://version")
         switches = (await page.locator("#command_line").inner_text()).split()
     assert any(s.startswith("--remote-debugging-pipe") for s in switches)  # it is ours
-    assert "--no-sandbox" not in switches
+    return switches
+
+
+async def test_edge_runs_with_its_sandbox_on(launcher):
+    """Playwright starts Chromium-family browsers with `--no-sandbox` unless told otherwise."""
+    assert "--no-sandbox" not in await command_line(launcher)
+
+
+async def test_background_protections_are_not_switched_off(launcher):
+    """The Playwright defaults the harness drops are really gone, and only those: the rest of
+    Playwright's switches are still there, so the filter is exact."""
+    switches = await command_line(launcher)
+    for dropped in DROPPED_DEFAULT_ARGS:
+        assert dropped not in switches
+    assert "--no-first-run" in switches  # an untouched Playwright default
 
 
 async def test_unknown_channel_fails_with_a_controlled_error(tmp_path):
