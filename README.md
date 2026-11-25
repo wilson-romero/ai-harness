@@ -200,6 +200,14 @@ Qué se ve: `skill list` muestra los dos Skills `1.0.0 valid`; `hls-review` impr
 - **Si el proceso muere a mitad**, `skill resume` mira el vault sin escribir: si la nota con ese identificador y esos bytes está, termina; si no está, pide una aprobación nueva para los mismos bytes; si hay otra nota con ese identificador, se niega (código 1) y la ejecución queda `uncertain` para que lo mires. Lo mismo si algo falla después de publicar la nota (por ejemplo, no se puede borrar el temporal porque OneDrive o un antivirus lo tiene abierto en Windows): la ejecución queda `uncertain`, nunca `failed`, y `skill resume` lo vuelve a intentar. Mientras el temporal no se pueda borrar, la nota existe pero **la memoria no la lee** (tiene dos enlaces duros), y `skill resume` termina con código 1 nombrando el temporal; cierra el programa que lo retiene y repite `skill resume`. `skill cancel RUN_ID` sobre una ejecución `uncertain` también comprueba el vault primero: borra el temporal propio si puede (así una nota publicada vuelve a ser visible), dice por stderr si la nota está en el vault o si no se escribió nada, y termina la ejecución sin borrar nunca una nota.
 - **Qué guarda SQLite:** con un proveedor real, de la nota solo el identificador (`skill_steps.effect_ref`), su SHA-256 y su tamaño; nunca el título, el texto ni la ruta.
 
+Para comprobar en tu vault (por ejemplo, una carpeta de OneDrive) las operaciones de ficheros de las que depende la escritura, sin tocar nada tuyo:
+
+```powershell
+uv run python scripts/diag_vault_write.py <carpeta-de-prueba>
+```
+
+Crea una subcarpeta nueva dentro de la que indiques, comprueba allí la creación exclusiva, el enlace duro que no sustituye un nombre existente, el número de enlaces, que `fstat` y `lstat` dan el mismo inodo y el borrado del temporal, lo borra todo y escribe un bloque `--- ai-harness diag_vault_write ---` con valores `true`/`false`, recuentos, categorías de error y tiempos, sin rutas ni nombres.
+
 Límites conocidos:
 
 1. El vault tiene que estar en un sistema de ficheros con enlaces duros (APFS, NTFS). En FAT32, exFAT o algunas unidades de red la escritura falla con `write_failed` sin escribir nada.
