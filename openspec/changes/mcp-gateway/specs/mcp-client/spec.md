@@ -144,7 +144,7 @@ El sistema SHALL rechazar unos argumentos de más de 16 KiB en JSON y un resulta
 
 #### Scenario: stderr ruidoso por debajo del corte
 - **WHEN** el servidor sintético escribe 8 MiB en stderr, en líneas de 1 KiB, y después contesta la llamada (revisada el 2026-11-25)
-- **THEN** la llamada queda `completed`, el log guarda 1 MiB de líneas y una línea con los bytes descartados, y stderr del harness avisa de que el log guarda como mucho 1 MiB de líneas redactadas
+- **THEN** la llamada queda `completed`, el log guarda 1 MiB de líneas y una línea con los bytes descartados, y stderr del harness avisa de cuántos bytes no están en el log
 
 #### Scenario: stderr sin fin después de la respuesta
 - **WHEN** el servidor sintético contesta la llamada y, al cerrarse su entrada, escribe cientos de MiB en stderr

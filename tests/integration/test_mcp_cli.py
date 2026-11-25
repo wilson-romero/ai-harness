@@ -147,7 +147,9 @@ def test_a_burst_of_utf8_continuation_bytes_on_stderr_does_not_end_the_session(m
     assert "get_project_metadata" in out
     log = (data_dir / "logs" / "mcp" / "synthetic.stderr.log").read_bytes()
     assert log == (b"[ai-harness: a line of 70000 bytes was dropped: too long to redact]\n"
-                   b"\n[ai-harness: 70000 more bytes of stderr were dropped]\n")
+                   b"\n[ai-harness: 70000 more bytes of stderr were dropped; lines too long to "
+                   b"redact or private key blocks, marked above]\n")
+    assert "warning: 70000 of the 70000 bytes the server wrote on stderr are not in its log" in err
     assert server.stopped()
 
 

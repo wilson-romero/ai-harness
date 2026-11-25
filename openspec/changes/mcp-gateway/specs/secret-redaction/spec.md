@@ -83,4 +83,8 @@ El stderr de un servidor MCP que el sistema guarda en su log SHALL tener cada cr
 
 #### Scenario: Fallo del registro del stderr
 - **WHEN** el registro del stderr de un servidor MCP falla por cualquier error que no sea una interrupción (revisada el 2026-11-25)
-- **THEN** la sesión sigue, el log dice dónde se paró, no se escribe nada sin redactar y la línea final cuenta el resto
+- **THEN** la sesión sigue, no se escribe nada sin redactar, y si el log aún admite escrituras dice dónde se paró y su línea final cuenta el resto y nombra el fallo; si lo que falla es la escritura del log, no hay marca
+
+#### Scenario: Presupuestos del log del stderr
+- **WHEN** un servidor MCP escribe en stderr una línea útil seguida, en la misma lectura, de más líneas vacías que el presupuesto de líneas, o líneas que son una sola credencial larga por encima del presupuesto de bytes a redactar (revisada el 2026-11-25)
+- **THEN** el log guarda las líneas anteriores al presupuesto, incluida la útil, no escribe nada después, su línea final dice qué presupuesto se agotó, y `mcp call` avisa de cuántos bytes no están en el log

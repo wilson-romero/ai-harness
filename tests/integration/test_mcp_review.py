@@ -186,10 +186,10 @@ def test_a_noisy_server_that_answers_completes_with_its_stderr_cut(mcp, ws, data
     code, out, err, _ = mcp("call", "synthetic", "get_project_metadata", "--args", ALPHA)
     assert code == 0, err
     assert json.loads(result_lines(out))["name"] == "Demo Alpha"
-    assert "the server wrote 8388608 bytes on stderr; its log keeps at most 1048576 bytes" in err
+    assert "warning: 7340032 of the 8388608 bytes the server wrote on stderr are not in its log" in err
     log = (data_dir / "logs" / "mcp" / "synthetic.stderr.log").read_bytes()
     assert KEEP < len(log) <= KEEP + COUNT_LINE
-    assert b"7340032 more bytes of stderr were dropped" in log
+    assert b"7340032 more bytes of stderr were dropped; the log reached its cap of" in log
     assert rows(data_dir)[0]["status"] == "completed"
     assert server.stopped()
 
@@ -202,7 +202,7 @@ def test_a_flood_after_the_answer_keeps_the_result(mcp, ws, data_dir):  # noqa: 
     code, out, err, _ = mcp("call", "synthetic", "get_project_metadata", "--args", ALPHA)
     assert code == 0, err
     assert json.loads(result_lines(out))["name"] == "Demo Alpha"
-    assert "bytes on stderr; its log keeps at most 1048576 bytes" in err
+    assert "bytes the server wrote on stderr are not in its log" in err
     assert (data_dir / "logs" / "mcp" / "synthetic.stderr.log").stat().st_size <= (
         KEEP + COUNT_LINE)
     row = rows(data_dir)[0]

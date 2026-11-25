@@ -136,7 +136,8 @@ def _redact_once(text: str) -> Redacted:
     return Redacted(text=text, kinds=tuple(kinds))
 
 
-# A pass that changes nothing ends the loop; more than two is very rare (review of 2026-11-25).
+# A pass that changes nothing ends the loop. Not unbounded: a chain of glued tokens that each
+# need the next one masked first would cost one pass per token over the whole text.
 REDACT_PASSES = 4
 
 
@@ -148,7 +149,10 @@ def redact(text: str) -> Redacted:
     has its boundary once the first is a marker. The first pass is the original function, so
     later passes can only mask more. Not covered: a credential whose start another pattern
     swallowed (an Anthropic or Slack key ending in the header of a JWT leaves the JWT's other
-    two segments, which no pattern matches).
+    two segments, which no pattern matches); a hand-made chain of more than four glued
+    credentials that each find their boundary only once the next one is a marker (GitLab
+    tokens whose body ends in `-`, then an AWS key): the first ones stay in clear, and nothing
+    says so (the single pass of before masked only the last one).
     """
     kinds: list[str] = []
     for _ in range(REDACT_PASSES):
@@ -176,7 +180,7 @@ STREAM_KEY_BYTES = 32 * 1024
 LONG_LINE_MARKER = "[ai-harness: a line of {size} bytes was dropped: too long to redact]\n"
 KEY_BOUND_MARKER = ("[ai-harness: no END line within {limit} bytes of a private key header; "
                     "the rest of this line is dropped]\n")
-_LINE_END = re.compile(rb"[\r\n]")
+_LINE_END = re.compile(rb"\r\n|\r|\n")
 _PEM_MARK = re.compile(rb"-----(BEGIN|END) (?:[A-Z0-9]+ )*PRIVATE KEY-----")
 _MARK_WINDOW = 256  # bytes of a line kept to find a header or footer split across reads
 
@@ -194,7 +198,8 @@ class Piece:
 class LineRedactor:
     """`redact` over a byte stream that arrives in arbitrary chunks (mcp-gateway D3, SEC-01).
 
-    A line ends at LF, CRLF or a lone CR (a CRLF split across reads gives the same bytes). A
+    A line ends at LF, CRLF or a lone CR; a CR at the end of a read waits for the next byte,
+    so a CRLF is one line also when a read splits it. A
     line of at most `line_bytes` (its line end included) is redacted whole; a longer one is dropped
     up to its line end and replaced by one marker: a credential in it is not written, and
     neither is the rest of that line. From a line with a private key's BEGIN header to the line
@@ -216,6 +221,7 @@ class LineRedactor:
         self._in_key = False  # the current line started inside a private key block
         self._open = False  # a private key block is open at this point of the stream
         self._key_seen = 0  # bytes after the BEGIN header of the open block
+        self._cr = False  # the line taken so far ends with a CR that may be followed by a LF
 
     @property
     def pending(self) -> int:
@@ -224,11 +230,18 @@ class LineRedactor:
     def feed(self, data: bytes) -> list[Piece]:
         out: list[Piece] = []
         pos = 0
+        if self._cr and data:  # the last read ended with a CR: it ends its line either way
+            if data[:1] == b"\n":
+                self._take(b"\n", out)
+                pos = 1
+            out.append(self._end_line())
         while pos < len(data):
             end = _LINE_END.search(data, pos)
             stop = end.end() if end else len(data)
             self._take(data[pos:stop], out)
-            if end:
+            if end and end.group() == b"\r" and stop == len(data):
+                self._cr = True
+            elif end:
                 out.append(self._end_line())
             pos = stop
         return out
@@ -252,12 +265,11 @@ class LineRedactor:
         elif size > self._line_bytes:
             piece = Piece(size, LONG_LINE_MARKER.format(size=size).encode("ascii"), False)
         else:  # the line end stays: a key block without END would otherwise swallow it
-            body, end = self._line, b""
-            if body[-1:] in (b"\n", b"\r"):
-                body, end = body[:-1], bytes(body[-1:])
+            body = bytes(self._line).rstrip(b"\r\n")  # a line holds one line end at most
+            end = bytes(self._line[len(body):])
             piece = Piece(size, _encoded(redact(_text(body)).text) + end, True)
         self._line.clear()
-        self._size, self._tail, self._in_key = 0, b"", self._open
+        self._size, self._tail, self._in_key, self._cr = 0, b"", self._open, False
         return piece
 
     def _watch_keys(self, part: bytes, out: list[Piece]) -> None:

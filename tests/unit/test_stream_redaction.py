@@ -110,6 +110,21 @@ def test_a_jwt_whose_header_another_credential_swallowed_is_a_documented_limit(p
     assert redact(text).text.endswith(jwt_rest)
 
 
+def glued_chain(tokens: int) -> str:
+    """GitLab tokens whose 20-character body ends in `-`, then an AWS key: each token finds its
+    end only once the next one is a marker, one pass each."""
+    return "".join(GITLAB + "G" * 19 + "-" for _ in range(tokens)) + "AK" + "IA" + "C" * 16
+
+
+def test_a_chain_of_glued_credentials_longer_than_the_passes_is_a_documented_limit():
+    """Fourth review, finding 2: four passes mask three such tokens and the key; with four
+    tokens the first stays in clear (one pass, as before, masked only the key)."""
+    assert redact(glued_chain(3)).text == "[REDACTED:gitlab]" * 3 + "[REDACTED:aws]"
+    four = redact(glued_chain(4))
+    assert four.text == GITLAB + "G" * 19 + "-" + "[REDACTED:gitlab]" * 3 + "[REDACTED:aws]"
+    assert develop_redact(glued_chain(4)).kinds == ("aws",)
+
+
 def test_a_credential_nested_in_a_private_key_block_is_masked_with_it():
     """Finding C of the third review: the block is masked whole, with what it contains."""
     text = f"a {HEADER}\n{TOKEN}\n{'K' * 64}\n{FOOTER} b\n"
@@ -337,6 +352,16 @@ def test_a_block_closed_by_the_bound_is_not_reopened_by_its_own_header():
                    b"of this line is dropped]\n[REDACTED:private-key]\nnext\n")
 
 
+def test_a_header_that_ends_exactly_at_a_read_boundary_keeps_the_exact_bound():
+    """Fourth review, mutant `<` for `<=`: equivalent (the header is seen again only before any
+    byte after it is counted), pinned here all the same."""
+    data, counted = block(1000)
+    at = data.index(b"KEY-----") + len(b"KEY-----")
+    for key_bytes, marked in ((counted, False), (counted - 1, True)):
+        out = run(LineRedactor(key_bytes=key_bytes), [data[:at], data[at:at + 1], data[at + 1:]])
+        assert (b"no END line" in out) is marked
+
+
 def test_a_second_key_has_a_bound_of_its_own():
     first, counted = block(64)
     second = f"{HEADER}\n{'Z' * 64}\n{FOOTER}\nfin\n".encode("ascii")
@@ -445,14 +470,27 @@ def test_seeded_fuzz_arbitrary_bytes_never_raise_and_account_for_every_byte(seed
         assert b"the stderr log stopped" not in written
         dropped = len(data) - log._kept
         assert 0 <= log._kept <= len(data)
-        if dropped:
-            assert written.endswith(f"[ai-harness: {dropped} more bytes of stderr were "
-                                    "dropped]\n".encode())
-        else:
-            assert b"more bytes of stderr were dropped]" not in written
+        tally = re.search(rb"\[ai-harness: (\d+) more bytes of stderr were dropped; [^]\n]+\]\n\Z",
+                          written)
+        assert (int(tally.group(1)) if tally else 0) == dropped
 
 
 # -- the log --------------------------------------------------------------------------------------
+
+
+MARKED = "lines too long to redact or private key blocks, marked above"
+
+
+def tally(dropped: int, why: str = MARKED) -> bytes:
+    return f"\n[ai-harness: {dropped} more bytes of stderr were dropped; {why}]\n".encode()
+
+
+def cap(size: int) -> str:
+    return f"the log reached its cap of {size} bytes"
+
+
+def lines(count: int) -> str:
+    return f"the log passed its budget of {count} lines"
 
 
 def write_log(path, chunks: list[bytes], room: int | None = None) -> bytes:
@@ -482,7 +520,7 @@ def test_the_last_line_without_a_line_end_is_written_at_close(tmp_path):
 def test_a_line_that_does_not_fit_ends_the_writing_and_is_counted(tmp_path, monkeypatch):
     monkeypatch.setattr(transport, "STDERR_KEEP_BYTES", 100)
     log = write_log(tmp_path / "log", [b"E" * 70 + b"\n", b"F" * 70 + b"\n", b"G\n"])
-    assert log == b"E" * 70 + b"\n" + b"\n[ai-harness: 73 more bytes of stderr were dropped]\n"
+    assert log == b"E" * 70 + b"\n" + tally(73, cap(100))
 
 
 def test_after_the_cap_a_half_read_line_is_dropped_not_written(tmp_path, monkeypatch):
@@ -494,9 +532,8 @@ def test_after_the_cap_a_half_read_line_is_dropped_not_written(tmp_path, monkeyp
     assert token[:6] not in log
     # the line that does not fit and the half line after it come in the same read
     other = write_log(tmp_path / "other", [b"E" * 150 + b"\ntok: " + token[:20]])
-    assert other == f"\n[ai-harness: {151 + 25} more bytes of stderr were dropped]\n".encode()
-    assert log == b"E" * 99 + b"\n" + f"\n[ai-harness: {5 + 20} more bytes of stderr were " \
-        "dropped]\n".encode()
+    assert other == tally(151 + 25, cap(100))
+    assert log == b"E" * 99 + b"\n" + tally(5 + 20, cap(100))
 
 
 def test_after_the_line_budget_a_half_read_line_is_dropped_not_written(tmp_path, monkeypatch):
@@ -509,28 +546,76 @@ def test_after_the_line_budget_a_half_read_line_is_dropped_not_written(tmp_path,
     chunks = [b"a\nb\n", b"tok: " + token[:20], token[20:] + b" end\n"]
     log = write_log(tmp_path / "log", chunks)
     assert token[:6] not in log
-    assert log == b"\n[ai-harness: " + str(sum(map(len, chunks))).encode() + (
-        b" more bytes of stderr were dropped]\n")
+    assert log == b"a\n" + tally(sum(map(len, chunks)) - 2, lines(1))
+
+
+@pytest.mark.parametrize("count,dropped", [(3, b""), (2, b"c\n")])
+def test_the_line_budget_is_exact(tmp_path, monkeypatch, count, dropped):
+    """Fourth review, mutant `>=`: the last line within the budget is written."""
+    monkeypatch.setattr(transport, "STDERR_LOG_LINES", count)
+    log = write_log(tmp_path / "log", [b"a\nb\nc\n"])
+    assert log == b"a\nb\nc\n"[: 6 - len(dropped)] + (
+        tally(len(dropped), lines(count)) if dropped else b"")
+
+
+def test_lines_within_the_budget_are_written_from_the_read_that_passes_it(tmp_path,
+                                                                           monkeypatch):
+    """Fourth review: `IMPORTANT` and a flood of empty lines in one read lost `IMPORTANT`."""
+    monkeypatch.setattr(transport, "STDERR_LOG_LINES", 3)
+    log = write_log(tmp_path / "log", [b"IMPORTANT\n" + b"\n" * 100])
+    assert log == b"IMPORTANT\n\n\n" + tally(98, lines(3))
+
+
+@pytest.mark.parametrize("chunks", [[b"a\r\nb\r\n"], [b"a\r", b"\nb\r", b"\n"]],
+                         ids=["one-read", "split"])
+def test_a_crlf_is_one_line_for_the_budget(tmp_path, monkeypatch, chunks):
+    monkeypatch.setattr(transport, "STDERR_LOG_LINES", 2)
+    assert write_log(tmp_path / "log", chunks) == b"a\r\nb\r\n"
+
+
+def test_the_bytes_handed_to_redact_have_a_budget(tmp_path, monkeypatch):
+    """Fourth review, finding 1: a line that is one long credential writes only its marker,
+    so neither the cap nor the line budget bounded the work."""
+    monkeypatch.setattr(transport, "STDERR_REDACT_BYTES", 100)
+    line = (STRIPE + "Q" * 40 + "\n").encode("ascii")
+    log = write_log(tmp_path / "log", [line * 3])
+    assert log == b"[REDACTED:stripe]\n" * 2 + tally(
+        len(line), "the log passed its budget of 100 bytes to redact")
+
+
+def test_a_short_write_is_completed_and_counted(tmp_path, monkeypatch):
+    """Fourth review, finding 5: `os.write` may take fewer bytes than given."""
+    class ShortWrites:
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+        @staticmethod
+        def write(descriptor, data):
+            return os.write(descriptor, bytes(data[:3]))
+
+    monkeypatch.setattr(transport, "os", ShortWrites())
+    data = f"a {TOKEN}\nbb\n".encode("ascii")
+    assert write_log(tmp_path / "log", [data]) == b"a [REDACTED:github]\nbb\n"
 
 
 def test_a_marker_that_does_not_fit_is_not_cut(tmp_path):
     """Finding 6 of the second review: the marker is longer than the token."""
     log = write_log(tmp_path / "log", [(SLACK + "1234567890\n").encode("ascii")], room=16)
-    assert log == b"\n[ai-harness: 16 more bytes of stderr were dropped]\n"
+    assert log == tally(16, cap(1048576))
 
 
 def test_a_dropped_key_block_is_counted_as_absent_from_the_log(tmp_path):
     log = write_log(tmp_path / "log", [f"a\n{PRIVATE_KEY_SAMPLE}\nb\n".encode("ascii")])
     hidden = len(PRIVATE_KEY_SAMPLE) + 1 - len(HEADER) - 1
     assert log == (b"a\n[REDACTED:private-key]\nb\n"
-                   + f"\n[ai-harness: {hidden} more bytes of stderr were dropped]\n".encode())
+                   + tally(hidden))
 
 
 def test_a_long_line_is_counted_as_absent_from_the_log(tmp_path):
     line = b"x" * (LIMIT + 1) + b"\n"
     log = write_log(tmp_path / "log", [line, b"y\n"])
     assert log == (long_line_marker(len(line)) + b"y\n"
-                   + f"\n[ai-harness: {len(line)} more bytes of stderr were dropped]\n".encode())
+                   + tally(len(line)))
 
 
 def test_a_failure_inside_the_log_is_marked_and_never_raises(tmp_path, monkeypatch):
@@ -540,7 +625,7 @@ def test_a_failure_inside_the_log_is_marked_and_never_raises(tmp_path, monkeypat
     monkeypatch.setattr(redaction.LineRedactor, "feed", broken)
     log = write_log(tmp_path / "log", [b"a\n", b"b\n"])
     assert log == (b"\n[ai-harness: the stderr log stopped here (RuntimeError); the rest is "
-                   b"counted, not kept]\n\n[ai-harness: 4 more bytes of stderr were dropped]\n")
+                   b"counted, not kept]\n" + tally(4, "the stderr log failed (RuntimeError)"))
 
 
 def test_a_failure_at_close_is_marked_and_writes_nothing_raw(tmp_path, monkeypatch):
@@ -550,14 +635,14 @@ def test_a_failure_at_close_is_marked_and_writes_nothing_raw(tmp_path, monkeypat
     monkeypatch.setattr(redaction.LineRedactor, "finish", broken)
     log = write_log(tmp_path / "log", [b"a\n", b"tok: " + TOKEN.encode("ascii")[:20]])
     assert log == (b"a\n\n[ai-harness: the stderr log stopped here (RuntimeError); the rest is "
-                   b"counted, not kept]\n\n[ai-harness: 25 more bytes of stderr were dropped]\n")
+                   b"counted, not kept]\n" + tally(25, "the stderr log failed (RuntimeError)"))
 
 
 def test_a_log_that_cannot_be_written_never_raises():
     """The third review forced a TypeError through the write itself."""
     log = StderrLog("not a descriptor")  # type: ignore[arg-type]
     log.feed(b"a\nb\n")
-    log.close(4)
+    assert log.close(4) == 4  # nothing was written, and no marker could be
 
 
 @pytest.mark.parametrize("error", [KeyboardInterrupt, asyncio.CancelledError])

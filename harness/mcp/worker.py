@@ -115,6 +115,7 @@ async def _converse(request: dict[str, Any], channel: _Channel) -> dict[str, Any
     outcome["call_bytes"] = state.call_bytes
     outcome["server_stopped"] = state.server_stopped
     outcome["stderr_bytes"] = state.stderr_bytes
+    outcome["stderr_dropped"] = state.stderr_dropped
     if outcome["error_code"] is None and outcome["phase"] == "shutdown":
         outcome["phase"] = "done"
     return outcome
