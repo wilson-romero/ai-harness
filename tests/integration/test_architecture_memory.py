@@ -528,3 +528,28 @@ def test_a_temporary_file_held_open_after_the_link_is_reconciled_not_lost(conn, 
     assert temps == []
     assert target.split("/")[-1] in build_context(vault.resolve(), "demo-alpha", 64_000).text
     assert one(conn, "SELECT count(*) FROM approvals") == (1,)
+
+
+# -- 7.2 the written note is inert in Obsidian and comes back as data -------------------------------
+
+
+def test_active_obsidian_content_from_the_model_is_written_inert(conn, data_dir, vault):
+    from tests.unit.test_decisions import ACTIVE, FORBIDDEN
+
+    hostile = "\n".join(ACTIVE.values())
+    terminal = ApprovingTerminal()
+    engine, sessions, _ = engine_for(
+        conn, data_dir, vault,
+        answer(context=hostile, decision=hostile, alternatives=[ACTIVE["templater"]],
+               consequences=[ACTIVE["remote_image"]], assumptions=[ACTIVE["embed"]]),
+        terminal=terminal)
+    outcome = run(engine, sessions.create_session("Demo", "demo-alpha"))
+    assert outcome.status == "completed", outcome.message
+    raw = (vault / outcome.applied[0]).read_bytes()
+    assert raw == shown_note(terminal).encode("utf-8")  # shown == hashed == written still
+    for forbidden in FORBIDDEN:
+        assert forbidden.encode("utf-8") not in raw, forbidden
+    context = build_context(vault.resolve(), "demo-alpha", 64_000).text
+    assert outcome.applied[0] in context
+    for forbidden in ("<%", "%%", "<!--", "<script", "```", "![", "[["):
+        assert forbidden not in context, forbidden

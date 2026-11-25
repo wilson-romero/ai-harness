@@ -179,3 +179,63 @@ def test_a_rendered_note_enters_the_project_context(vault):
     context = build_context(vault, "demo-alpha", 64_000)
     assert any(n.relative.startswith("Decisiones/2026-11-20-cola-gestionada")
                and n.section == "Decisiones" for n in context.included)
+
+
+# -- 7.2 the note is inert in Obsidian --------------------------------------------------------------
+
+# Each construct that a plugin or Obsidian itself acts on, as a model could write it.
+ACTIVE = {
+    "dataviewjs": "```dataviewjs\nrequire('child_process').exec('calc')\n```",
+    "tilde_fence": "~~~dataviewjs\ndv.paragraph(1)\n~~~",
+    "inline_dataviewjs": "Total: `$= dv.pages().length`",
+    "inline_dataview": "Nombre: `= this.file.name`",
+    "templater": "<% tp.system.prompt('x') %>",
+    "templater_exec": "<%* await tp.user.run() %>",
+    "html_comment": "visible <!-- oculto para quien lee en Obsidian --> fin",
+    "obsidian_comment": "visible %% oculto para quien lee en Obsidian %% fin",
+    "remote_image": "![baliza](https://example.invalid/pixel.png)",
+    "embed": "![[Memoria/personas]]",
+    "wikilink": "Ver [[Memoria/personas]]",
+    "script": "<script>alert(1)</script>",
+    "inline_field": "estado:: rechazada",
+}
+# What must not be left anywhere in the file for that construct to work.
+FORBIDDEN = ("```", "~~~", "`", "<%", "%%", "<!--", "<script", "<", "![", "[[", "::")
+
+
+def _body_of(note: str) -> str:
+    return parse_frontmatter(note)[1]
+
+
+@pytest.mark.parametrize("name", sorted(ACTIVE))
+def test_every_model_field_is_inert_in_obsidian(name):
+    text = ACTIVE[name]
+    note = render_note(
+        fields(title=f"Cola {text}"[:120].replace("\n", " "), context=text, decision=text,
+               alternatives=(text,), consequences=(text,), assumptions=(text,)),
+        "demo-alpha", DAY, PROVENANCE)
+    raw = note.encode("utf-8")
+    for forbidden in FORBIDDEN:
+        assert forbidden.encode("utf-8") not in raw, (name, forbidden)
+
+
+def test_inert_text_still_reads_as_what_the_model_wrote():
+    """Escaped, not stripped: decoding the entities gives back exactly the model's text."""
+    import html
+
+    text = "\n".join(ACTIVE.values()) + "\nR&D usa 50 % y a < b; &lt; literal"
+    note = render_note(fields(context=text), "demo-alpha", DAY, PROVENANCE)
+    body = _body_of(note)
+    start = body.index("## Contexto\n\n") + len("## Contexto\n\n")
+    shown = body[start:body.index("\n\n## Decisión")]
+    assert html.unescape(shown) == text
+
+
+def test_escaping_is_linear_in_the_size_of_the_input():
+    import time
+
+    text = ("```<%%![[`~~::&" * 70_000)[:1_000_000]
+    started = time.perf_counter()
+    note = render_note(fields(context=text), "demo-alpha", DAY, PROVENANCE)
+    assert time.perf_counter() - started < 2.0
+    assert "<%" not in note and "[[" not in note

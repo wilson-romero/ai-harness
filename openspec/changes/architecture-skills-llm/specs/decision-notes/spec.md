@@ -39,6 +39,13 @@ La nota SHALL empezar con un frontmatter que el lector de memoria acepta como v�
 - **WHEN** se escribe una decisión de `demo-alpha` y después se ejecuta `memory context demo-alpha`
 - **THEN** la nota aparece en la sección `Decisiones` del bloque y `memory maintain --dry-run` no la cuenta en `invalid_frontmatter`
 
+### Requirement: Nota inerte en Obsidian
+Todo texto de la nota que viene del modelo SHALL escribirse de forma que Obsidian lo muestre literalmente y ningún plugin lo ejecute, lo embeba ni lo descargue: bloques de código con cualquier lenguaje (```` ``` ```` y `~~~`), código en línea, secuencias de Templater (`<%`), comentarios (`<!--`, `%%`), HTML crudo, imágenes y embebidos (`![`, `![[`), enlaces internos (`[[`) y campos en línea de Dataview (`::`) SHALL escribirse con entidades HTML, sin borrar nada de lo que escribió el modelo. El escape SHALL ser lineal en el tamaño del texto.
+
+#### Scenario: Contenido activo del modelo
+- **WHEN** el modelo devuelve en sus campos un bloque `dataviewjs`, código en línea `$=`, Templater `<% %>` y `<%* %>`, comentarios `<!-- -->` y `%% %%`, una imagen remota, un embebido `![[…]]`, un `<script>` y un enlace `[[…]]`, y la nota se aprueba y se escribe
+- **THEN** ninguno de esos marcadores aparece en los bytes del fichero, la nota mostrada es la escrita, decodificar las entidades devuelve el texto del modelo y `memory context` la devuelve sin ellos
+
 ### Requirement: Escritura atómica que nunca sobrescribe
 La nota SHALL escribirse en un temporal oculto dentro de `Decisiones/` que después se publica con su nombre final mediante una operación que falla si ese nombre ya existe, de cualquier tipo, y SHALL NOT sustituir nunca un fichero existente. Un lector SHALL ver la nota entera o ninguna nota.
 

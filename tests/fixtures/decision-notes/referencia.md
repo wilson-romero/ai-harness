@@ -35,7 +35,7 @@ Ninguno declarado.
 
 ## Procedencia
 
-- Skill `architecture-memory` 1.0.0 (sha256 abababab), ejecución 01900000-0000-7000-8000-000000000001.
-- Notas de memoria consultadas: `Decisiones/alpha-mensajeria.md` (sha256 cdcdcdcd), `projects/demo-alpha/_project.md` (sha256 efefefef).
+- Skill architecture-memory 1.0.0 (sha256 abababab), ejecución 01900000-0000-7000-8000-000000000001.
+- Notas de memoria consultadas: Decisiones/alpha-mensajeria.md (sha256 cdcdcdcd), projects/demo-alpha/_project.md (sha256 efefefef).
 - Fuente: 1234 bytes (sha256 12121212).
 - Credenciales enmascaradas: 0.

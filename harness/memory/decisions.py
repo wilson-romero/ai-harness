@@ -144,10 +144,33 @@ def temp_name_for(run_id: str, step: str) -> str:
 # -- render (D5) --------------------------------------------------------------------------------
 
 
+# What Obsidian or one of its plugins acts on, written as an HTML entity so that the reading view
+# shows the character and nothing acts on it (2026-11-25, independent review). `&` goes first, so
+# that every entity in the result is the harness's own and a model's literal `&lt;` stays
+# literal. Each pair is a plain `str.replace`: linear in the input, no pattern search.
+INERT_REPLACEMENTS = (
+    ("&", "&amp;"),
+    ("<", "&lt;"),  # HTML, <script>, <!-- comments -->, Templater <% %> and <%* %>, autolinks
+    ("`", "&#96;"),  # ``` fences (dataview, dataviewjs) and inline code (`= …`, `$= …`)
+    ("~~", "~&#126;"),  # ~~~ fences
+    ("%%", "%&#37;"),  # Obsidian comments: hidden in the reading view, read back by the memory
+    ("![", "!&#91;"),  # images (a remote one is fetched when the note is shown) and embeds
+    ("[[", "[&#91;"),  # wikilinks: they add links and graph edges to notes the model names
+    ("::", ":&#58;"),  # Dataview inline fields: metadata that queries over the vault would read
+)
+
+
+def make_inert(text: str) -> str:
+    """Model text that Obsidian shows literally and no plugin executes, embeds or fetches."""
+    for active, inert in INERT_REPLACEMENTS:
+        text = text.replace(active, inert)
+    return text
+
+
 def _escape_line(line: str) -> str:
     """Model text cannot open a section, draw a rule that reads as a frontmatter fence, or
     imitate the `--- nota: …` header that `memory context` puts before each note."""
-    line = neutralise_delimiters(line)
+    line = make_inert(neutralise_delimiters(line))
     stripped = line.strip()
     if (
         stripped.startswith(("#", "---"))
@@ -162,7 +185,7 @@ def _block(text: str) -> str:
 
 
 def _inline(text: str) -> str:
-    return neutralise_delimiters(" ".join(text.split()))
+    return make_inert(neutralise_delimiters(" ".join(text.split())))
 
 
 def _items(items: tuple[str, ...]) -> str:
@@ -174,7 +197,7 @@ def render_note(fields: DecisionFields, project_slug: str, day: date,
     """The whole note, as text with `\\n` line ends. Same inputs, same bytes."""
     ident = decision_id(project_slug, fields.title)
     when = day.isoformat()
-    notes = ", ".join(f"`{_inline(path)}` (sha256 {digest[:8]})"
+    notes = ", ".join(f"{_inline(path)} (sha256 {digest[:8]})"
                       for path, digest in provenance.memory_notes) or "ninguna"
     lines = [
         "---",
@@ -213,7 +236,7 @@ def render_note(fields: DecisionFields, project_slug: str, day: date,
         "",
         "## Procedencia",
         "",
-        f"- Skill `{provenance.skill_name}` {provenance.skill_version} "
+        f"- Skill {provenance.skill_name} {provenance.skill_version} "
         f"(sha256 {provenance.skill_sha256[:8]}), ejecución {provenance.run_id}.",
         f"- Notas de memoria consultadas: {notes}.",
         f"- Fuente: {provenance.source_bytes} bytes (sha256 {provenance.source_sha256[:8]}).",
