@@ -97,10 +97,15 @@ class Proposal:
     skill_sha256: str
     target: str | None
     content: str  # already normalised
+    # Where `target` lives (the decision effect: the resolved vault root). Shown and hashed, so
+    # that an approval for one vault cannot be applied to another (2026-11-25); never stored.
+    destination: str | None = None
 
     def as_dict(self) -> dict:
         data = self.content.encode("utf-8")
+        extra = {"destination": self.destination} if self.destination is not None else {}
         return {
+            **extra,
             "format": PROPOSAL_FORMAT,
             "scope": self.scope,
             "session_id": self.session_id,
@@ -161,7 +166,8 @@ class TtyTerminal:
         return getpass.getuser()
 
 
-def render_for_terminal(proposal: Proposal, approval_hash: str, expires_at: str) -> str:
+def render_for_terminal(proposal: Proposal, approval_hash: str, expires_at: str,
+                        redactions: int = 0) -> str:
     """Header, then the full content between two rules. The content is shown as hashed."""
     rule = "-" * 72
     header = [
@@ -170,8 +176,10 @@ def render_for_terminal(proposal: Proposal, approval_hash: str, expires_at: str)
         f"  run:      {proposal.run_id}",
         f"  step:     {proposal.step}",
         f"  scope:    {proposal.scope}",
+        *([f"  vault:    {proposal.destination}"] if proposal.destination is not None else []),
         f"  target:   {proposal.target if proposal.target is not None else '-'}",
         f"  bytes:    {proposal.content_bytes}",
+        *([f"  redacted: {redactions} credential(s) redacted"] if redactions else []),
         f"  hash:     {approval_hash}",
         f"  expires:  {expires_at} (UTC)",
     ]

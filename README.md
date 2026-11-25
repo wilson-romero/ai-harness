@@ -2,7 +2,9 @@
 
 Copiloto de arquitectura que se ejecuta en local. Mantiene varias conversaciones persistentes con un proveedor de lenguaje y, en cortes posteriores, usará Microsoft Copilot Web, herramientas MCP, Skills, una segunda memoria en Markdown y Enterprise Architect.
 
-Estado: **Corte 1 · Esqueleto** y **Corte 3 · Memoria**. Sesiones, historial y recuperación funcionan con un proveedor Mock, y el harness lee (sin escribir nunca) una segunda memoria en Markdown compatible con `claude-memory-system`. El plan de entregas está en [`docs/plan/2026-11-24-ai-harness-cortes.md`](docs/plan/2026-11-24-ai-harness-cortes.md).
+**Es un proyecto educativo:** sirve para aprender a construir un harness, no está pensado para uso en producción. Se ejercita solo con prompts sintéticos y no guarda contenido real. Quien lo use para automatizar un servicio real es responsable de cumplir las condiciones de uso de ese servicio.
+
+Estado: **Corte 1 · Esqueleto**, **Corte 3 · Memoria** y **Corte 4 · Skills**. Sesiones, historial y recuperación funcionan con un proveedor Mock; el harness lee una segunda memoria en Markdown compatible con `claude-memory-system` y ejecuta Skills declarativos. Su única escritura en esa memoria es una nota de decisión nueva en `Decisiones/`, después de una aprobación humana (ver [Skills de arquitectura](#skills-de-arquitectura)). El plan de entregas está en [`docs/plan/2026-11-24-ai-harness-cortes.md`](docs/plan/2026-11-24-ai-harness-cortes.md).
 
 ## Requisitos
 
@@ -67,7 +69,7 @@ Todo texto del vault que sale hacia la terminal, el proveedor o SQLite (cuerpos,
 
 ### Sincronización
 
-El harness no tiene ningún código que copie, suba o sincronice el vault, y nunca escribe en él; un test lo comprueba buscando esas operaciones en `harness/memory/` y comparando la huella del vault antes y después de cada comando. **No impide ni detecta** que otro programa lo sincronice: el vault puede vivir, por ejemplo, en una carpeta de OneDrive, y lo que ese cliente haga con él depende de su configuración, no del harness. Con «archivos a petición» (OneDrive, iCloud), `memory search` y `memory maintain` leen todas las notas y pueden hacer que el cliente descargue el vault entero; no está medido.
+El harness no tiene ningún código que copie, suba o sincronice el vault, y los comandos de memoria nunca escriben en él; un test lo comprueba buscando esas operaciones en `harness/memory/` (con una única excepción con nombre, el escritor de notas de decisión) y comparando la huella del vault antes y después de cada comando. La única escritura del harness en el vault es una nota de decisión nueva, después de una aprobación (ver [Skills de arquitectura](#skills-de-arquitectura)). **No impide ni detecta** que otro programa lo sincronice: el vault puede vivir, por ejemplo, en una carpeta de OneDrive, y lo que ese cliente haga con él depende de su configuración, no del harness. Con «archivos a petición» (OneDrive, iCloud), `memory search` y `memory maintain` leen todas las notas y pueden hacer que el cliente descargue el vault entero; no está medido.
 
 `HARNESS_DATA_DIR` no puede estar dentro del vault: `memory …` y `ask --project` lo rechazan con un error (código 1) antes de escribir nada, también si se llega por un enlace. El vault dentro del directorio de datos sí vale. `session …`, `history` y `ask` sin `--project` no leen el vault y no lo comprueban.
 
@@ -104,7 +106,7 @@ uv run python main.py skill cancel RUN_ID
 
 - `llm`: envía la plantilla `templates/<nombre>.md` a través de la sesión, con el mismo plazo y los mismos estados que `ask`. `"memory": "project"` añade el contexto del proyecto de la sesión (la sesión tiene que tener proyecto). `timeout_s` de 1 a 600.
 - `validate`: comprueba la salida de un paso anterior (`of`) con reglas declaradas: `min_bytes`/`max_bytes`, `required_headings` (Markdown), o `format: json` con campos tipados (`string`, `integer`, `boolean`, `string_list`, con `max_length`, `single_line`, `enum`, `slug`, `date`, `min`, `max`, `max_items`) y sin campos extra. Su salida es el texto saneado y redactado, o el JSON canónico.
-- `approval`: pide una aprobación humana sobre la salida de un `validate` anterior y aplica un efecto de la lista cerrada del harness. Hoy solo existe `none` (consumir la aprobación deja seguir).
+- `approval`: pide una aprobación humana sobre la salida de un `validate` anterior y aplica un efecto de la lista cerrada del harness: `none` (consumir la aprobación deja seguir) o `vault.save_decision` (escribe una nota de decisión nueva; ver [Skills de arquitectura](#skills-de-arquitectura)).
 
 Referencias en las plantillas: `{{inputs.NOMBRE}}`, `{{steps.ID.output}}` y `{{steps.ID.fields.CAMPO}}`, a una entrada declarada o a un paso anterior. Cualquier otra cosa entre `{{` y `}}` invalida el Skill. Se sustituyen una sola vez, sin evaluar nada, y cada valor va marcado como datos entre `<<<DATOS <código>` y `DATOS <código>>>>`, con los mismos `‹‹‹`/`›››` que la memoria. El hash del Skill (SHA-256 de sus ficheros con los finales de línea normalizados) es el mismo en macOS y en Windows.
 
@@ -148,6 +150,72 @@ Si una pregunta vence después de enviarse, o el proceso muere a mitad, el paso 
 ### Qué se guarda de una ejecución
 
 Nombre, versión y hash del Skill, estados, intentos, fechas y, de las entradas, solo su SHA-256 y su tamaño (`inputs_manifest`): **nunca** su contenido. Como pregunta de la sesión se guarda una marca `[skill <nombre>/<paso> intento <n>]`, nunca el prompt compuesto. La salida de cada paso se guarda solo con un proveedor sintético (el Mock); con cualquier otro, solo su SHA-256 y su tamaño, y una ejecución interrumpida no se puede reanudar. La propuesta no se guarda: se recalcula. La auditoría lleva la ejecución, el paso, el hash y el resultado, sin texto.
+
+## Skills de arquitectura
+
+Dos Skills en `skills/` (la carpeta por defecto de `HARNESS_SKILLS_DIR`), los dos en una sesión creada con `--project`, que les da el contexto de memoria de ese proyecto:
+
+- **`hls-review`** revisa un documento de diseño de alto nivel: una pregunta con el documento marcado como datos y la memoria del proyecto, y una comprobación de que la respuesta tiene `Resumen`, `Alternativas`, `Restricciones`, `Requisitos no funcionales`, `Supuestos` y `Preguntas pendientes` (como mucho 32 KiB). La revisión sale por stdout. **No escribe nada** y no pide aprobación. Si falta un encabezado, termina `failed` con `validation_failed:required_headings:<encabezado>` y no imprime la respuesta.
+- **`architecture-memory`** extrae una decisión de un texto fuente como un único objeto JSON (`title` de 8 a 120 caracteres en una línea; `context` y `decision` de hasta 2000; `alternatives`, `consequences` y, opcional, `assumptions`, de hasta 8 elementos de 400), la valida con un esquema cerrado, prepara la nota, **la muestra entera** con su ruta y su hash, y solo si la apruebas la escribe en el vault.
+
+Con el vault sintético y las respuestas guionizadas del repo, en PowerShell (desde la raíz del repo):
+
+```powershell
+$base = Join-Path $env:TEMP "ai-harness-demo"
+New-Item -ItemType Directory -Force $base | Out-Null
+Copy-Item -Recurse tests\fixtures\vault-synthetic (Join-Path $base "vault")
+$env:HARNESS_DATA_DIR = Join-Path $base "data"
+$env:HARNESS_VAULT_ROOT = Join-Path $base "vault"
+$env:HARNESS_MOCK_RESPONSES = (Resolve-Path tests\fixtures\skill-inputs\respuestas-demo.json).Path
+uv run python main.py skill list
+$sesion = uv run python main.py session create "Demo" --project demo-alpha
+uv run python main.py skill run hls-review --session $sesion --input-file document=tests\fixtures\skill-inputs\hls-corto.md
+uv run python main.py skill run architecture-memory --session $sesion --input-file source=tests\fixtures\skill-inputs\fuente-decision.md
+uv run python main.py memory context demo-alpha
+```
+
+En zsh o bash, lo mismo con `export` y rutas con `/`:
+
+```sh
+base="$(mktemp -d)"
+cp -R tests/fixtures/vault-synthetic "$base/vault"
+export HARNESS_DATA_DIR="$base/data" HARNESS_VAULT_ROOT="$base/vault"
+export HARNESS_MOCK_RESPONSES="$PWD/tests/fixtures/skill-inputs/respuestas-demo.json"
+sesion="$(uv run python main.py session create "Demo" --project demo-alpha)"
+uv run python main.py skill run hls-review --session "$sesion" --input-file document=tests/fixtures/skill-inputs/hls-corto.md
+uv run python main.py skill run architecture-memory --session "$sesion" --input-file source=tests/fixtures/skill-inputs/fuente-decision.md < /dev/null   # código 3
+uv run python main.py skill resume RUN_ID --input-file source=tests/fixtures/skill-inputs/fuente-decision.md   # en una terminal
+```
+
+Qué se ve: `skill list` muestra los dos Skills `1.0.0 valid`; `hls-review` imprime la revisión y termina con 0. `architecture-memory` en una terminal muestra la cabecera de la aprobación (`vault:` con la raíz resuelta del vault, `target: Decisiones/<fecha>-cola-gestionada-para-los-eventos-de-pedidos-f43c794e.md`, `bytes`, `hash`, `expires`) y la nota completa entre dos líneas de guiones; al escribir los 8 primeros caracteres del hash, imprime la nota y `applied: Decisiones/<fecha>-cola-gestionada-para-los-eventos-de-pedidos-f43c794e.md` y termina con 0 (`<fecha>` es el día local en que empezó la ejecución). `n` la cancela (código 1) sin escribir nada. Con stdin redirigido no pregunta: termina con 3 y `skill resume RUN_ID` en una terminal la retoma. Después, `memory context demo-alpha` incluye la nota en la sección de decisiones. Repetir la extracción con el mismo título termina `failed` con `duplicate_decision` y la ruta de la nota existente, sin pedir aprobación. `scripts/demo_architecture_skills.py` recorre los pasos que no necesitan a una persona y comprueba la huella del vault en cada uno.
+
+### Dónde y cómo se escribe una decisión
+
+- **Dónde:** directamente en `Decisiones/` de `HARNESS_VAULT_ROOT`, que es donde el contexto de un proyecto ya busca sus decisiones. La ejecución queda ligada al vault con el que empezó: la cabecera de la aprobación muestra su raíz y el hash la incluye, y si al reanudar `HARNESS_VAULT_ROOT` apunta a otro vault, falla con `vault_changed` sin escribir en ninguno (SQLite guarda solo un resumen SHA-256 de la raíz, nunca la ruta). Si la carpeta no existe, el harness la crea en la primera escritura aprobada, y solo entonces; ningún comando de solo lectura la crea. Si `Decisiones/` es un enlace, una unión, no es una carpeta, sale de la raíz real del vault o solo se diferencia en mayúsculas (`decisiones/`), la ejecución falla con `unsafe_target` antes de pedir aprobación.
+- **Nombre:** `YYYY-MM-DD-<slug>-<id8>.md`. La fecha es el día local en que empezó la ejecución (no cambia al reanudar); el slug sale del título (ASCII, minúsculas, `[a-z0-9-]`, como mucho 48 caracteres; `decision` si quedaría vacío o sería un nombre reservado de Windows); `id8` son los 8 primeros caracteres hexadecimales del identificador. El nombre es válido en Windows y en macOS.
+- **Identificador:** `decision_id = dec-` + 16 caracteres del SHA-256 del proyecto y del título normalizado (NFKC, sin distinguir mayúsculas, espacios colapsados). El mismo título en el mismo proyecto da el mismo identificador.
+- **Frontmatter:** `type: decision`, `decision_id`, `project_slug` (el de la sesión), `status: accepted`, `created`, `updated`, `tags: [decision, <proyecto>]`, `source: ai-harness`, `skill: architecture-memory@1.0.0` y `run_id`. Ningún valor del frontmatter sale del texto del modelo, ni siquiera el título.
+- **Cuerpo:** título, `Contexto`, `Decisión`, `Alternativas consideradas`, `Consecuencias`, `Supuestos` («Ninguno declarado.» si no hay) y `Procedencia` (Skill con versión y hash, ejecución, notas de memoria consultadas con su hash, tamaño y hash de la fuente, y número de credenciales enmascaradas). El texto del modelo pasa por el mismo saneado y la misma redacción que lo que se aprueba; una línea suya que empieza por `#` o `---` se escribe con `\` delante, y `<<<`/`>>>` se cambian por `‹‹‹`/`›››`, así que no puede abrir secciones, imitar un frontmatter ni falsificar los delimitadores cuando `memory context` la lea.
+- **Inerte en Obsidian:** en todo texto que viene del modelo (y en las rutas de la procedencia), estos caracteres se escriben como entidad HTML, que Obsidian muestra tal cual en la vista de lectura sin que nada los ejecute: `&` → `&amp;`, `<` → `&lt;` (HTML, `<script>`, comentarios `<!-- -->`, Templater `<% %>` y `<%* %>`), `` ` `` → `&#96;` (bloques ```` ``` ```` de `dataview`/`dataviewjs` y código en línea `` `= …` `` y `` `$= …` ``), `~~` → `~&#126;` (bloques `~~~`), `%%` → `%&#37;` (comentarios de Obsidian, ocultos al leer pero que `memory context` devolvería al modelo), `![` → `!&#91;` (imágenes, también remotas, y embebidos `![[…]]`), `[[` → `[&#91;` (enlaces internos, que añadirían enlaces y aristas del grafo hacia notas que elige el modelo) y `::` → `:&#58;` (campos en línea de Dataview). Se escapa, no se borra: al leer la nota ves exactamente lo que escribió el modelo; en el fichero, o en el modo fuente, verás las entidades. **Supuesto que queda:** un plugin que actúe sobre otra sintaxis que no está en esta lista (por ejemplo, un enlace Markdown normal `[texto](url)`, que solo actúa si haces clic) no está neutralizado.
+- **Deduplicación:** antes de pedir la aprobación y otra vez justo antes de escribir, el harness busca en `Decisiones/` una nota con ese `decision_id` en su frontmatter. Si existe, falla con `duplicate_decision` y su ruta. **Es una deduplicación débil:** el identificador sale del título, y el título lo elige el modelo; la misma decisión extraída otra vez con otro título (otras palabras, otro orden) da otro identificador y se escribe como nota nueva. Solo detecta el mismo título salvo mayúsculas, espacios y formas Unicode equivalentes. Una decisión equivalente escrita a mano sin `decision_id` tampoco se detecta.
+- **Nunca sobrescribe ni edita:** escribe un temporal oculto (`Decisiones/.harness-<ejecución>-<paso>.tmp`, que la memoria no lee) y lo publica con un enlace duro, que **falla si el nombre final ya existe**; nunca usa una operación que sustituya un fichero. Nunca modifica, mueve ni borra una nota existente. Las escrituras de dos procesos del harness se ordenan con un bloqueo (`locks/vault-decisions.lock` en el directorio de datos): el segundo espera hasta 5 s y, si no le toca, falla con código 1 dejando la aprobación concedida para `skill resume` (con el proveedor Mock, cuyas salidas se guardan). Con un proveedor real, cuyas salidas no se guardan, el harness reintenta en la misma invocación hasta 30 s y, si el escritor sigue ocupado, revoca la aprobación, termina `failed` con `effect_busy` y hay que repetir la ejecución con `skill run`. Por lo mismo, con un proveedor real, si el proceso muere antes de publicar la nota, `skill resume` termina `failed` diciendo que hay que repetir la ejecución; nunca queda una aprobación usable en una ejecución terminada.
+- **Si el proceso muere a mitad**, `skill resume` mira el vault sin escribir: si la nota con ese identificador y esos bytes está, termina; si no está, pide una aprobación nueva para los mismos bytes; si hay otra nota con ese identificador, se niega (código 1) y la ejecución queda `uncertain` para que lo mires. Lo mismo si algo falla después de publicar la nota (por ejemplo, no se puede borrar el temporal porque OneDrive o un antivirus lo tiene abierto en Windows): la ejecución queda `uncertain`, nunca `failed`, y `skill resume` lo vuelve a intentar. Mientras el temporal no se pueda borrar, la nota existe pero **la memoria no la lee** (tiene dos enlaces duros), y `skill resume` termina con código 1 nombrando el temporal; cierra el programa que lo retiene y repite `skill resume`. `skill cancel RUN_ID` sobre una ejecución `uncertain` también comprueba el vault primero: borra el temporal propio si puede (así una nota publicada vuelve a ser visible), dice por stderr si la nota está en el vault o si no se escribió nada, y termina la ejecución sin borrar nunca una nota.
+- **Qué guarda SQLite:** con un proveedor real, de la nota solo el identificador (`skill_steps.effect_ref`), su SHA-256 y su tamaño; nunca el título, el texto ni la ruta.
+
+Para comprobar en tu vault (por ejemplo, una carpeta de OneDrive) las operaciones de ficheros de las que depende la escritura, sin tocar nada tuyo:
+
+```powershell
+uv run python scripts/diag_vault_write.py <carpeta-de-prueba>
+```
+
+Crea una subcarpeta nueva dentro de la que indiques, comprueba allí la creación exclusiva, el enlace duro que no sustituye un nombre existente, el número de enlaces, que `fstat` y `lstat` dan el mismo inodo y el borrado del temporal, lo borra todo y escribe un bloque `--- ai-harness diag_vault_write ---` con valores `true`/`false`, recuentos, categorías de error y tiempos, sin rutas ni nombres.
+
+Límites conocidos:
+
+1. El vault tiene que estar en un sistema de ficheros con enlaces duros (APFS, NTFS). En FAT32, exFAT o algunas unidades de red la escritura falla con `write_failed` sin escribir nada.
+2. El bloqueo solo ordena a los procesos del harness que comparten directorio de datos. Otro programa (Obsidian, el curador de `claude-memory-system`) puede crear un fichero con el mismo nombre en el mismo instante: el harness no lo sobrescribe, falla con `conflict`. Entre la comprobación de `Decisiones/` y la escritura del temporal, alguien con permiso de escritura en el vault podría cambiar la carpeta por un enlace; el harness lo detecta después de publicar, retira su nota y falla, pero el temporal habrá existido un momento fuera.
+3. No se sincroniza el directorio tras publicar: después de un corte de luz justo en ese momento, la nota podría no estar, y `skill resume` lo vería como ausente y pediría aprobarla otra vez.
+4. **Riesgo de atribución del curador:** el curador de `claude-memory-system` atribuye a su propia ejecución cualquier `.md` de `Decisiones/` modificado después de que empiece. Si el harness escribe una decisión mientras el curador corre en el mismo equipo, el log del curador la contará como suya. No se pierde ni se rompe nada.
 
 ## Herramientas MCP
 
