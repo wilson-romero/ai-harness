@@ -279,3 +279,25 @@ def test_decisiones_swapped_for_a_link_during_the_write_takes_the_note_back(vaul
         write_decision(_root(vault), NAME, NOTE, TEMP, IDENT)
     assert caught.value.code == "unsafe_target"
     assert not (moved / NAME).exists() and not (moved / TEMP).exists()
+
+
+# -- 7.12 the temporary-file remover only ever removes a name of the temporary form --------------
+
+
+@pytest.mark.parametrize("name", [NAME, "_project.md", "harness-x.tmp", ".harness-x.md",
+                                  ".harness-x.tmp.md"])
+def test_drop_temp_never_removes_a_name_that_is_not_a_temporary_file(vault, name):
+    folder = _root(vault) / "Decisiones"
+    folder.mkdir(exist_ok=True)
+    victim = folder / name
+    victim.write_bytes(NOTE)
+    assert decisions._drop_temp(victim) is False
+    assert victim.read_bytes() == NOTE
+
+
+def test_reconcile_with_a_foreign_temp_name_removes_nothing(vault):
+    root = _root(vault)
+    write_decision(root, NAME, NOTE, TEMP, IDENT)
+    before = entries(vault)
+    assert reconcile_decision(root, IDENT, SHA, NAME) == "blocked"
+    assert entries(vault) == before
