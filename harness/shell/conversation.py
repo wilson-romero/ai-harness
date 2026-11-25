@@ -127,7 +127,7 @@ def read_text_file(raw_path: str, max_bytes: int = MAX_FILE_BYTES) -> tuple[str,
     name = safe_line(path.name or raw_path).text
     try:
         info = os.lstat(path)
-    except OSError:
+    except (OSError, ValueError):  # ValueError: a NUL in the path
         raise UsageError(f"/file: {name!r} cannot be read") from None
     if not stat.S_ISREG(info.st_mode):
         raise UsageError(f"/file: {name!r} is not a regular file (a link, a pipe, a device or "
@@ -138,7 +138,7 @@ def read_text_file(raw_path: str, max_bytes: int = MAX_FILE_BYTES) -> tuple[str,
              | getattr(os, "O_BINARY", 0))
     try:
         fd = os.open(path, flags)
-    except OSError:
+    except (OSError, ValueError):
         raise UsageError(f"/file: {name!r} cannot be read") from None
     try:
         opened = os.fstat(fd)
@@ -524,7 +524,10 @@ class Conversation:
     def _cmd_resume(self, number: str) -> None:
         if not self._listed:
             raise UsageError("/resume takes a number from /sessions; run /sessions first")
-        if not number.isdigit() or not 1 <= int(number) <= len(self._listed):
+        # ASCII digits only: "²" is a digit for `isdigit` and not a number for `int`.
+        if not (number.isascii() and number.isdigit()) or not 1 <= int(number) <= len(
+            self._listed
+        ):
             raise UsageError(f"/resume takes a number from 1 to {len(self._listed)}")
         session_id = self._listed[int(number) - 1]
         if session_id == self._session_id:

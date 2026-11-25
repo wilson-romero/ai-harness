@@ -1,6 +1,7 @@
 """What a conversation line is (interactive-shell D3).
 
-A line whose first non-blank character is `/` is a command: a name from a closed list and
+A line whose first non-blank character is `/` is a command (invisible format characters count
+as blank): a name from a closed list and
 arguments separated by blanks, with double quotes around an argument that holds blanks. `//`
 at the start escapes the slash: the line is a question that starts with one `/`. Every other
 line that is not blank is a question. An unknown or malformed command is an error of the
@@ -9,6 +10,7 @@ conversation, never a question: a mistyped command cannot reach the provider.
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 
 from harness.text.safe_text import terminal_safe
@@ -50,9 +52,18 @@ class Empty:
     pass
 
 
+def _blank(char: str) -> bool:
+    """White space, or an invisible format character (a zero-width space, a BOM): before a
+    `/` it must not turn a command into a question that would be sent (review 2026-11-25)."""
+    return char.isspace() or unicodedata.category(char) == "Cf"
+
+
 def parse_line(line: str) -> Question | Command | Empty:
     line = line.rstrip("\r\n")
-    stripped = line.strip()
+    start = 0
+    while start < len(line) and _blank(line[start]):
+        start += 1
+    stripped = line[start:].strip()
     if not stripped:
         return Empty()
     if stripped.startswith("//"):

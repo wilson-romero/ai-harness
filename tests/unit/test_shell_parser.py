@@ -49,7 +49,14 @@ def test_a_question_that_starts_with_a_slash(line, sent):
     assert parsed == Question(sent)
 
 
-@pytest.mark.parametrize("line", ["", "   ", "\t", "\n", " \r\n"])
+@pytest.mark.parametrize("line", ["​/exit", "﻿/exit", " ​ ⁠/exit",
+                                  "​​/exit "])
+def test_an_invisible_character_before_the_slash_does_not_make_a_question(line):
+    """Review 2026-11-25: a zero-width space pasted before `/exit` must not send `/exit`."""
+    assert parse_line(line) == Command("exit", ())
+
+
+@pytest.mark.parametrize("line", ["", "   ", "\t", "\n", " \r\n", "​", "﻿ ​"])
 def test_empty_line(line):
     """Scenario «Línea vacía»: nothing to send and nothing to run."""
     assert parse_line(line) == Empty()
