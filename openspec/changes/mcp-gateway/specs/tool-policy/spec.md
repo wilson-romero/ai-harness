@@ -116,9 +116,15 @@ El sistema SHALL NOT abrir ningún puerto, socket de escucha ni canal por el que
 - **THEN** el proceso del harness no deja ningún socket escuchando mientras dura el comando (la emulación de `socketpair` de la biblioteca estándar, que escucha en bucle local y se cierra al aceptar, no cuenta)
 
 #### Scenario: El oráculo ve un listen sin bind
-- **WHEN** un proceso de prueba crea un socket y llama a `listen()` sin `bind`
+- **WHEN** un proceso de prueba crea un socket y llama a `listen()` sin `bind`, en un sistema que lo permite
 - **THEN** el registro de sockets de los tests lo detecta, aunque no haya evento `socket.bind`
 
+#### Scenario: El oráculo ve un socket hecho fuera del bucle
+Revisada el 2026-11-25.
+- **WHEN** un proceso de prueba ata un socket a `127.0.0.1` con puerto 0 y escucha, o llama a la emulación de `socketpair` fuera del bucle de eventos
+- **THEN** el registro de sockets lo marca como ajeno, aunque la dirección sea la misma que la del par del bucle
+
 #### Scenario: Ningún socket en el harness ni en su proceso de sesión
-- **WHEN** se ejecuta `mcp call` con el registro de sockets activo en el harness y en su proceso de sesión
-- **THEN** los dos procesos solo crean los sockets de `socketpair` de su bucle de eventos
+Revisada el 2026-11-25.
+- **WHEN** se ejecuta `mcp call` con el registro de sockets activo en el harness y en su proceso de sesión, con el `socketpair` nativo y con la emulación de Windows forzada
+- **THEN** los dos procesos solo crean los sockets del par de su bucle de eventos, reconocido por su pila de llamadas (`_make_self_pipe` de asyncio llamando a `socketpair` o `_fallback_socketpair`), y los únicos `bind` son a bucle local con puerto 0

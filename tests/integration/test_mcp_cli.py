@@ -22,6 +22,7 @@ from harness.storage.database import DATABASE_NAME
 from tests.conftest import SECRET_SAMPLES
 from tests.mcp_support import (
     DEFAULT_TOOLS,
+    LOOPBACK_PORT_ZERO,
     REPO_ROOT,
     Server,
     child_env,
@@ -518,11 +519,15 @@ def test_the_table_refuses_content_shaped_values(data_dir, conn):
 # -- 4.4 no listening surface ------------------------------------------------------------------
 
 
-def test_no_socket_is_bound_during_a_call(ws, data_dir, tmp_path):
-    """Audit hook installed before the SDK is imported. A bind made by the standard library's
-    `socketpair` emulation (Windows) is reported apart; none other may happen."""
+@pytest.mark.parametrize("socketpair", ["native", "fallback"])
+def test_no_socket_is_bound_during_a_call(ws, data_dir, tmp_path, socketpair):
+    """Audit hook installed before the SDK is imported. Only the event loop's own socket pair
+    may bind, recognised by its call stack (revised on 2026-11-25, hotfix 0.2.1: on Windows
+    that pair is `socket._fallback_socketpair`, which binds `('127.0.0.1', 0)`; `fallback`
+    forces it here, so Windows's condition runs on every system)."""
     server = ws.server()
-    env = child_env(HARNESS_DATA_DIR=str(data_dir), HARNESS_MCP_CONFIG=str(ws.config))
+    env = child_env(HARNESS_DATA_DIR=str(data_dir), HARNESS_MCP_CONFIG=str(ws.config),
+                    AI_HARNESS_TEST_FALLBACK_SOCKETPAIR="1" if socketpair == "fallback" else "0")
     code, out, err, _ = run_bounded(
         [sys.executable, str(DRIVER), "sockets", str(server.state), "mcp", "call",
          "synthetic", "get_project_metadata", "--args", ALPHA],
@@ -530,6 +535,9 @@ def test_no_socket_is_bound_during_a_call(ws, data_dir, tmp_path):
     )
     assert code == 0, err
     binds = json.loads((server.state / "binds.json").read_text(encoding="utf-8"))
-    assert [bind for bind in binds if not bind["socketpair"]] == []
-    print(f"\nsocket binds: {len(binds)} (socketpair emulation only)")
+    assert [bind for bind in binds if not bind["self_pipe"]] == []
+    assert {bind["address"] for bind in binds} <= LOOPBACK_PORT_ZERO
+    if socketpair == "fallback":
+        assert binds  # the emulation really ran, and was recognised
+    print(f"\nsocket binds: {len(binds)} (the event loop's own pair only)")
     assert server.stopped()

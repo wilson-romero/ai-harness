@@ -177,6 +177,11 @@ def result_lines(out: str) -> str:
     return "\n".join(lines)
 
 
+# The only addresses the event loop's own socket pair binds when it is the pure-Python
+# emulation (Windows): loopback, ephemeral port (hotfix 0.2.1).
+LOOPBACK_PORT_ZERO = {"('127.0.0.1', 0)", "('::1', 0)"}
+
+
 def child_env(**extra: str) -> dict[str, str]:
     """The environment of a harness process run by a test: a copy of this one, never built."""
     env = {k: v for k, v in os.environ.items() if k not in HARNESS_VARS}
