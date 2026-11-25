@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -26,6 +27,12 @@ grandchild = subprocess.Popen(
     [sys.executable, "-c", GRANDCHILD, str(state / "heartbeat-grandchild")],
     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
 )
+# Hang only once the grandchild beats (revised 2026-11-25): a test that interrupts as soon as
+# `stuck.log` exists must find a heartbeat to watch, however slow the machine is.
+beat = state / "heartbeat-grandchild"
+deadline = time.monotonic() + 30
+while not beat.exists() and time.monotonic() < deadline:
+    time.sleep(0.05)
 # Pids for the test's cleanup only (it kills them if a heartbeat still moves).
 (state / "stuck.log").write_text(f"stuck {os.getpid()} {grandchild.pid}\n", encoding="utf-8")
 while True:  # catastrophic backtracking in the C regex engine: the GIL is never released

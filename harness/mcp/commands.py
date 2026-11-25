@@ -309,6 +309,11 @@ def _warn_if_alive(outcome: Outcome) -> None:
     if outcome.server_stopped is False:
         print("warning: a process of the MCP session was still alive after the kill",
               file=sys.stderr)
+    from harness.mcp.transport import STDERR_KEEP_BYTES
+
+    if outcome.stderr_bytes > STDERR_KEEP_BYTES:
+        print(f"warning: the server wrote {outcome.stderr_bytes} bytes on stderr; only the "
+              f"first {STDERR_KEEP_BYTES} were kept in its log", file=sys.stderr)
 
 
 def _stderr_kill_bytes() -> int:

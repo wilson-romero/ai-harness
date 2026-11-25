@@ -102,7 +102,11 @@ async def _converse(request: dict[str, Any], channel: _Channel) -> dict[str, Any
             await _talk(request, channel, state, outcome, scope)
         except Exception as exc:  # noqa: BLE001 - classified, never printed
             outcome["error_code"] = classify(exc, outcome["phase"], state)
-    if state.fault is not None:
+    if state.fault == "stderr_too_large" and "result" in outcome:
+        # The result was complete before the cap was passed: it stands. The server was stopped
+        # all the same, and the harness warns that its stderr was cut (D4, revised 2026-11-25).
+        pass
+    elif state.fault is not None:
         outcome["error_code"] = state.fault
         outcome["fault_bytes"] = state.fault_bytes
         outcome["fault_bytes_exact"] = state.fault_bytes_exact

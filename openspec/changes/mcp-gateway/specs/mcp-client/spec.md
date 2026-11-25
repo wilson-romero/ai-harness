@@ -142,6 +142,14 @@ El sistema SHALL rechazar unos argumentos de más de 16 KiB en JSON y un resulta
 - **WHEN** el servidor sintético escribe cientos de MiB en stderr durante la llamada
 - **THEN** su log guarda como mucho 1 MiB de esa sesión, la sesión termina con `stderr_too_large` y el servidor ya no existe
 
+#### Scenario: stderr ruidoso por debajo del corte
+- **WHEN** el servidor sintético escribe 8 MiB en stderr y después contesta la llamada
+- **THEN** la llamada queda `completed`, el log guarda 1 MiB y una línea con los bytes descartados, y stderr del harness avisa de que solo se guardó el primer MiB
+
+#### Scenario: stderr sin fin después de la respuesta
+- **WHEN** el servidor sintético contesta la llamada y, al cerrarse su entrada, escribe cientos de MiB en stderr
+- **THEN** el resultado se imprime, la llamada queda `completed` con el servidor parado y stderr del harness avisa de que el stderr del servidor se cortó
+
 #### Scenario: Log del servidor privado
 - **WHEN** en macOS o Linux un servidor escribe en stderr
 - **THEN** su log tiene permisos `0600` y la carpeta de logs `0700`

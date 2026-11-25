@@ -31,6 +31,8 @@ from tests.mcp_support import (
     REPO_ROOT,
     child_env,
     hang_guard,  # noqa: F401 - fixture
+    heartbeat_alive,
+    heartbeat_stopped,
     result_lines,
     run_bounded,
     run_main_bounded,
@@ -41,19 +43,10 @@ AUDIT_SITE = REPO_ROOT / "tests" / "fixtures" / "mcp" / "audit_site"
 OWNER_ONLY = hasattr(os, "getuid")  # POSIX permission bits mean something here
 
 
-def beat_stopped(path: Path, within_s: float = 3.0) -> bool:
-    """A heartbeat file that has not changed for 0.5 s (or never existed)."""
-    if not path.exists():
-        return True
-    deadline = time.monotonic() + within_s
-    previous = path.read_text(encoding="utf-8")
-    while time.monotonic() < deadline:
-        time.sleep(0.5)
-        current = path.read_text(encoding="utf-8")
-        if current == previous:
-            return True
-        previous = current
-    return False
+def beat_stopped(path: Path) -> bool:
+    """A heartbeat that existed and then stayed still (see `tests.mcp_support`)."""
+    assert path.exists(), f"{path.name} never beat: the test would prove nothing"
+    return heartbeat_stopped(path)
 
 
 def kill_logged(path: Path) -> None:
@@ -169,15 +162,51 @@ def test_a_live_call_is_never_recovered_as_stale(ws, data_dir, tmp_path):  # noq
 # -- 2. the server's stderr is bounded and private ---------------------------------------------
 
 
+KEEP = 1024 * 1024  # transport.STDERR_KEEP_BYTES
+COUNT_LINE = 512  # the one line that says how many bytes were dropped
+
+
 def test_a_server_flooding_stderr_is_capped_and_stopped(mcp, ws, data_dir):  # noqa: F811
-    server = ws.server("stderr-flood", call=10)
+    """The server writes 256 MiB on stderr before it answers (in the same thread), so the
+    64 MiB cap is passed before any answer can exist: the only outcome is the cap."""
+    server = ws.server("stderr-flood", call=60)
     code, out, err, _ = mcp("call", "synthetic", "get_project_metadata", "--args", ALPHA)
     log = data_dir / "logs" / "mcp" / "synthetic.stderr.log"
-    size = log.stat().st_size
-    assert size <= 1024 * 1024 + 512, size  # client.STDERR_KEEP_BYTES
-    assert code == 1 and "stderr_too_large" in err, err
+    assert log.stat().st_size <= KEEP + COUNT_LINE, log.stat().st_size
+    assert code == 1 and "stderr_too_large" in err and out == "", err
     row = rows(data_dir)[0]
     assert (row["status"], row["error_code"]) == ("failed", "stderr_too_large")
+    assert server.calls() == ["call get_project_metadata"]
+    assert server.stopped()
+
+
+def test_a_noisy_server_that_answers_completes_with_its_stderr_cut(mcp, ws, data_dir):  # noqa: F811
+    """8 MiB on stderr, then the answer: over what the log keeps, under the cap."""
+    server = ws.server("stderr-noisy", call=60)
+    code, out, err, _ = mcp("call", "synthetic", "get_project_metadata", "--args", ALPHA)
+    assert code == 0, err
+    assert json.loads(result_lines(out))["name"] == "Demo Alpha"
+    assert "the server wrote 8388608 bytes on stderr; only the first 1048576 were kept" in err
+    log = (data_dir / "logs" / "mcp" / "synthetic.stderr.log").read_bytes()
+    assert KEEP < len(log) <= KEEP + COUNT_LINE
+    assert b"7340032 more bytes of stderr were dropped" in log
+    assert rows(data_dir)[0]["status"] == "completed"
+    assert server.stopped()
+
+
+def test_a_flood_after_the_answer_keeps_the_result(mcp, ws, data_dir):  # noqa: F811
+    """The answer is complete before the first byte of the flood (which starts only when the
+    harness closes the server's input): the result stands, the server is stopped, and the
+    harness warns that the stderr was cut. Specified in D4 as revised on 2026-11-25."""
+    server = ws.server("stderr-after-answer", call=60)
+    code, out, err, _ = mcp("call", "synthetic", "get_project_metadata", "--args", ALPHA)
+    assert code == 0, err
+    assert json.loads(result_lines(out))["name"] == "Demo Alpha"
+    assert "bytes on stderr; only the first 1048576 were kept" in err
+    assert (data_dir / "logs" / "mcp" / "synthetic.stderr.log").stat().st_size <= (
+        KEEP + COUNT_LINE)
+    row = rows(data_dir)[0]
+    assert (row["status"], row["error_code"], row["server_stopped"]) == ("completed", None, 1)
     assert server.stopped()
 
 
@@ -213,7 +242,7 @@ def test_a_grandchild_in_its_own_session_escapes_as_documented(mcp, ws, data_dir
     try:
         code, _, err, _ = mcp("call", "synthetic", "get_project_metadata", "--args", ALPHA)
         assert code == 0, err
-        assert not beat_stopped(server.state / "heartbeat-escaped", within_s=1.5)
+        assert heartbeat_alive(server.state / "heartbeat-escaped")
     finally:
         kill_logged(server.state / "starts.log")
     assert beat_stopped(server.state / "heartbeat-escaped")
