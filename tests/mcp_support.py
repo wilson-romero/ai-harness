@@ -28,6 +28,11 @@ from tests.conftest import HARNESS_VARS, REPO_ROOT
 SERVER = REPO_ROOT / "tests" / "fixtures" / "mcp" / "synthetic_server.py"
 PROJECT_ARG = {"type": "string", "max_length": 64, "pattern": "[a-z0-9][a-z0-9-]*",
                "required": True}
+# An absolute program path that is valid on every platform. A literal such as
+# "/opt/x/server" is absolute on POSIX only: on Windows it has no drive, the allowlist
+# rejects it and the module fails at import time.
+ABSOLUTE_PROGRAM = sys.executable
+
 DEFAULT_TOOLS = {
     "get_project_metadata": {"operation": "read", "arguments": {"project": PROJECT_ARG}},
     "set_project_metadata": {
