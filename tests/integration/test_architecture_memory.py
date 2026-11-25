@@ -486,3 +486,45 @@ def test_the_effect_on_a_step_that_is_not_an_approval_is_invalid(tmp_path):
     path.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(InvalidSkill):
         load_skill(root, "architecture-memory", default_effects().keys())
+
+
+# -- 7.1 a temporary file that cannot be removed after the link -----------------------------------
+
+
+def test_a_temporary_file_held_open_after_the_link_is_reconciled_not_lost(conn, data_dir, vault,
+                                                                          monkeypatch):
+    """The note is published but its temporary file cannot be removed (a sync client or an
+    antivirus holds it on Windows): the run is `uncertain`, never `failed`, and `resume`
+    finishes the cleanup so that the memory sees the note."""
+    import os
+
+    from harness.memory import decisions
+
+    real = os.unlink
+    held = {"on": True}
+
+    def unlink(path, *args, **kwargs):
+        if held["on"] and os.path.basename(os.fspath(path)).startswith(decisions.TEMP_PREFIX):
+            raise PermissionError("the file is in use by another process")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(decisions.os, "unlink", unlink)
+    terminal = ApprovingTerminal()
+    engine, sessions, _ = engine_for(conn, data_dir, vault, terminal=terminal)
+    outcome = run(engine, sessions.create_session("Demo", "demo-alpha"))
+    assert outcome.status == "uncertain", outcome.message
+    target = shown_target(terminal)
+    assert (vault / target).read_bytes() == shown_note(terminal).encode("utf-8")
+    assert target not in build_context(vault.resolve(), "demo-alpha", 64_000).text
+    # Still held: `resume` refuses with a message about the temporary file and changes nothing.
+    with pytest.raises(Exception) as caught:
+        resume(engine, outcome.run_id)
+    assert "temporary" in str(caught.value)
+    assert one(conn, "SELECT status FROM skill_runs") == ("uncertain",)
+    held["on"] = False
+    finished = resume(engine, outcome.run_id)
+    assert finished.status == "completed", finished.message
+    temps = [p.name for p in (vault / "Decisiones").iterdir() if p.name.startswith(".")]
+    assert temps == []
+    assert target.split("/")[-1] in build_context(vault.resolve(), "demo-alpha", 64_000).text
+    assert one(conn, "SELECT count(*) FROM approvals") == (1,)

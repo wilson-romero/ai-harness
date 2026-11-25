@@ -54,6 +54,11 @@ class DecisionRefused(Exception):
         self.code = code
 
 
+class DecisionUncertain(Exception):
+    """The note may be published: the link was created, or may have been, and something after
+    it failed. Never a refusal: the engine leaves the step `uncertain` and `reconcile` decides."""
+
+
 @dataclass(frozen=True)
 class DecisionFields:
     """The validated decision, already cleaned and redacted by the caller."""
@@ -332,16 +337,25 @@ def write_decision(root: Path, name: str, data: bytes, temp_name: str, ident: st
     identity = _write_temp(temp, data)
     try:
         _publish(root, temp, target, identity)
-    finally:
-        _drop_temp(temp)
+    except (DecisionRefused, DecisionUncertain):
+        _drop_temp(temp)  # never raises; a temporary file left behind is reconcile's
+        raise
+    if not _drop_temp(temp):
+        # Published, but with two links the memory skips the note: `reconcile` retries.
+        raise DecisionUncertain(
+            f"the note is published but its temporary file {DECISIONS_DIR}/{temp_name} cannot be "
+            "removed (another program may hold it open)")
     return f"{DECISIONS_DIR}/{name}"
 
 
 def reconcile_decision(root: Path, ident: str, content_sha256: str, temp_name: str) -> str:
-    """`applied`, `absent` or `conflict` for an interrupted write. Writes nothing.
+    """`applied`, `absent`, `conflict` or `blocked` for an interrupted write. Writes nothing.
 
     Removes this step's own temporary file first: after a death between the link and the
-    removal, the note has two hard links and is invisible to the memory until then.
+    removal, the note has two hard links and is invisible to the memory until then. If that
+    file is still there and cannot be removed (another program holds it, or something that is
+    not a regular file took its name), the answer is `blocked`: nothing can be said to be
+    finished, and a later call tries again.
     """
     if not is_decision_id(ident):
         return "conflict"
@@ -351,8 +365,8 @@ def reconcile_decision(root: Path, ident: str, content_sha256: str, temp_name: s
         return "conflict"
     if folder is None:
         return "absent"
-    if is_safe_file_name(temp_name) and temp_name.startswith(TEMP_PREFIX):
-        _drop_temp(folder / temp_name)
+    if not _drop_temp(folder / temp_name):
+        return "blocked"
     found = find_decision_notes(folder, ident)
     if not found:
         return "absent"
@@ -404,28 +418,53 @@ def _publish(root: Path, temp: Path, target: Path, identity: tuple[int, int]) ->
         raise DecisionRefused(
             "write_failed", "the note cannot be published (the file system must allow hard links)"
         ) from None
+    # The link exists from here on: the outcome is "published" or "cannot tell", never a
+    # refusal, unless the note is taken back out (architecture-skills-llm, 7.1).
     try:
         info = target.lstat()
         real = target.resolve(strict=True)
     except OSError:
-        raise DecisionRefused("write_failed", "the published note cannot be checked") from None
-    ours = (info.st_dev, info.st_ino) == identity
-    if ours and real.parent != root / DECISIONS_DIR:
+        raise DecisionUncertain("the published note cannot be checked") from None
+    if (info.st_dev, info.st_ino) != identity:
+        raise DecisionUncertain("the published name is not the file written")
+    if real.parent != root / DECISIONS_DIR:
         # Decisiones/ was swapped for a link after it was checked: take our file back out.
+        _take_back(target)
+
+
+def _take_back(target: Path) -> None:
+    """Remove the name just published (checked to be our file) and refuse the write."""
+    try:
         os.unlink(target)
-        raise DecisionRefused("unsafe_target", f"{DECISIONS_DIR}/ changed during the write")
-    if not ours:
-        raise DecisionRefused("write_failed", "the published note is not the file written")
+    except OSError:
+        raise DecisionUncertain(f"{DECISIONS_DIR}/ changed during the write and the note "
+                                "could not be taken back") from None
+    raise DecisionRefused("unsafe_target", f"{DECISIONS_DIR}/ changed during the write")
 
 
-def _drop_temp(temp: Path) -> None:
-    """Remove a temporary file of ours: only a regular file, never through a link."""
+def _drop_temp(temp: Path) -> bool:
+    """Remove a temporary file of ours; True when none is left at that name. Never raises.
+
+    Only a name of the harness's temporary form, only a regular file, never through a link.
+    Something else at that name, or a file that cannot be removed now (held open by another
+    program), gives False and stays.
+    """
+    name = temp.name
+    if not (name.startswith(TEMP_PREFIX) and name.endswith(TEMP_SUFFIX)
+            and is_safe_file_name(name)):
+        return False
     try:
         info = temp.lstat()
+    except FileNotFoundError:
+        return True
     except OSError:
-        return
-    if stat.S_ISREG(info.st_mode) and not temp.is_symlink():
-        try:
-            os.unlink(temp)
-        except FileNotFoundError:
-            pass
+        return False
+    if not stat.S_ISREG(info.st_mode) or temp.is_symlink():
+        return False
+    try:
+        os.unlink(temp)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True

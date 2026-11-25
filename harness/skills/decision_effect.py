@@ -25,6 +25,7 @@ from harness.memory.decisions import (
     ID_PREFIX,
     DecisionFields,
     DecisionRefused,
+    DecisionUncertain,
     Provenance,
     decision_file_name,
     decision_id,
@@ -41,7 +42,14 @@ from harness.memory.paths import resolve_project
 from harness.memory.safe_text import safe_line
 from harness.skills.approvals import Proposal, normalise_content
 from harness.skills.checks import parse_fields
-from harness.skills.effects import EffectBusy, EffectContext, EffectRefused, Prepared, Reconciled
+from harness.skills.effects import (
+    EffectBusy,
+    EffectContext,
+    EffectRefused,
+    EffectUncertain,
+    Prepared,
+    Reconciled,
+)
 from harness.storage.locks import NamedLock
 
 LOCK_NAME = "vault-decisions"
@@ -124,8 +132,10 @@ class DecisionEffect:
         try:
             write_decision(root, name, proposal.content.encode("utf-8"),
                            temp_name_for(context.run_id, context.step), ident)
-        except DecisionRefused as refused:
+        except DecisionRefused as refused:  # raised only while nothing is published
             raise EffectRefused(refused.code, str(refused)) from None
+        except DecisionUncertain as uncertain:  # the note may be published: reconcile decides
+            raise EffectUncertain(str(uncertain)) from None
 
     def reconcile(
         self, context: EffectContext, effect_ref: str | None, content_sha256: str
@@ -133,8 +143,16 @@ class DecisionEffect:
         if effect_ref is None or not is_decision_id(effect_ref):
             return "conflict"
         root = self._root()
-        result = reconcile_decision(root, effect_ref, content_sha256,
-                                    temp_name_for(context.run_id, context.step))
+        temp_name = temp_name_for(context.run_id, context.step)
+        result = reconcile_decision(root, effect_ref, content_sha256, temp_name)
+        if result == "blocked":
+            raise EffectRefused(
+                "temp_not_removed",
+                f"the temporary file {DECISIONS_DIR}/{temp_name} of this step cannot be removed "
+                "(another program, such as a sync client or an antivirus, may hold it open); "
+                "until it is gone the memory does not read the note. Close that program and run "
+                "`skill resume` again",
+            )
         assert result in ("applied", "absent", "conflict")
         return result  # type: ignore[return-value]
 

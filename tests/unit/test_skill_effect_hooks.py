@@ -182,3 +182,29 @@ def test_string_min_length(value, ok):
     if not ok:
         assert result.error_code in ("validation_failed:min_length:title",
                                      "validation_failed:max_length:title")
+
+
+# -- 7.1 an unexpected exception from `apply` leaves the step uncertain -------------------------
+
+
+class WritesThenFails(WriteEffect):
+    """Writes its file, then fails as a sync client holding the temporary file would."""
+
+    def apply(self, context, proposal):
+        super().apply(context, proposal)
+        raise PermissionError("the temporary file is in use by another process")
+
+
+def test_an_unexpected_exception_in_apply_leaves_the_step_uncertain(conn, data_dir, tmp_path):
+    effect = WritesThenFails(tmp_path / "salida")
+    engine, sessions, _ = _engine(conn, data_dir, tmp_path, effect, ApprovingTerminal())
+    outcome = _run(engine, sessions.create_session("Demo"))
+    assert outcome.status == "uncertain", outcome.message
+    assert "skill resume" in outcome.message
+    assert tuple(_one(conn, "SELECT status, error_code FROM skill_steps WHERE kind = 'approval'")
+                 ) == ("uncertain", "effect_uncertain")
+    assert tuple(_one(conn, "SELECT status FROM approvals")) == ("consumed",)
+    # `resume` reconciles: the content is in place, so the step completes without a second write.
+    outcome = _resume(engine, outcome.run_id)
+    assert outcome.status == "completed", outcome.message
+    assert len(effect.written()) == 1

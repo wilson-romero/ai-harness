@@ -23,7 +23,9 @@ class EffectRefused(HarnessError):
     """A controlled refusal of `prepare` or `apply` (architecture-skills-llm D11).
 
     From `prepare`: the step and the run fail with `code` before any approval is asked. From
-    `apply`: the step fails with `code`; the approval was consumed and is not usable again.
+    `apply`: only before any side effect (revised 2026-11-25, independent review); the step
+    fails with `code` and the approval, already consumed, is not usable again. From
+    `reconcile`: the step stays `uncertain` and `resume` stops with this message.
     """
 
     def __init__(self, code: str, message: str) -> None:
@@ -33,6 +35,11 @@ class EffectRefused(HarnessError):
 
 class EffectBusy(HarnessError):
     """The effect's exclusive section is taken: nothing was consumed or applied."""
+
+
+class EffectUncertain(HarnessError):
+    """`apply` may have had its side effect and cannot tell. The engine treats it, and any
+    exception from `apply` other than `EffectRefused`, as `uncertain`: `reconcile` decides."""
 
 
 @dataclass(frozen=True)
@@ -67,7 +74,10 @@ class Effect(Protocol):
     `apply` gets the `Proposal` whose hash was approved and consumed: its `content` and `target`
     are exactly the ones shown and hashed, never a second `prepare` (review 8.3, 2026-11-24).
     `reconcile` answers, after an interruption, whether the content with that SHA-256 is already
-    in place (`applied`), not there at all (`absent`) or something else is there (`conflict`).
+    in place (`applied`), not there at all (`absent`) or something else is there (`conflict`);
+    it may raise `EffectRefused` to say why it cannot answer yet (the step stays `uncertain`).
+    `apply` raises `EffectRefused` only before any side effect; any other exception means
+    "may have been applied" and leaves the step `uncertain` (2026-11-25, independent review).
     """
 
     scope: str

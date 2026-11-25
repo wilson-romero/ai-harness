@@ -711,18 +711,28 @@ class SkillEngine:
             )
         try:
             effect.apply(effect_context, proposal)
-        except EffectRefused as refused:  # a controlled refusal: nothing was applied
+        except EffectRefused as refused:  # raised only before any side effect: nothing applied
             with transaction(self._conn):
                 self._set_step(row, "failed", error_code=refused.code, finished=True)
                 self._finish_run_locked(state.run_id, state.session, "failed", refused.code)
             return RunOutcome(state.run_id, "failed",
                               message=f"the effect refused: {refused}; nothing was applied")
-        except Exception as exc:  # the effect failed: never retried by itself
+        except Exception as exc:
+            # Anything else may have happened after the side effect (2026-11-25, independent
+            # review): the step is `uncertain`, so that `resume` reconciles it; never `failed`,
+            # which nobody would look at again, and never applied a second time.
+            detail = str(exc) if isinstance(exc, HarnessError) else type(exc).__name__
             with transaction(self._conn):
-                self._set_step(row, "failed", error_code=f"effect_{type(exc).__name__}",
-                               finished=True)
-                self._finish_run_locked(state.run_id, state.session, "failed", "effect_failed")
-            return RunOutcome(state.run_id, "failed", message=f"the effect failed: {exc}")
+                self._set_step(row, "uncertain", error_code="effect_uncertain", finished=True)
+                self._set_run(state.run_id, "uncertain", error_code="effect_uncertain")
+                self._audit("skill.step", "uncertain", state.session, state.run_id,
+                            f"step={step.id};attempt={row['attempt']};"
+                            f"error={type(exc).__name__}")
+            return RunOutcome(
+                state.run_id, "uncertain",
+                message=f"the effect may have been applied ({detail}); nothing is applied "
+                f"twice: `skill resume {state.run_id}` checks the target and finishes the step",
+            )
         with transaction(self._conn):
             self._audit("effect.applied", "applied", state.session, state.run_id,
                         f"step={step.id};ref={proposed.effect_ref}")
@@ -745,8 +755,12 @@ class SkillEngine:
         effect = self._effects[step.effect]
         context = self._effect_context(state, step)
         expected = row["output_sha256"]
-        result = (effect.reconcile(context, row["effect_ref"], expected)
-                  if expected is not None else "conflict")
+        reason = None
+        try:
+            result = (effect.reconcile(context, row["effect_ref"], expected)
+                      if expected is not None else "conflict")
+        except EffectRefused as refused:  # the effect cannot answer yet: stays uncertain
+            result, reason = "conflict", f"{refused} ({refused.code})"
         detail = f"step={key};attempt={row['attempt']}"
         if result == "applied":
             stored = None
@@ -784,10 +798,13 @@ class SkillEngine:
             return
         with transaction(self._conn):
             self._audit("skill.step.reconciled", "conflict", state.session, state.run_id, detail)
+        if reason is not None:
+            raise InvalidInput(f"step {key!r} of run {state.run_id} is still uncertain: {reason}; "
+                               "nothing was applied again")
         raise InvalidInput(
             f"step {key!r} of run {state.run_id} was interrupted while applying its effect and "
             "the effect cannot tell whether it is in place (conflict): a person must check the "
-            f"target, then `skill cancel {state.run_id}`; nothing was applied again"
+            f"target, then `skill resume {state.run_id}` checks again; nothing was applied again"
         )
 
     def _revoke(

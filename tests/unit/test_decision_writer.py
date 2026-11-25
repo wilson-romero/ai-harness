@@ -195,3 +195,87 @@ def test_the_temporary_name_is_hidden_and_legal():
     assert TEMP.startswith(".harness-") and TEMP.endswith(".tmp")
     with pytest.raises(ValueError):
         temp_name_for("../x", "save")
+
+
+# -- 7.1 once the link exists the outcome is "applied" or "uncertain", never "failed" -----------
+
+
+def _temp_unlink_fails(monkeypatch):
+    """`os.unlink` of the harness's temporary file raises, as when another program (a sync
+    client, an antivirus) holds it open on Windows; any other unlink works."""
+    real = os.unlink
+
+    def unlink(path, *args, **kwargs):
+        if os.path.basename(os.fspath(path)).startswith(decisions.TEMP_PREFIX):
+            raise PermissionError("the file is in use by another process")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(decisions.os, "unlink", unlink)
+
+
+def test_a_temporary_file_that_cannot_be_removed_after_the_link_is_uncertain(vault, monkeypatch):
+    _temp_unlink_fails(monkeypatch)
+    with pytest.raises(decisions.DecisionUncertain):
+        write_decision(_root(vault), NAME, NOTE, TEMP, IDENT)
+    folder = vault / "Decisiones"
+    assert (folder / NAME).read_bytes() == NOTE and (folder / TEMP).exists()
+    # The note is published with two links: the memory skips it until reconciled.
+    assert (f"Decisiones/{NAME}", "hard-link") in walk_vault(_root(vault)).skipped
+    # While the temporary file still cannot be removed, reconcile says so and changes nothing.
+    assert reconcile_decision(_root(vault), IDENT, SHA, TEMP) == "blocked"
+    monkeypatch.undo()
+    assert reconcile_decision(_root(vault), IDENT, SHA, TEMP) == "applied"
+    assert not (folder / TEMP).exists() and os.lstat(folder / NAME).st_nlink == 1
+    assert any(f.relative == f"Decisiones/{NAME}" for f in walk_vault(_root(vault)).files)
+
+
+def test_a_published_note_that_cannot_be_checked_is_uncertain(vault, monkeypatch):
+    real = decisions.Path.lstat
+    calls = []
+
+    def lstat(self, *args, **kwargs):
+        if self.name == NAME:
+            calls.append(self)
+            if len(calls) > 1:  # the first one is the check that the name is free
+                raise PermissionError("cannot be read now")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(decisions.Path, "lstat", lstat)
+    with pytest.raises(decisions.DecisionUncertain):
+        write_decision(_root(vault), NAME, NOTE, TEMP, IDENT)
+    monkeypatch.undo()
+    assert (vault / "Decisiones" / NAME).read_bytes() == NOTE
+
+
+def test_a_published_name_that_is_not_the_file_written_is_uncertain(vault, monkeypatch):
+    """The identity check after the link: whatever got the name is not reported as ours."""
+
+    def link_writes_another_file(src, dst, **kwargs):
+        with open(dst, "xb") as handle:
+            handle.write(b"otro fichero\n")
+
+    monkeypatch.setattr(decisions.os, "link", link_writes_another_file)
+    with pytest.raises(decisions.DecisionUncertain):
+        write_decision(_root(vault), NAME, NOTE, TEMP, IDENT)
+    monkeypatch.undo()
+    assert (vault / "Decisiones" / NAME).read_bytes() == b"otro fichero\n"
+    assert reconcile_decision(_root(vault), IDENT, SHA, TEMP) == "absent"
+
+
+def test_decisiones_swapped_for_a_link_during_the_write_takes_the_note_back(vault, monkeypatch):
+    """Between the checks and the link, `Decisiones/` becomes a link to another folder: the note
+    published there is removed again and the write is refused."""
+    folder = vault / "Decisiones"
+    moved = vault / "Movida"
+    real_link = os.link
+
+    def swap_then_link(src, dst, **kwargs):
+        folder.rename(moved)
+        make_symlink(folder, moved)
+        return real_link(src, dst, **kwargs)
+
+    monkeypatch.setattr(decisions.os, "link", swap_then_link)
+    with pytest.raises(DecisionRefused) as caught:
+        write_decision(_root(vault), NAME, NOTE, TEMP, IDENT)
+    assert caught.value.code == "unsafe_target"
+    assert not (moved / NAME).exists() and not (moved / TEMP).exists()

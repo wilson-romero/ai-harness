@@ -84,7 +84,7 @@ Dos procesos del harness SHALL NOT escribir decisiones en el mismo vault a la ve
 - **THEN** la escritura falla con un error controlado, la aprobación sigue `granted` y el vault queda intacto
 
 ### Requirement: Escritura interrumpida se reconcilia sin repetir
-Si el proceso muere después de consumir la aprobación y antes de registrar el final de la escritura, el paso SHALL quedar `uncertain`. Al reanudar, el sistema SHALL comprobar el vault sin escribir: si existe la nota con ese identificador y los bytes aprobados, el paso se completa; si no existe, se pide una aprobación nueva; si existe con otros bytes, el paso SHALL seguir `uncertain` y `resume` SHALL negarse con código 1 sin escribir nada, para que una persona revise el vault.
+Si el proceso muere después de consumir la aprobación y antes de registrar el final de la escritura, el paso SHALL quedar `uncertain`. Una vez creado el enlace de la nota, el resultado SHALL ser «escrita» o `uncertain`, nunca `failed`: un fallo posterior (comprobar la nota publicada, borrar el temporal) deja el paso `uncertain`. Mientras el temporal propio siga sin poder borrarse, la reconciliación SHALL dejar el paso `uncertain` y `resume` SHALL negarse con código 1 diciéndolo, porque la nota con dos enlaces no la lee la memoria. Al reanudar, el sistema SHALL comprobar el vault sin escribir: si existe la nota con ese identificador y los bytes aprobados, el paso se completa; si no existe, se pide una aprobación nueva; si existe con otros bytes, el paso SHALL seguir `uncertain` y `resume` SHALL negarse con código 1 sin escribir nada, para que una persona revise el vault.
 
 #### Scenario: Muerte tras el renombrado
 - **WHEN** el proceso muere justo después de publicar la nota (con el temporal todavía presente o ya borrado) y se reanuda la ejecución
@@ -93,6 +93,10 @@ Si el proceso muere después de consumir la aprobación y antes de registrar el 
 #### Scenario: Muerte antes del renombrado
 - **WHEN** el proceso muere después de consumir la aprobación y antes de publicar la nota (con o sin temporal escrito), y se reanuda en una terminal
 - **THEN** se pide una aprobación nueva para los mismos bytes y solo con ella se escribe la nota
+
+#### Scenario: Temporal retenido tras publicar
+- **WHEN** la nota se publica pero su temporal no se puede borrar porque otro programa lo tiene abierto
+- **THEN** la ejecución queda `uncertain` (no `failed`), `resume` termina con código 1 nombrando el temporal mientras siga retenido, y cuando se libera `resume` lo borra, completa el paso sin escribir otra vez y la nota aparece en `memory context`
 
 #### Scenario: Nota distinta con el mismo identificador
 - **WHEN** al reconciliar existe una nota con ese identificador y otro contenido
