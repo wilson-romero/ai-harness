@@ -22,6 +22,7 @@ KEY_BYTES = 32
 # 2026-11-24): the same arguments give the same digest here, so repeated calls can be told
 # apart, but a guessable argument (a project slug) cannot be confirmed by hashing guesses.
 ARGS_KEY = Path("keys") / "mcp-args.key"
+KEY_LOCK_WAIT_S = 10.0
 
 
 def stored_name(text: str) -> str:
@@ -46,19 +47,50 @@ def call_lock(data_dir: Path, call_id: str) -> NamedLock:
 
 def args_key(data_dir: Path) -> bytes:
     """The installation's key for argument digests: created once, readable by its owner only,
-    never printed."""
+    never printed.
+
+    A key file of the wrong length (v0.2.0 on Windows wrote one in about eight with b"\\n"
+    turned into b"\\r\\n") is set aside as `mcp-args.key.damaged-<random>` and replaced
+    (hotfix 0.2.1). No digest was ever computed with such a key, because every read checks the
+    length, so no stored digest changes meaning; the old file is kept, not deleted.
+    """
     path = data_dir / ARGS_KEY
-    try:
-        key = path.read_bytes()
-        if len(key) == KEY_BYTES:
-            return key
-    except FileNotFoundError:
-        pass
+    key = _read_key(path)
+    if key is not None and len(key) == KEY_BYTES:
+        return key
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if hasattr(os, "getuid"):
         os.chmod(path.parent, 0o700)
+    lock = NamedLock(data_dir, "mcp-args-key")
+    if not lock.acquire(wait_s=KEY_LOCK_WAIT_S):
+        raise OSError("the MCP argument key is busy")
+    try:
+        key = _read_key(path)
+        if key is not None and len(key) == KEY_BYTES:
+            return key
+        if key is not None:
+            path.rename(path.with_name(f"{path.name}.damaged-{secrets.token_hex(8)}"))
+        _create_key(path)
+    finally:
+        lock.release()
+    key = path.read_bytes()
+    if len(key) != KEY_BYTES:
+        raise OSError("the MCP argument key is damaged")
+    return key
+
+
+def _read_key(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _create_key(path: Path) -> None:
     temporary = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    # O_BINARY: in text mode Windows writes each b"\\n" of the key as b"\\r\\n".
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(temporary, flags, 0o600)
     try:
         os.write(descriptor, secrets.token_bytes(KEY_BYTES))
     finally:
@@ -69,10 +101,6 @@ def args_key(data_dir: Path) -> bytes:
         pass
     finally:
         os.unlink(temporary)
-    key = path.read_bytes()
-    if len(key) != KEY_BYTES:
-        raise OSError("the MCP argument key is damaged")
-    return key
 
 
 def record_denied(
