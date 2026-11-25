@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import warnings
 from pathlib import Path
 
 import pytest
@@ -168,17 +169,41 @@ def test_without_git_a_work_tree_is_refused(cli, repo, state, monkeypatch):
     assert code == 1 and "Git is not available" in err
 
 
-def test_a_file_swapped_after_the_check_is_not_read(cli, tmp_path, state, monkeypatch):
+@pytest.mark.parametrize("system", ["as_is", "replace_refused"])
+def test_a_file_swapped_after_the_check_is_not_read(cli, tmp_path, state, monkeypatch, system):
+    """Revised on 2026-11-25 (hotfix 0.2.1): Windows does not let a file that is open be
+    replaced (`PermissionError`, WinError 5), so there the swap cannot happen at all. The test
+    tries it; when the system refuses it, the property that holds is asserted instead: the
+    configuration read is the one that was checked. `replace_refused` simulates that refusal
+    on any system, so both branches run everywhere."""
     path = _config(tmp_path, state)
     other = tmp_path / "other.json"
     other.write_text(json.dumps({"format": "ai-harness/mcp/1", "servers": {}}), encoding="utf-8")
+    checked = path.read_bytes()
+    swapped: list[bool] = []
 
     def swap(target: Path) -> None:
-        other.replace(target)  # what an attacker would do between the check and the read
+        try:
+            if system == "replace_refused":
+                raise PermissionError(13, "simulated: an open file cannot be replaced")
+            other.replace(target)  # what an attacker would do between the check and the read
+        except PermissionError:
+            swapped.append(False)
+        else:
+            swapped.append(True)
 
     monkeypatch.setattr(config_module, "ensure_not_versionable", swap)
     code, out, err = cli("mcp", "list", HARNESS_MCP_CONFIG=str(path))
-    assert code == 1 and "changed while it was read" in err
+    assert len(swapped) == 1
+    if swapped[0]:
+        assert code == 1 and "changed while it was read" in err
+        return
+    if system == "as_is":
+        warnings.warn("this system refuses to replace an open file: the swap could not be "
+                      "made, so the checked file is what was read", stacklevel=1)
+    assert path.read_bytes() == checked
+    assert code == 0, err
+    assert "synthetic" in out  # the checked configuration, not the empty one
 
 
 # -- who can write the allowlist (independent review of 2026-11-24, finding 5) ------------------
