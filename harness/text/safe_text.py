@@ -21,6 +21,31 @@ OPEN_DELIMITER, OPEN_REPLACEMENT = "<<<", "‹‹‹"
 CLOSE_DELIMITER, CLOSE_REPLACEMENT = ">>>", "›››"
 
 
+# ECMA-48 escape sequences as a whole (independent review of 2026-11-24). Dropping only the
+# ESC character leaves the rest (`[31m`, `(B`, `7`) glued to what follows, and a credential
+# right after it then has no word boundary and escapes redaction. Recognised, in 7-bit form
+# (ESC + byte) and, where one exists, in 8-bit C1 form:
+# - CSI `ESC [` / 0x9B: parameter bytes 0x30-0x3F, intermediate 0x20-0x2F, final 0x40-0x7E;
+# - control strings OSC `ESC ]` / 0x9D, DCS `ESC P` / 0x90, SOS `ESC X` / 0x98, PM `ESC ^` /
+#   0x9E and APC `ESC _` / 0x9F, up to BEL, `ESC \` or ST 0x9C (or the end of the text);
+# - nF `ESC` + intermediates 0x20-0x2F + one final 0x30-0x7E (`ESC ( B`);
+# - two-byte Fp, Fe and Fs escapes `ESC` + 0x30-0x7E (`ESC 7`, `ESC D`, `ESC c`).
+# Every part is a run over one character class, the classes that follow each other are
+# disjoint and every part after the introducer is optional, so a match never backtracks:
+# the substitution is linear in the length of the text (measured at 1 MiB in the tests).
+_ESCAPE_SEQUENCE = re.compile(
+    r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]?"
+    r"|(?:\x1b[\]PX^_]|[\x90\x98\x9d\x9e\x9f])[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)?"
+    r"|\x1b[ -/]+[0-~]?"
+    r"|\x1b[0-~]"
+)
+
+
+def drop_escape_sequences(text: str) -> str:
+    """Remove whole terminal escape sequences; the cleaning functions below call it first."""
+    return _ESCAPE_SEQUENCE.sub("", text)
+
+
 def terminal_safe(text: str) -> str:
     """One line of text: no control (Cc), format (Cf) or line separator characters.
 
@@ -28,7 +53,7 @@ def terminal_safe(text: str) -> str:
     ones. A tab becomes a space (it separates columns); a newline is dropped.
     """
     out = []
-    for char in text:
+    for char in drop_escape_sequences(text):
         if char == "\t":
             out.append(" ")
         elif unicodedata.category(char) in ("Cc", "Cf") or char in _LINE_SEPARATORS:
@@ -40,7 +65,8 @@ def terminal_safe(text: str) -> str:
 
 def strip_controls(text: str) -> str:
     """`terminal_safe` line by line: the same, keeping the `\\n` line ends."""
-    return "\n".join(terminal_safe(line) for line in text.split("\n"))
+    # Sequences go before the split, so that one spanning lines is removed whole.
+    return "\n".join(terminal_safe(line) for line in drop_escape_sequences(text).split("\n"))
 
 
 def safe_line(text: str) -> Redacted:
@@ -60,25 +86,13 @@ def neutralise_delimiters(text: str) -> str:
     )
 
 
-# ANSI/ECMA-48 control sequences as a whole: CSI (`ESC [ params intermediates final`) and OSC
-# (`ESC ] ... BEL` or `ESC ] ... ESC \`). Dropping only the ESC character, as `terminal_safe`
-# does, leaves `[31m` glued to what follows, and a credential right after a colour code would
-# then have no word boundary and escape redaction. The character classes of each part are
-# disjoint, so matching is linear; an unterminated OSC stops at the next ESC or BEL.
-_ESCAPE_SEQUENCE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?")
-
-
-def drop_escape_sequences(text: str) -> str:
-    """Remove whole terminal escape sequences (used before `safe_text` on tool results)."""
-    return _ESCAPE_SEQUENCE.sub("", text)
-
-
 def safe_foreign_line(text: str) -> Redacted:
-    """`safe_line` for text from outside the harness's control (tool results, server names,
-    requested names): whole escape sequences go first, so none can glue itself to a secret."""
-    return safe_line(drop_escape_sequences(text))
+    """`safe_line`, named for text from outside the harness's control (tool results, server
+    names, requested names). Since the review of 2026-11-24 every cleaning path drops whole
+    escape sequences, so this is the same function under the name its callers document."""
+    return safe_line(text)
 
 
 def safe_foreign_text(text: str) -> Redacted:
     """`safe_text` for text from outside the harness's control; see `safe_foreign_line`."""
-    return safe_text(drop_escape_sequences(text))
+    return safe_text(text)

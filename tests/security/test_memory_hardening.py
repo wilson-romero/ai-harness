@@ -419,3 +419,20 @@ def test_no_delimiter_survives_in_a_note(vault, label, text):
     inner = block.split("\n", 2)[2].rsplit("\n", 1)[0]  # without notice, opening, closing
     assert "<<<" not in inner and ">>>" not in inner
     assert block.count("<<<") == 1 and block.count(">>>") == 1
+
+
+@pytest.mark.parametrize("sequence", ["\x1b[31m", "\x1b(B\x1b[m"])
+def test_credential_glued_to_an_escape_sequence_is_masked(cli, vault, recorder, sequence):
+    """Independent review of 2026-11-24, finding 3: the vault path dropped only the ESC byte."""
+    token = SECRET_SAMPLES["github"]
+    write_note(vault, "Decisiones/alpha-color.md", f"acceso {sequence}{token} fin",
+               project_slug="demo-alpha")
+    code, out, err = cli("memory", "context", "demo-alpha", **_env(vault))
+    assert code == 0, err
+    assert token not in out and "[REDACTED:github]" in out and "[31m" not in out
+    code, out, _ = cli("memory", "search", "acceso", **_env(vault))
+    assert code == 0 and token not in out
+    session_id = _session(cli)
+    assert cli("ask", session_id, "pregunta", "--project", "demo-alpha", **_env(vault))[0] == 0
+    (sent,) = recorder.prompts
+    assert token not in sent and "[REDACTED:github]" in sent
