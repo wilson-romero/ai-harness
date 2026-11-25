@@ -161,12 +161,22 @@ def approval_header(proposal: Proposal, approval_hash: str, expires_at: str,
     ]
 
 
-def decide(terminal: Terminal, shown: str, approval_hash: str) -> Decision:
+REJECT_WORD = "reject"
+CONFIRM_QUESTION = (f"Type {REJECT_WORD} to confirm the rejection; anything else leaves the "
+                    "approval pending: ")
+
+
+def decide(terminal: Terminal, shown: str, approval_hash: str, *,
+           confirm_rejection: bool = False) -> Decision:
     """Show the proposal and ask for the code, at most MAX_ATTEMPTS times.
 
     The question blocks the session (its lock is held) until the person answers or closes the
     input; there is no timer, because a bounded wait would need platform code or a thread that
     outlives the command. The caller checks the expiry after the answer (review 8.8).
+
+    `confirm_rejection` (the conversation, interactive-shell D8, decided by Wilson on
+    2026-11-25): after `n`, the word REJECT_WORD typed in full confirms the rejection; any other
+    answer leaves the approval undecided (pending), so that an `n` typed ahead cannot reject.
     """
     terminal.show(shown)
     code = approval_hash[:CODE_LENGTH]
@@ -177,7 +187,13 @@ def decide(terminal: Terminal, shown: str, approval_hash: str) -> Decision:
             return "undecided"
         answer = answer.strip().lower()
         if answer == "n":
-            return "rejected"
+            if not confirm_rejection:
+                return "rejected"
+            confirmation = terminal.ask(CONFIRM_QUESTION)
+            if confirmation is not None and confirmation.strip() == REJECT_WORD:
+                return "rejected"
+            terminal.show("Not confirmed: the approval stays pending; nothing was rejected.")
+            return "undecided"
         if answer == code:
             return "granted"
         terminal.show("That is not the start of the hash shown above.")

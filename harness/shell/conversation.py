@@ -92,7 +92,8 @@ a question that begins with /):
   /file PATH            attach a text file to the next question (it is never stored)
   /exit                 leave (end of input leaves too)
 Ctrl+C interrupts a question in progress; it is never resent. Ctrl+C at the approval prompt
-leaves the approval undecided."""
+leaves the approval undecided. At that prompt, n asks for the word reject to confirm; any other
+answer leaves the approval pending."""
 
 
 def terminal_columns() -> int:
@@ -716,6 +717,7 @@ class Conversation:
             progress=lambda message: self._say(f"skill: {safe_line(message).text}"),
             held_session=self._session_id,
             render_approval=self._render_approval,
+            confirm_rejection=True,
             **dict(self._deps.engine_options or {}),
         )
         self._skill_report(await engine.run(name, str(self._session_id), inputs))

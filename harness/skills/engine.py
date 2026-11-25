@@ -179,7 +179,11 @@ class SkillEngine:
         busy_retry_s: float = BUSY_RETRY_S,
         held_session: UUID | None = None,
         render_approval: Callable[[Proposal, str, str, int], str] | None = None,
+        confirm_rejection: bool = False,
     ) -> None:
+        # The conversation asks for the word `reject` after `n` (interactive-shell D8, decided
+        # by Wilson on 2026-11-25); `skill run` and `skill resume` keep `n` alone.
+        self._confirm_rejection = confirm_rejection
         # How the approval notice is printed: `render_for_terminal` unless a conversation shows
         # it with its own marks (interactive-shell D9, 2026-11-25). What is hashed never depends
         # on it: the hash is the proposal's.
@@ -678,6 +682,7 @@ class SkillEngine:
                 self._render_approval(proposal, proposal_hash, live["expires_at"],
                                       proposed.redactions),
                 proposal_hash,
+                confirm_rejection=self._confirm_rejection,
             )
             decided = utc_iso(self._clock())
             if decision == "undecided":

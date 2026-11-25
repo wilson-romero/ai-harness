@@ -8,6 +8,7 @@ tests are skipped with that reason (the same code runs there: see the manual dem
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -15,6 +16,7 @@ import time
 import pytest
 
 from tests.conftest import REPO_ROOT, query, run_main, subprocess_env, wait_for_running
+from tests.skill_support import FIXTURES, GOOD_ECHO
 
 pty = pytest.importorskip("pty", reason="no pseudo-terminal module on this system")
 select = pytest.importorskip("select")
@@ -102,6 +104,32 @@ def test_ctrl_c_at_a_terminal_interrupts_the_question_not_the_conversation(data_
         child.kill()
     assert query(data_dir, "SELECT status FROM requests") == [("uncertain",)]
     assert query(data_dir, "SELECT count(*) FROM requests")[0][0] == 1  # nothing was resent
+
+
+def test_an_n_typed_ahead_cannot_reject_the_approval(data_dir, tmp_path):
+    """Review 2026-11-25 and Wilson's decision (D8): `n` and Enter typed while the skill's step
+    runs, before the approval prompt exists, stay in the terminal and answer that prompt; the
+    rejection then needs the word `reject`, which nobody typed, so the approval stays pending."""
+    answers = tmp_path / "respuestas.json"
+    answers.write_text(json.dumps({"demo-echo/draft": GOOD_ECHO}), encoding="utf-8")
+    child = TerminalChild(data_dir, "chat", HARNESS_MOCK_DELAY_MS="3000",
+                          HARNESS_MOCK_RESPONSES=str(answers.resolve()),
+                          HARNESS_SKILLS_DIR=str(FIXTURES))
+    try:
+        child.read_until("\n> ")
+        child.type("/skill demo-echo text=hola\r")
+        child.read_until("skill: step draft (llm")  # the step's question is out
+        child.type("n\r")  # typed ahead: nobody reads now
+        child.read_until("leaves the approval pending: ")  # the `n` answered the prompt
+        child.type("\r")  # nothing confirms the rejection
+        shown = child.read_until("\n> ")
+        assert "Not confirmed: the approval stays pending" in shown
+        child.type("/exit\r")
+        assert child.wait() == 0
+    finally:
+        child.kill()
+    assert query(data_dir, "SELECT status FROM approvals") == [("pending",)]
+    assert query(data_dir, "SELECT status FROM skill_runs") == [("awaiting_approval",)]
 
 
 def test_the_program_alone_at_a_terminal_opens_the_conversation(data_dir):

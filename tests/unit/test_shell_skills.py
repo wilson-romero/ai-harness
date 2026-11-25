@@ -77,14 +77,39 @@ async def test_the_code_is_shown_only_next_to_the_content(conn, data_dir, tmp_pa
 
 
 async def test_a_rejected_approval(conn, data_dir, tmp_path):
-    """Scenario «Aprobación rechazada»."""
+    """Scenario «Aprobación rechazada»: `n`, then the word `reject` (D8, decided 2026-11-25)."""
     conversation, terminal, effect, _ = _setup(conn, data_dir, tmp_path,
-                                               [LINE, "/status", "/exit"], ["n"])
+                                               [LINE, "/status", "/exit"], ["n", "reject"])
     assert await conversation.run() == 0
     assert effect.written() == []
     assert _run_status(conn) == ["cancelled"]
     assert _approvals(conn) == ["rejected"]
+    assert terminal.questions[1].startswith("Type reject to confirm the rejection")
     assert any(line.startswith("last request:") for line in terminal.shown)  # still open
+
+
+async def test_n_alone_leaves_the_approval_pending(conn, data_dir, tmp_path):
+    """Scenario «Rechazo sin confirmar»: `n` and then the end of the answers."""
+    conversation, terminal, effect, _ = _setup(conn, data_dir, tmp_path, [LINE, "/exit"], ["n"])
+    assert await conversation.run() == 0
+    assert effect.written() == []
+    assert _run_status(conn) == ["awaiting_approval"]
+    assert _approvals(conn) == ["pending"]
+    assert "Not confirmed: the approval stays pending; nothing was rejected." in terminal.shown
+
+
+async def test_n_then_other_text_is_pending_and_the_text_goes_nowhere(conn, data_dir, tmp_path):
+    """The answer to the confirmation is neither a question nor a command, whatever it says."""
+    for other in ["/status", "otra cosa", "REJECT", "rejected", " "]:
+        conversation, terminal, effect, provider = _setup(
+            conn, data_dir, tmp_path / other.strip().replace("/", "_") if other.strip()
+            else tmp_path / "blank", [LINE, "/exit"], ["n", other])
+        assert await conversation.run() == 0
+        assert effect.written() == []
+        assert provider.calls == 1  # only the skill's step
+        assert other not in provider.prompts
+        assert not any(line.startswith("last request:") for line in terminal.shown)
+        assert _approvals(conn)[-1] == "pending"
 
 
 async def test_wrong_answers_typed_ahead_leave_the_approval_pending(conn, data_dir, tmp_path):
