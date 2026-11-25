@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import gc
 import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 from harness.config import Settings
-from harness.core.contracts import RequestStatus
+from harness.core.contracts import RequestStatus, Session
 from harness.core.errors import (
     HarnessError,
     MemoryNotConfigured,
@@ -18,6 +19,7 @@ from harness.core.errors import (
     UsageError,
 )
 from harness.core.service import SessionService
+from harness.core.watchdog import Watchdog
 from harness.memory.config import (
     MemorySettings,
     ensure_data_dir_outside_vault,
@@ -41,6 +43,8 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
 EXIT_INTERRUPTED = 130
+CLOSE_TIMEOUT_S = 10.0  # harness/browser/edge.py: closing the browser has its own bound
+WATCHDOG_MARGIN_S = 15.0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -193,7 +197,14 @@ def _ask(
     prompt: str,
     context: ProjectContext | None = None,
 ) -> int:
-    response = asyncio.run(service.ask(session_id, prompt, context))
+    # Last-resort bound on the whole question: the deadline, then the browser's own cleanup
+    # time, then a margin. It fires even if the event loop is blocked (harness/core/watchdog.py).
+    limit_s = service.timeout_s + CLOSE_TIMEOUT_S + WATCHDOG_MARGIN_S
+    with Watchdog(limit_s, "the question"):
+        try:
+            response = asyncio.run(_ask_quietly(service, session_id, prompt, context))
+        finally:
+            gc.collect()  # unreferenced browser futures report now, to the quiet handler
     for warning in response.warnings:
         print(f"warning: {warning}", file=sys.stderr)
     if response.status is RequestStatus.COMPLETED:
@@ -206,7 +217,21 @@ def _ask(
     return EXIT_ERROR
 
 
+async def _ask_quietly(
+    service: SessionService, session_id: str, prompt: str, context: ProjectContext | None
+):
+    """`service.ask` with the browser runner's handler: an error Playwright leaves behind after
+    the browser went away is not printed after the result (harness/browser/runner.py)."""
+    from harness.browser.runner import quiet_handler
+
+    asyncio.get_running_loop().set_exception_handler(quiet_handler)
+    return await service.ask(session_id, prompt, context)
+
+
 def _history(service: SessionService, session_id: str) -> int:
+    session = service.require_session(session_id)
+    if not service.provider_for(session).synthetic_content:
+        return _history_without_content(service, session)
     entries = service.history(session_id)
     if not entries:
         print("No messages.")
@@ -214,6 +239,19 @@ def _history(service: SessionService, session_id: str) -> int:
     for entry in entries:
         content = entry.content if entry.content is not None else "(content not stored)"
         print(f"[{entry.request_status}] {entry.role}: {content}")
+    return EXIT_OK
+
+
+def _history_without_content(service: SessionService, session: Session) -> int:
+    """A provider with real content stores none (D11): the remote conversation and, per
+    request, its state and time."""
+    print(f"session {session.session_id} ({session.provider}, {session.status})")
+    print(f"remote conversation: {session.remote_ref or '(none yet)'}")
+    requests = service.requests(session)
+    if not requests:
+        print("No requests.")
+    for request_id, status, started_at in requests:
+        print(f"[{status}] {request_id} {started_at}")
     return EXIT_OK
 
 

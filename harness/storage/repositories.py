@@ -153,3 +153,32 @@ def insert_request_context(
         " VALUES (?, ?, ?, ?, ?)",
         (str(request_id), note_path, sha256, size_bytes, int(truncated)),
     )
+
+
+def bind_remote_ref(conn: sqlite3.Connection, session_id: UUID, remote_ref: str) -> bool:
+    """Store the remote conversation of a session that has none. False if it already has one:
+    a reference, once bound, never changes."""
+    cursor = conn.execute(
+        "UPDATE sessions SET remote_ref = ?, updated_at = ?"
+        " WHERE session_id = ? AND remote_ref IS NULL",
+        (remote_ref, utc_now(), str(session_id)),
+    )
+    return cursor.rowcount == 1
+
+
+def completed_requests(conn: sqlite3.Connection, session_id: UUID) -> int:
+    row = conn.execute(
+        "SELECT count(*) FROM requests WHERE session_id = ? AND status = ?",
+        (str(session_id), RequestStatus.COMPLETED.value),
+    ).fetchone()
+    return int(row[0])
+
+
+def session_requests(conn: sqlite3.Connection, session_id: UUID) -> list[tuple[str, str, str]]:
+    """(request id, status, started at) of every request of a session, oldest first."""
+    rows = conn.execute(
+        "SELECT request_id, status, started_at FROM requests WHERE session_id = ?"
+        " ORDER BY started_at, request_id",
+        (str(session_id),),
+    )
+    return [(row["request_id"], row["status"], row["started_at"]) for row in rows]

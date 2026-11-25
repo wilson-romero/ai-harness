@@ -46,3 +46,15 @@ def test_no_recording_options_anywhere_near_the_browser():
 
 def test_browser_package_never_interacts_with_the_page():
     assert _offenders(INPUT_ACTIONS, "harness/browser") == []
+
+
+def test_provider_types_only_into_the_editor_and_sends_only_with_the_measured_control():
+    """The Copilot provider has exactly three input actions: fill the editor, press Enter in
+    the editor, click the measured send control. Nothing else is typed, pressed or clicked."""
+    found = _offenders(INPUT_ACTIONS, "harness/providers")
+    actions = sorted(line.split(": ", 1)[1] for line in found)
+    assert len(actions) == 3, found
+    assert all(line.startswith("harness/providers/copilot_web.py:") for line in found)
+    assert any(a.startswith("await composer.fill(self.request.prompt") for a in actions)
+    assert any(a.startswith('await composer.press("Enter"') for a in actions)
+    assert any(a.startswith("await self.locators.send.resolve(page).first.click(") for a in actions)

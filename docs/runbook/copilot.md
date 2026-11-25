@@ -133,6 +133,54 @@ Escribe **solo esa entrada** en `HARNESS_DATA_DIR/copilot/candidates.json`; lo d
 
 Nombres de entrada: `composer` (editor), `send` (botón de enviar; con `"send_with": "enter"` no hace falta), `new_conversation`, `user_turn` (debe marcar **todos** tus mensajes), `assistant_turn` (**todas** las respuestas), y opcionales `stop`, `response_done_control` (dentro de la respuesta), `busy_region`, `login_indicator`. **Nunca** pongas en un localizador texto de una respuesta, un título de conversación, tu nombre, tu correo, el nombre de la empresa ni la URL; los nombres de controles («Enviar», «Copiar») sí valen. Una entrada mal escrita hace que la sonda se niegue y diga cuál.
 
-## Cuando exista el proveedor (grupos 4 y 5 del change)
+## 5. Preguntar a Copilot desde el harness
 
-El proveedor `copilot_web` todavía no está implementado. Su diseño ya fija: `authentication_required` (sesión caducada, no se envió nada: `copilot login` y repetir), «perfil en uso» (como arriba), sesión `closed` (la conversación remota ya no está: sesión nueva) y `uncertain` (venció el plazo tras enviar: la pregunta pudo llegar; no se reenvía; mírala en Edge).
+Requisitos: los pasos 0 a 2 hechos en esta máquina (perfil con la sesión iniciada y `ui.json` completo en `HARNESS_DATA_DIR/copilot/`). Cada `ask` abre una ventana de Edge con el perfil dedicado, escribe la pregunta, espera la respuesta, la imprime y cierra **solo esa** ventana. No toques esa ventana mientras trabaja; tu Edge personal no se toca.
+
+POSIX (macOS), en la misma terminal del paso 0:
+
+```sh
+export HARNESS_PROVIDER=copilot_web
+export HARNESS_REQUEST_TIMEOUT_S=60     # opcional; la sonda propone un valor (paso 2)
+uv run python main.py session create "Prueba Copilot"
+# copia el identificador que imprime:
+uv run python main.py ask SESSION_ID "Responde solo con la palabra ALFA."
+uv run python main.py history SESSION_ID
+```
+
+PowerShell (Windows):
+
+```powershell
+$env:HARNESS_PROVIDER = "copilot_web"
+$env:HARNESS_REQUEST_TIMEOUT_S = "60"
+uv run python main.py session create "Prueba Copilot"
+uv run python main.py ask SESSION_ID "Responde solo con la palabra ALFA."
+uv run python main.py history SESSION_ID
+```
+
+**Segundo proceso, misma conversación:** abre otra terminal, repite las variables del paso 0 y `HARNESS_PROVIDER`, y pregunta en la misma sesión:
+
+```sh
+uv run python main.py ask SESSION_ID "Responde solo con la palabra BETA."
+```
+
+La pregunta llega a la misma conversación de Copilot (lo verás en Edge). La primera pregunta de una sesión tarda unos segundos más que la respuesta: Copilot asigna el identificador de la conversación después de responder, y el harness lo espera hasta 10 s.
+
+Qué significa cada resultado:
+
+| Lo que ves | Qué pasó y qué hacer |
+|---|---|
+| La respuesta por stdout, código 0 | `completed`. |
+| `ended as authentication_required` | La sesión de Copilot caducó. No se escribió nada. `uv run python main.py copilot login`, inicia sesión y repite la pregunta. |
+| `ended as uncertain` | La pregunta salió y la respuesta no terminó a tiempo (o se cerró Edge). **No se reenvía nunca.** Mírala en Edge. La siguiente pregunta de esa sesión avisa si la conversación tiene más turnos de los completados. |
+| `ended as timeout` … `not ready in time` | La página no estuvo lista a tiempo; no se envió nada y la sesión sigue igual. Repite; si persiste, paso 1. |
+| `ended as failed` … `Create a new session` | La conversación de la sesión ya no existe en Copilot. No se envió nada y la sesión queda `closed`. Crea una sesión nueva. |
+| `session … is closed` | Esa sesión ya no acepta preguntas. Crea una nueva. |
+| `warning: … identifier did not reach the address in time` | Copilot respondió, pero la sesión se quedó sin conversación; la siguiente pregunta empezará otra, sin el contexto. |
+| `the prompt has N characters; the most Copilot takes here is M` | Prompt demasiado largo. No se abrió Edge ni se registró nada. |
+| `the harness browser is in use by another command` | Otro `ask` tiene Edge abierto: espera y repite. |
+| `did not finish … the harness stopped itself` (código 124) | Último recurso: algo bloqueó el proceso más allá del plazo y de su limpieza. El comando siguiente deja esa pregunta en `uncertain`; nada se reenvía. |
+
+`history` de una sesión de Copilot muestra el identificador de su conversación y, por solicitud, su estado y su hora (UTC), **sin texto**: el harness no guarda preguntas ni respuestas de Copilot.
+
+Pruebas reales (opcional, 5 envíos de prompts sintéticos fijos, con ventana): con las variables del paso 0, `uv run pytest -m copilot -p no:cacheprovider`. Sin esas variables se omiten con su motivo.

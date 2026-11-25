@@ -14,8 +14,6 @@ import gc
 from collections.abc import Coroutine
 from typing import Any, TypeVar
 
-from playwright.async_api import Error as PlaywrightError
-
 T = TypeVar("T")
 
 DRIVER_GONE = "Connection closed while reading from the driver"
@@ -24,12 +22,13 @@ DRIVER_GONE = "Connection closed while reading from the driver"
 def is_driver_leftover(context: dict[str, Any]) -> bool:
     """An error left in a Playwright future after the driver or the browser went away."""
     exc = context.get("exception")
-    if isinstance(exc, PlaywrightError):
+    # By module, so that a command that never drives a browser does not import Playwright.
+    if exc is not None and type(exc).__module__.startswith("playwright."):
         return True
     return type(exc) is Exception and str(exc) == DRIVER_GONE
 
 
-def _quiet_handler(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+def quiet_handler(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
     if is_driver_leftover(context):
         return  # the run already ended; the caller reports the outcome
     loop.default_exception_handler(context)
@@ -38,7 +37,7 @@ def _quiet_handler(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> 
 def run_browser(main: Coroutine[Any, Any, T]) -> T:
     """`asyncio.run` for code that drives the browser. Ctrl+C still raises KeyboardInterrupt."""
     with asyncio.Runner() as runner:
-        runner.get_loop().set_exception_handler(_quiet_handler)
+        runner.get_loop().set_exception_handler(quiet_handler)
         try:
             return runner.run(main)
         finally:

@@ -56,6 +56,10 @@ class LLMRequest(_Contract):
     session_id: UUID
     prompt: str = Field(min_length=1)
     timeout_s: float = Field(gt=0)
+    # The session's remote conversation, if a provider bound one, and how many of the
+    # session's requests completed (design D5).
+    remote_ref: str | None = None
+    completed_turns: int = Field(default=0, ge=0)
 
 
 class LLMResponse(_Contract):

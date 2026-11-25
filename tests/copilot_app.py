@@ -37,6 +37,7 @@ CANARIES = (
 )
 SESSION_COOKIE = "synthetic_session=ok"
 MARKER = re.compile(r"ZQX-END-\d+")
+HUGE_REPLY_CHARS = 250_000
 
 
 @dataclass
@@ -49,6 +50,7 @@ class Received:
 class SyntheticCopilot:
     require_login: bool = False
     login_auto_ms: int | None = None
+    login_with_editor: bool = False
     prompts: list[Received] = field(default_factory=list)
     login_events: list[str] = field(default_factory=list)
     page_hits: int = 0
@@ -86,6 +88,8 @@ class SyntheticCopilot:
         params = {"complete": complete}
         if self.login_auto_ms is not None:
             params["auto_ms"] = str(self.login_auto_ms)
+        if self.login_with_editor:
+            params["editor"] = "1"
         return f"http://localhost:{self.port}/login?{urlencode(params)}"
 
     # -- state ----------------------------------------------------------------------------
@@ -123,6 +127,12 @@ def make_reply(prompt: str) -> str:
     parts = [CANARY_REPLY, "synthetic answer", words]
     if "LEN-OK" in prompt:
         parts.append("LEN-OK")
+    if "ZQX-HOSTILE" in prompt:
+        # Terminal escapes, a bidirectional override, zero-width and other control characters,
+        # as a hostile page could render them.
+        parts.append("\x1b[2J\x1b]0;ZZ-TITLE\x07 \u202eHOSTILE\u202c \u200bZW\u200b \x08\x00END")
+    if "ZQX-HUGE" in prompt:
+        parts.append("H" * HUGE_REPLY_CHARS)
     marker = MARKER.search(prompt)
     if marker:
         parts.append(marker.group(0))

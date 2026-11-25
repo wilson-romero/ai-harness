@@ -7,6 +7,11 @@
     never_finish=1      the reply stops halfway and never ends
     forget=1            an existing conversation cannot be reopened
     chunk_ms=N          delay between reply chunks (default 40)
+    id_delay_ms=N       the conversation id reaches the address N ms after the reply ends,
+                        as measured on the real page (default: as soon as the server answers)
+    id_never=1          the id never reaches the address
+    start_ms=N          the reply starts N ms after the server answers
+    ready_ms=N          the composer appears N ms after the page loads
 -->
 <html lang="en">
 <head>
@@ -40,6 +45,10 @@
   const early = params.get("early") || "";
   const neverFinish = params.get("never_finish") === "1";
   const forget = params.get("forget") === "1";
+  const idDelay = params.has("id_delay_ms") ? Number(params.get("id_delay_ms")) : null;
+  const idNever = params.get("id_never") === "1";
+  const startMs = Number(params.get("start_ms") || 0);
+  const readyMs = Number(params.get("ready_ms") || 0);
   const thread = document.getElementById("synthetic-thread");
   const composer = document.getElementById("synthetic-composer");
   const send = document.getElementById("synthetic-send");
@@ -98,25 +107,32 @@
       body: JSON.stringify({ conversation, prompt }),
     });
     const data = await response.json();
-    showConversation(data.conversation);
+    conversation = data.conversation;
+    if (idDelay === null && !idNever) showConversation(data.conversation);
+    if (startMs) await sleep(startMs);
     const turn = addTurn("assistant", "");
     turn.setAttribute("aria-busy", "true");
     const reply = data.reply;
     const half = Math.floor(reply.length / 2);
-    for (let i = 0; i < reply.length; i += 5) {
-      if (i >= half && i - 5 < half) {
+    const step = Math.max(5, Math.ceil(reply.length / 60));
+    for (let i = 0; i < reply.length; i += step) {
+      if (i >= half && i - step < half) {
         if (early === "done_control") addDone(turn);
         if (neverFinish) return;
         if (pauseMs) await sleep(pauseMs);
       }
-      turn.firstChild ? (turn.firstChild.textContent = reply.slice(0, i + 5))
-                      : turn.prepend(document.createTextNode(reply.slice(0, i + 5)));
+      turn.firstChild ? (turn.firstChild.textContent = reply.slice(0, i + step))
+                      : turn.prepend(document.createTextNode(reply.slice(0, i + step)));
       await sleep(chunkMs);
     }
     turn.setAttribute("aria-busy", "false");
     addDone(turn);
     stop.hidden = true;
     send.hidden = false;
+    if (idDelay !== null && !idNever) {
+      const id = data.conversation;
+      setTimeout(() => showConversation(id), idDelay);
+    }
   }
 
   // Like many chat pages, sending is possible only once something is typed.
@@ -124,6 +140,10 @@
   composer.addEventListener("input", () => { send.disabled = !composer.value; });
   send.addEventListener("click", submit);
   document.getElementById("synthetic-new-chat").addEventListener("click", newChat);
+  if (readyMs) {
+    composer.hidden = true;
+    setTimeout(() => { composer.hidden = false; }, readyMs);
+  }
   load();
 })();
 </script>

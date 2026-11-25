@@ -22,6 +22,16 @@
   for (const kind of ["keydown", "input", "mousedown", "click"]) {
     document.addEventListener(kind, () => report(kind), true);
   }
+  if (params.get("editor") === "1") {
+    // A sign-in page that happens to carry controls with the chat's locators: only the host
+    // check keeps the harness from typing here.
+    const box = document.createElement("textarea");
+    box.id = "synthetic-composer";
+    const send = document.createElement("button");
+    send.type = "button";
+    send.textContent = "Send synthetic message";
+    document.body.append(box, send);
+  }
   const autoMs = params.get("auto_ms");
   if (autoMs !== null) {
     setTimeout(() => { location.href = params.get("complete"); }, Number(autoMs));

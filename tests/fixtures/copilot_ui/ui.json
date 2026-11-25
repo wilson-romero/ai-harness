@@ -15,7 +15,7 @@
     "response_done_control": {"css": ".synthetic-copy"},
     "login_indicator": {"css": "#synthetic-login-form"}
   },
-  "conversation_ref": {"kind": "path_segment", "index": 1},
+  "conversation_ref": {"kind": "path_segment", "index": 1, "prefix": ["c"]},
   "identity_recoverable": true,
   "turns_visible_after_reopen": [4, 4, 4],
   "turns_sent_per_conversation": 4,
