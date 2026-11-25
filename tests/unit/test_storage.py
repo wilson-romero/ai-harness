@@ -45,7 +45,7 @@ def test_migrating_twice_changes_nothing(data_dir):
     assert migrate(second) == []
     after = second.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
     assert [tuple(r) for r in after] == [tuple(r) for r in before]
-    assert [r["version"] for r in after] == [1, 2, 3, 4]
+    assert [r["version"] for r in after] == [1, 2, 3, 4, 5]
     assert repo.get_session(second, session.session_id) == session
     second.close()
 

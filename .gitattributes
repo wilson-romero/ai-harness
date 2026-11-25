@@ -1,0 +1,2 @@
+# Reference renders are compared byte for byte: never convert their line ends on checkout.
+tests/fixtures/decision-notes/** -text

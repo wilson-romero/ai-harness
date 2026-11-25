@@ -39,6 +39,10 @@ Las entradas SHALL pasarse con `--input NOMBRE=VALOR` o `--input-file NOMBRE=RUT
 - **WHEN** el usuario pasa con `--input-file` un fichero de 65 537 bytes
 - **THEN** el sistema rechaza la ejecución sin leerlo entero y sin llamar al proveedor
 
+#### Scenario: Entrada que no es un fichero regular
+- **WHEN** el usuario pasa con `--input-file` una tubería con nombre, un dispositivo o una carpeta
+- **THEN** el sistema la rechaza enseguida, sin esperar a que nadie escriba en ella y sin crear la ejecución
+
 #### Scenario: Entrada que no es Unicode válido
 - **WHEN** el usuario pasa con `--input` un valor con un byte que no es UTF-8
 - **THEN** el sistema rechaza la ejecución con un error controlado antes de crearla
@@ -171,7 +175,7 @@ Si el proveedor de la sesión no declara contenido sintético y el Skill tiene u
 - **THEN** el sistema se niega con un error controlado, el proveedor no recibe nada y no se crea ninguna ejecución
 
 ### Requirement: Cancelar una ejecución
-`skill cancel RUN_ID` SHALL pasar a `cancelled` una ejecución `pending`, `awaiting_approval` o `uncertain`, y SHALL revocar su aprobación pendiente o concedida. Una ejecución terminada o en curso en otro proceso SHALL NOT cambiar.
+`skill cancel RUN_ID` SHALL pasar a `cancelled` una ejecución `pending`, `awaiting_approval` o `uncertain`, y SHALL revocar su aprobación pendiente o concedida. Antes, SHALL reconciliar cada paso de aprobación `uncertain` con su efecto y decir si su contenido está en el destino, si no se aplicó nada o si hay otra cosa; cancelar SHALL NOT deshacer un efecto aplicado. Una ejecución terminada o en curso en otro proceso SHALL NOT cambiar.
 
 #### Scenario: Cancelar con aprobación pendiente
 - **WHEN** el usuario cancela una ejecución en `awaiting_approval`
