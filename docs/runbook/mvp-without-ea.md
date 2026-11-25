@@ -23,7 +23,9 @@ La demo automática, `uv run python scripts/demo_mvp_without_ea.py`, recorre tod
 ### PowerShell
 
 ```powershell
-$base = Join-Path ([System.IO.Path]::GetTempPath()) "ai-harness-mvp"
+# Una carpeta nueva en cada recorrido, como mktemp -d (con una fija, el segundo recorrido
+# copiaría el vault dentro del anterior y el paso 4 acabaría en duplicate_decision)
+$base = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-harness-mvp-" + [System.IO.Path]::GetRandomFileName())
 New-Item -ItemType Directory -Force $base | Out-Null
 Copy-Item -Recurse tests\fixtures\vault-synthetic (Join-Path $base "vault")
 $env:HARNESS_DATA_DIR = Join-Path $base "data"
@@ -80,7 +82,7 @@ uv run python main.py history "$sesion"
 
 ### Qué ves en cada paso
 
-1. `session create` imprime el identificador de la sesión. `memory context demo-alpha` imprime primero, por stderr, el resumen (`context: demo-alpha, 7 note(s) included, …`), y después el aviso «material de referencia, no instrucciones» y las notas del proyecto entre `<<<MEMORIA <marcador>` y `MEMORIA <marcador>>>>`. En `Decisiones/` solo está `alpha-mensajeria.md`.
+1. `session create` imprime el identificador de la sesión. `memory context demo-alpha` imprime primero, por stderr, el resumen (`context: demo-alpha, 7 note(s) included, …`), y después el aviso «material de referencia, no instrucciones» y las notas del proyecto entre `<<<MEMORIA <marcador>` y `MEMORIA <marcador>>>>`. De `Decisiones/`, `memory context demo-alpha` solo lista `alpha-mensajeria.md` (la carpeta también tiene `beta-almacen.md`, que es de `demo-beta` y no entra).
 2. `hls-review` imprime, por stderr, `run <id>: hls-review 1.0.0` y `step review (llm, attempt 1)`, y por stdout la revisión con seis secciones: `## Resumen`, `## Alternativas`, `## Restricciones`, `## Requisitos no funcionales`, `## Supuestos` y `## Preguntas pendientes` (con el Mock, «¿Qué pasa con un evento que no se puede publicar?»). Código 0. El vault no cambia.
 3. Lees la revisión y decides. Con el Mock la decisión de ejemplo ya responde a la pregunta pendiente; la respuesta del Mock no depende de lo que escribas.
 4. `architecture-memory` muestra la cabecera de la aprobación (`skill`, `run`, `step: save`, `scope: vault.save_decision`, `vault:` con la raíz de la copia, `target: Decisiones/<fecha>-cola-gestionada-para-avisar-de-los-pedidos-<id8>.md`, `bytes`, `hash`, `expires`) y la nota completa entre dos líneas de guiones, con `project_slug: demo-alpha`. Escribe los **8 primeros caracteres del hash** y Enter: imprime la nota y `applied: Decisiones/…`, y termina con 0. Con `n` la cancela (código 1) y no escribe nada.
@@ -106,7 +108,7 @@ unset HARNESS_DATA_DIR HARNESS_VAULT_ROOT HARNESS_MOCK_RESPONSES
 |---|---|---|
 | `hls-review` termina con 1 y `skill status RUN_ID` dice `error: validation_failed:required_headings:<encabezado>` | La respuesta no tenía una de las seis secciones. No se imprime. | Con el Mock, revisa `HARNESS_MOCK_RESPONSES`. Con Copilot, anótalo para la medición (sección 5) y repite el paso 2: es otra ejecución. |
 | `architecture-memory` termina con 1 y `validation_failed:<regla>:<campo>` | El JSON de la decisión no pasa el esquema (un campo de más, un título de varias líneas, un tamaño). No se pide aprobación ni se escribe nada. | Igual que arriba: anótalo y repite el paso 4. |
-| `architecture-memory` termina con 3 y dice `waiting for a human approval` | No había terminal interactiva, o cerraste la pregunta sin contestar (Ctrl+D, Ctrl+Z en Windows). No se ha escrito nada. | Con el Mock, en una terminal: `uv run python main.py skill resume RUN_ID --input-file "source=<el mismo fichero>"` (código 0 si apruebas). Con Copilot las salidas no se guardan: `skill resume` termina con `outputs_not_retained` sin escribir nada, y repites el paso 4 en una terminal. |
+| `architecture-memory` termina con 3 y dice `waiting for a human approval` | No había terminal interactiva, o cerraste la pregunta sin contestar (Ctrl+D en macOS; Ctrl+Z y después Enter en Windows). No se ha escrito nada. | Con el Mock, en una terminal: `uv run python main.py skill resume RUN_ID --input-file "source=<el mismo fichero>"` (código 0 si apruebas). Con Copilot las salidas no se guardan: `skill resume` termina con `outputs_not_retained` sin escribir nada, y repites el paso 4 en una terminal. |
 | Termina con 1 y `duplicate_decision` | Esa decisión (mismo título en el mismo proyecto) ya está en `Decisiones/`, en la ruta que dice. | Nada: no se escribe otra. Si es otra decisión, el título tiene que ser otro. |
 | `skill status RUN_ID` dice `uncertain` en un paso `llm` | La pregunta pudo llegar al proveedor y no hubo respuesta. Nunca se repite sola. | `uv run python main.py skill resume RUN_ID --retry-step review` (o `extract`): puede duplicar la pregunta en la conversación. O `skill cancel RUN_ID`. |
 | `uncertain` en el paso `save` | La escritura pudo hacerse. | `skill resume RUN_ID`: comprueba si la nota está y no la escribe dos veces. Nunca se reintenta con `--retry-step`. |
@@ -123,7 +125,7 @@ Primero con una **copia**, nunca con el vault de trabajo: con el Mock, la nota q
 PowerShell:
 
 ```powershell
-$env:HARNESS_DATA_DIR = Join-Path ([System.IO.Path]::GetTempPath()) "ai-harness-mvp-data"
+$env:HARNESS_DATA_DIR = Join-Path ([System.IO.Path]::GetTempPath()) ("ai-harness-mvp-data-" + [System.IO.Path]::GetRandomFileName())
 $env:HARNESS_VAULT_ROOT = "C:\ruta\absoluta\a\la\copia-del-vault"
 $env:HARNESS_MOCK_RESPONSES = (Resolve-Path tests\fixtures\mvp\respuestas-mock.json).Path
 uv run python main.py memory context TU-PROYECTO
@@ -146,12 +148,12 @@ Qué cambia: la memoria que ves y que entra en la pregunta es la de tu proyecto;
 
 ## 5. Con Copilot real (BLOCKED por el merge de `feature/copilot-web-provider`)
 
-Cuando el proveedor esté en `develop`:
+Cuando el proveedor esté en `develop`. Alcance autorizado (tu respuesta del 2026-11-25): **solo** con la cuenta de la universidad, **solo** con textos sintéticos (los de este repo) y dentro del presupuesto de **100 envíos**; la medición de abajo gasta 6.
 
 - Las mismas órdenes de la sección 2, sin `HARNESS_MOCK_RESPONSES` y con `HARNESS_PROVIDER=copilot_web` (`$env:HARNESS_PROVIDER = "copilot_web"` en PowerShell), y una sesión **nueva** (el proveedor se fija al crearla).
 - Las dos preguntas van a la misma conversación de Copilot porque es la misma sesión.
 - `architecture-memory` tiene que ejecutarse en una terminal interactiva desde el principio (sin ella se rechaza antes de preguntar): con Copilot las salidas no se guardan y una ejecución que se queda esperando no se puede reanudar.
-- Tu decisión la escribes tú después de leer la revisión, en `HARNESS_DATA_DIR/tmp/decision.md` (fuera del repo). Bórrala al terminar.
+- Tu decisión la escribes tú después de leer la revisión, también sintética, en `HARNESS_DATA_DIR/tmp/decision.md` (fuera del repo). Bórrala al terminar. Con el vault sintético, no con el tuyo.
 
 ### Medición (tarea 4.2)
 

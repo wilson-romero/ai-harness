@@ -224,7 +224,7 @@ El flujo completo sin Enterprise Architect: **requerimiento → memoria del proy
 - **Demo automática** (sin persona, salvo la aprobación, que imprime como instrucciones con los comandos exactos para PowerShell y zsh/bash): `uv run python scripts/demo_mvp_without_ea.py`. Termina en `demo: PASS`. Con `--keep` deja la carpeta temporal y la ejecución esperando, para que la apruebes tú en una terminal.
 - **A mano**, paso a paso y con qué se ve en cada uno: [`docs/runbook/mvp-without-ea.md`](docs/runbook/mvp-without-ea.md), primero con el vault sintético y el Mock, después con una copia de tu vault.
 - **Datos:** los requerimientos sintéticos, la revisión y la decisión guionizadas del Mock y una decisión de ejemplo están en `tests/fixtures/mvp/`. Los tres `requerimiento-<n>-*.md` son también los de la medición con Copilot real (seis preguntas), que queda pendiente del merge del proveedor de Copilot.
-- **Test:** `tests/integration/test_mvp_flow.py` recorre el flujo con la CLI en procesos separados y aprueba con la terminal de prueba del motor. No dice nada de si Copilot real cumple los formatos.
+- **Test:** `tests/integration/test_mvp_flow.py` recorre el flujo con la CLI: `session create`, `memory context`, `skill status` y `history` en procesos separados, y los dos Skills en proceso con un proveedor guionizado que guarda en memoria lo que recibe (para comprobar que la memoria del proyecto, el requerimiento y tu decisión llegan a la pregunta) y la terminal de prueba del motor para aprobar. También comprueba que un modelo que obedece las órdenes de un requerimiento no aprueba, no elige carpeta ni proyecto. No dice nada de si Copilot real cumple los formatos.
 
 ## Herramientas MCP
 
