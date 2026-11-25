@@ -7,7 +7,7 @@ Ver `proposal.md` para el porqué. Piezas que el flujo usa, todas sin cambiar:
 - `session create --project`, `ask`, `history`, recuperación y `uncertain` (`develop`).
 - `memory context` y el contexto del proyecto en los pasos `llm` con `"memory": "project"` (`develop`).
 - Motor de Skills, aprobación en terminal, código 3, `skill resume` y reconciliación (`skill-engine`, en `develop`). Con un proveedor no sintético (Copilot), `skill run` con un paso `approval` exige terminal interactiva antes de la primera pregunta, y las salidas de los pasos no se guardan (D11 de `skill-engine`).
-- `hls-review` (`llm` → `validate` markdown con seis encabezados) y `architecture-memory` (`llm` → `validate` JSON → `approval` con el efecto `vault.save_decision`), en `feature/architecture-skills-llm`.
+- `hls-review` (`llm` → `validate` markdown con seis encabezados) y `architecture-memory` (`llm` → `validate` JSON → `approval` con el efecto `vault.save_decision`), en `feature/architecture-skills-llm` (*actualizado el 2026-11-25:* mergeado en `develop`, `ee550b6`, publicado en `v0.2.0`).
 - Proveedor `copilot_web` en `feature/copilot-web-provider`: un Edge por pregunta (mediana de arranque 4356 ms, n = 7), una conversación por sesión, contenido real nunca guardado, `HARNESS_REQUEST_TIMEOUT_S` recomendado 21 s por su sonda (macOS, 2026-11-24). Los pasos `llm` de los dos Skills declaran `timeout_s: 300`.
 
 ### Premisas sin medir (las mide una tarea)
@@ -38,14 +38,16 @@ Ver `proposal.md` para el porqué. Piezas que el flujo usa, todas sin cambiar:
 - **Qué:** un test por subprocesos (como `tests/integration/test_skill_cli_run.py`) con el Mock guionizado por `HARNESS_MOCK_RESPONSES`, una copia temporal del vault sintético y la terminal de prueba de `skill-engine` inyectada en la fase de aprobación (la parte en proceso que ya usan los tests de `architecture-skills-llm`): `session create --project demo-alpha` → `skill run hls-review` (código 0, seis encabezados) → `skill run architecture-memory` sin terminal (código 3) → aprobación → un fichero nuevo en `Decisiones/` con el SHA-256 mostrado → `memory context demo-alpha` lo incluye → `history` tiene las marcas de los pasos y ningún texto del documento.
 - **Por qué:** fija que las piezas encajan (la nota que escribe uno la lee el otro; la sesión con proyecto sirve a los dos Skills) sin probar nada de Copilot.
 - **Alternativas rechazadas:** un test con el proveedor de Copilot sobre la app sintética: los Skills ya lo cubren por separado en su rama y el flujo no añade conducta del proveedor.
-- **Límite escrito:** el test no dice nada de si Copilot real cumple los formatos.
+- **Límite escrito:** el test no dice nada de si Copilot real cumple los formatos. Con el Mock, la decisión que se extrae no depende de lo que la persona escriba: el test modela a la persona (lee la revisión entera, comprueba las seis secciones y escribe su decisión en un fichero propio), pero no puede probar que la extracción la use.
+- **Implementado el 2026-11-25:** la aprobación es el único comando que corre en proceso: `skill resume` por la CLI con el `TtyTerminal` del motor sustituido por la terminal de prueba. La aprobación muestra el hash de la propuesta, no el SHA-256 del fichero; el test comprueba que los bytes escritos son exactamente la nota mostrada entre las dos líneas de guiones y que su SHA-256 es el `output_sha256` del paso `save`. Además del flujo de D2, el test comprueba que la memoria del proyecto entra en la pregunta de los dos Skills (`request_context`), que la nota nueva entra en la pregunta de la ejecución siguiente y que un segundo `architecture-memory` con el mismo título termina con 1 y `duplicate_decision` sin aprobación.
 - **Impacto:** tarea 2.2.
 
 ### D3 · Medición real: solo cifras, regla de reapertura heredada
 
-- **Qué:** Wilson ejecuta el flujo con Copilot real sobre al menos 3 requerimientos de su trabajo y aporta: ejecuciones de cada Skill, cuántas terminaron en `validation_failed` y en qué regla, tiempo por paso, bytes de la nota preparada, si la nota aparece en `memory context`, y si `remote_ref` fue el mismo en los dos Skills de cada sesión. Si `validation_failed` supera la mitad de las ejecuciones de un Skill, se reabren sus plantillas o reglas en `architecture-skills-llm` antes de cerrar la puerta (regla de su tarea 6.7).
+- **Qué:** Wilson ejecuta el flujo con Copilot real sobre 3 requerimientos sintéticos (`tests/fixtures/mvp/requerimiento-<n>-*.md`; un `hls-review` y un `architecture-memory` por requerimiento, 6 preguntas) y aporta: ejecuciones de cada Skill, cuántas terminaron en `validation_failed` y en qué regla, tiempo por paso, bytes de la nota preparada, si la nota aparece en `memory context`, y si `remote_ref` fue el mismo en los dos Skills de cada sesión. Si `validation_failed` supera la mitad de las ejecuciones de un Skill, se reabren sus plantillas o reglas en `architecture-skills-llm` antes de cerrar la puerta (regla de su tarea 6.7).
 - **Por qué:** «una integración real no se da por verificada con mocks»; el contenido real no sale de la máquina de Wilson.
 - **Impacto:** tarea 4.2; cierra también la 6.7 de `architecture-skills-llm` (se anota el recibo en las dos).
+- **Revisado el 2026-11-25 (Wilson):** la propuesta decía «al menos 3 requerimientos de su trabajo»; Wilson fija 3 requerimientos **sintéticos** (6 preguntas) y acepta la regla de reapertura de la mitad. Los tres documentos están en el repo, así que la medición se puede repetir; las respuestas de Copilot siguen sin entrar en el repo, solo las cifras.
 
 ## Risks / Trade-offs
 
@@ -58,8 +60,10 @@ Ver `proposal.md` para el porqué. Piezas que el flujo usa, todas sin cambiar:
 
 Sin migración: documentación, un test y una demo.
 
-## Decisiones pendientes de Wilson (antes de implementar)
+## Decisiones de Wilson (contestadas el 2026-11-25, salvo la 3)
 
-1. ¿Flujo en dos Skills con tu decisión entre medias (D1, propuesto) o un Skill encadenado (sería un change con specs)?
-2. ¿Con cuántos requerimientos reales haces la medición de D3 (propuesta: al menos 3) y aceptas la regla de reapertura de la mitad?
-3. ¿Confirmas el alcance de tu autorización para automatizar Copilot Web también para este flujo (dos preguntas por requerimiento en la misma conversación)?
+1. ¿Flujo en dos Skills con tu decisión entre medias (D1, propuesto) o un Skill encadenado (sería un change con specs)? **Contestada (Wilson, 2026-11-25):** dos Skills por separado en la misma sesión, con la persona decidiendo entre medias (D1 tal como se propuso). Sin Skill encadenado.
+2. ¿Con cuántos requerimientos reales haces la medición de D3 (propuesta: al menos 3) y aceptas la regla de reapertura de la mitad? **Contestada (Wilson, 2026-11-25):** 3 requerimientos sintéticos (6 preguntas); las plantillas se reabren si más de la mitad de las ejecuciones de un Skill falla la validación (D3 tal como se propuso, con requerimientos sintéticos).
+3. ¿Confirmas el alcance de tu autorización para automatizar Copilot Web también para este flujo (dos preguntas por requerimiento en la misma conversación)? **Pendiente.** Solo bloquea el grupo 4 (Copilot real), que ya está BLOCKED por el merge de `feature/copilot-web-provider`.
+
+Contexto anotado el mismo día: Enterprise Architect sigue en pausa, y la integración con OpenCode se estudió y se descartó (`docs/estudios/2026-11-25-arquitectura-opencode.md`).
