@@ -67,6 +67,7 @@ MAX_PROMPT_BYTES = 64 * 1024
 MAX_RESPONSE_BYTES = 128 * 1024
 MAX_RUN_TIME_S = 1800
 MAX_ATTEMPTS = 3
+REDACTION_MARK = "[REDACTED:"
 # With a provider whose outputs are not stored, how long an effect's busy exclusive section is
 # retried in the same invocation before the approval is revoked (2026-11-25).
 BUSY_RETRY_S = 30.0
@@ -904,8 +905,12 @@ class SkillEngine:
                         self._approval_detail(approval))
             self._set_step(row, "failed", error_code="approval_altered", finished=True)
             self._finish_run_locked(state.run_id, state.session, "failed", "approval_altered")
-        return RunOutcome(state.run_id, "failed",
-                          message="the proposal changed after it was approved; nothing applied")
+        if approval["status"] == "granted":
+            message = "the proposal changed after it was approved; nothing applied"
+        else:  # still pending: nobody approved it (2026-11-25, independent review)
+            message = ("the proposal changed while it was waiting for an approval (not approved "
+                       "yet); the request was withdrawn and nothing applied")
+        return RunOutcome(state.run_id, "failed", message=message)
 
     def _set_awaiting(self, state: _Run, row: sqlite3.Row) -> None:
         with transaction(self._conn):
@@ -970,7 +975,18 @@ class SkillEngine:
             inputs=json.loads(run["inputs_manifest"]),
             memory_notes=tuple((note["note_path"], note["sha256"]) for note in notes),
             binding=bindings.get(step.effect, {}),
+            model_marks=self._model_marks(state, step),
         )
+
+    def _model_marks(self, state: _Run, step: ApprovalStep) -> int | None:
+        """Literal redaction marks in the raw model output behind the approved text."""
+        checked = state.skill.step(step.of)
+        if not isinstance(checked, ValidateStep):
+            return None
+        try:
+            return self._output(state, checked.of).count(REDACTION_MARK)
+        except InvalidInput:  # a real provider's output from another invocation
+            return None
 
     # -- values and outputs ---------------------------------------------------------------------
 

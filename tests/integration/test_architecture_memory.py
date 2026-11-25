@@ -12,7 +12,7 @@ import hashlib
 import json
 import subprocess
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -719,3 +719,71 @@ def test_real_provider_crash_before_publishing_asks_to_repeat_the_run(conn, data
     assert "skill run" in outcome.message
     assert one(conn, "SELECT count(*) FROM approvals WHERE status IN ('pending', 'granted')") == (0,)
     assert fingerprint(vault) == before
+
+
+# -- 7.7 low items ------------------------------------------------------------------------------------
+
+BOGOTA = timezone(timedelta(hours=-5))
+
+
+def _with_zone(engine, data_dir, vault, zone):
+    engine.__dict__["_effects"] = {DecisionEffect.scope: DecisionEffect(
+        data_dir, env={"HARNESS_VAULT_ROOT": str(vault)}, lock_wait_s=0.3, local_tz=zone)}
+
+
+def test_the_note_date_is_the_local_date_when_the_run_was_created(conn, data_dir, vault):
+    """At 22:00 in Bogotá the UTC date is already the next day: the note keeps the local one."""
+    clock = Clock()
+    clock.now = datetime(2026, 11, 25, 3, 0, tzinfo=UTC)  # 2026-11-24 22:00 in Bogotá
+    terminal = ApprovingTerminal()
+    engine, sessions, _ = engine_for(conn, data_dir, vault, terminal=terminal, clock=clock)
+    _with_zone(engine, data_dir, vault, BOGOTA)
+    outcome = run(engine, sessions.create_session("Demo", "demo-alpha"))
+    assert outcome.status == "completed", outcome.message
+    assert outcome.applied[0].startswith("Decisiones/2026-11-24-")
+    assert "\ncreated: 2026-11-24\n" in shown_note(terminal)
+
+
+def test_a_zone_change_between_run_and_resume_keeps_the_date_and_the_approval(conn, data_dir,
+                                                                             vault):
+    clock = Clock()
+    clock.now = datetime(2026, 11, 25, 3, 0, tzinfo=UTC)
+    engine, sessions, _ = engine_for(conn, data_dir, vault, clock=clock)
+    _with_zone(engine, data_dir, vault, BOGOTA)
+    first = run(engine, sessions.create_session("Demo", "demo-alpha"))
+    assert first.status == "awaiting_approval"
+    approval = one(conn, "SELECT approval_id, proposal_hash FROM approvals")
+    _with_zone(engine, data_dir, vault, UTC)  # the computer now says another day
+    terminal = ApprovingTerminal()
+    engine.__dict__["_terminal"] = terminal
+    outcome = resume(engine, first.run_id)
+    assert outcome.status == "completed", outcome.message
+    assert one(conn, "SELECT approval_id, proposal_hash, status FROM approvals") == (
+        *approval, "consumed")
+    assert outcome.applied[0].startswith("Decisiones/2026-11-24-")
+
+
+def test_a_pending_approval_withdrawn_does_not_say_it_was_approved(conn, data_dir, vault):
+    engine, sessions, _ = engine_for(conn, data_dir, vault)
+    first = run(engine, sessions.create_session("Demo", "demo-alpha"))
+    assert first.status == "awaiting_approval"
+    conn.execute("UPDATE skill_steps SET output_text = replace(output_text, 'cola', 'COLA') "
+                 "WHERE step_key = 'check'")
+    engine.__dict__["_terminal"] = ApprovingTerminal()
+    outcome = resume(engine, first.run_id)
+    assert outcome.status == "failed"
+    assert "after it was approved" not in outcome.message
+    assert "not approved" in outcome.message
+    assert one(conn, "SELECT status FROM approvals") == ("revoked",)
+
+
+def test_a_literal_redaction_mark_from_the_model_is_not_counted(conn, data_dir, vault):
+    terminal = ApprovingTerminal()
+    engine, sessions, _ = engine_for(
+        conn, data_dir, vault,
+        answer(context="El modelo escribe [REDACTED:github] y [REDACTED:aws] a mano."),
+        terminal=terminal)
+    outcome = run(engine, sessions.create_session("Demo", "demo-alpha"))
+    assert outcome.status == "completed", outcome.message
+    assert "- Credenciales enmascaradas: 0.\n" in shown_note(terminal)
+    assert not any("redacted:" in line for line in terminal.shown[0].splitlines())

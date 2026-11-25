@@ -16,7 +16,7 @@ import hmac
 import os
 from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager
-from datetime import date, datetime
+from datetime import date, datetime, tzinfo
 from pathlib import Path
 
 from harness.core.errors import HarnessError
@@ -64,16 +64,19 @@ class DecisionEffect:
     scope = "vault.save_decision"
 
     def __init__(self, data_dir: Path | None, env: Mapping[str, str] | None = None,
-                 lock_wait_s: float = LOCK_WAIT_S) -> None:
+                 lock_wait_s: float = LOCK_WAIT_S, local_tz: tzinfo | None = None) -> None:
         self._data_dir = data_dir
         self._env = env
+        self._local_tz = local_tz  # None: the computer's zone; tests pass a fixed one
         self._lock_wait_s = lock_wait_s
 
     # -- the effect protocol --------------------------------------------------------------------
 
     def bind(self, context: EffectContext) -> Mapping[str, str]:
-        """The vault this run writes to, as a digest of its resolved root (never the path)."""
-        return {"vault": vault_digest(self._root())}
+        """The vault this run writes to, as a digest of its resolved root (never the path), and
+        the note's date: the local date now, fixed for the whole run (2026-11-25)."""
+        day = _run_day(context.run_created_at, self._local_tz)
+        return {"vault": vault_digest(self._root()), "day": day.isoformat()}
 
     def prepare(self, context: EffectContext, validated: str) -> Prepared:
         project = context.project_slug
@@ -85,9 +88,11 @@ class DecisionEffect:
         except HarnessError as exc:
             raise EffectRefused("project_not_found", str(exc)) from None
         fields = _fields(validated)
-        redactions = sum(text.count(REDACTION_MARK) for text in _texts(fields))
+        marks = sum(text.count(REDACTION_MARK) for text in _texts(fields))
+        # Only the marks the harness added: one the model wrote itself is not a redaction.
+        redactions = max(0, marks - (context.model_marks or 0))
         ident = decision_id(project, fields.title)
-        day = _run_day(context.run_created_at)
+        day = _bound_day(context)
         name = decision_file_name(day, fields.title, ident)
         source = context.inputs.get(SOURCE_INPUT, {})
         provenance = Provenance(
@@ -237,9 +242,17 @@ def _texts(fields: DecisionFields) -> list[str]:
             *fields.consequences, *fields.assumptions]
 
 
-def _run_day(created_at: str) -> date:
+def _bound_day(context: EffectContext) -> date:
+    """The date stored with the run when it was created: a zone change never moves it."""
+    try:
+        return date.fromisoformat(context.binding["day"])
+    except (KeyError, ValueError):
+        raise EffectRefused("invalid_run", "the run has no note date; start it again") from None
+
+
+def _run_day(created_at: str, local_tz: tzinfo | None = None) -> date:
     """The local date the run was created: fixed for the whole run, never in the future."""
     try:
-        return datetime.fromisoformat(created_at).astimezone().date()
+        return datetime.fromisoformat(created_at).astimezone(local_tz).date()
     except ValueError:
         raise EffectRefused("invalid_run", "the run has no creation time") from None

@@ -71,6 +71,10 @@ class EffectContext:
     memory_notes: tuple[tuple[str, str], ...] = ()  # (path, sha256) from request_context
     # What `bind` returned when the run was created, from skill_runs.effect_bindings.
     binding: Mapping[str, str] = field(default_factory=dict)
+    # How many `[REDACTED:` marks the model itself wrote in the raw output the validated text
+    # came from (None if that output is not available): marks the harness did not add are not
+    # counted as redactions (2026-11-25, independent review).
+    model_marks: int | None = None
 
 
 class Effect(Protocol):
