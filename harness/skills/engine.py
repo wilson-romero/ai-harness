@@ -318,6 +318,7 @@ class SkillEngine:
             row = self._require_run(run_id)
             if row["status"] not in ("pending", "awaiting_approval", "uncertain"):
                 raise InvalidInput(f"run {run_id} is {row['status']}; nothing changed")
+            report = self._check_effects_before_cancel(row, session)
             now = utc_iso(self._clock())
             with transaction(self._conn):
                 for approval in self._conn.execute(
@@ -338,9 +339,50 @@ class SkillEngine:
                     (now, now, run_id),
                 )
                 self._audit("skill.run", "cancelled", session, run_id, None)
-            return RunOutcome(run_id, "cancelled")
+            return RunOutcome(run_id, "cancelled", message=report)
         finally:
             lock.release()
+
+    def _check_effects_before_cancel(self, row: sqlite3.Row, session: Session) -> str | None:
+        """Reconcile every uncertain approval step before a cancel (2026-11-25, independent
+        review): the effect finishes what it can (the decision writer removes its temporary file,
+        so that a published note becomes visible) and the person is told, for each step, whether
+        its content is in place. A cancel never removes what an effect applied."""
+        uncertain = [s for s in self._latest_steps(row["run_id"]).values()
+                     if s["kind"] == "approval" and s["status"] == "uncertain"]
+        if not uncertain:
+            return None
+        try:
+            skill = self._load_same_skill(row)
+        except InvalidInput as exc:
+            return (f"the effect of step(s) {', '.join(s['step_key'] for s in uncertain)} could "
+                    f"not be checked ({exc}); look at the target by hand")
+        state = _Run(row["run_id"], session, self._sessions.provider_for(session), skill, {})
+        lines = []
+        for step_row in uncertain:
+            key = step_row["step_key"]
+            step = skill.step(key)
+            assert isinstance(step, ApprovalStep)
+            ref = step_row["effect_ref"] or "-"
+            try:
+                result = (self._effects[step.effect].reconcile(
+                    self._effect_context(state, step), step_row["effect_ref"],
+                    step_row["output_sha256"]) if step_row["output_sha256"] else "conflict")
+            except EffectRefused as refused:
+                result = f"refused:{refused.code}"
+                lines.append(f"step {key!r}: could not be checked: {refused}")
+            with transaction(self._conn):
+                self._audit("skill.step.reconciled", result.split(":")[0], session,
+                            row["run_id"], f"step={key};attempt={step_row['attempt']};cancel")
+            if result == "applied":
+                lines.append(f"step {key!r}: the approved content ({ref}) is in the vault; "
+                             "cancelling does not remove it")
+            elif result == "absent":
+                lines.append(f"step {key!r}: nothing was written")
+            elif result == "conflict":
+                lines.append(f"step {key!r}: something else with {ref} is in place; check the "
+                             "target by hand")
+        return "; ".join(lines)
 
     def status(self, raw_run_id: str) -> dict[str, Any]:
         """Everything about a run except contents; takes no lock."""
@@ -808,7 +850,9 @@ class SkillEngine:
         raise InvalidInput(
             f"step {key!r} of run {state.run_id} was interrupted while applying its effect and "
             "the effect cannot tell whether it is in place (conflict): a person must check the "
-            f"target, then `skill resume {state.run_id}` checks again; nothing was applied again"
+            f"target. `skill resume {state.run_id}` checks again; `skill cancel {state.run_id}` "
+            "checks once more, says what is in place and ends the run without removing anything; "
+            "nothing was applied again"
         )
 
     def _revoke(

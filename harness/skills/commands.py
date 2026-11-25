@@ -97,6 +97,8 @@ def run_skill_command(args: argparse.Namespace) -> int:
             return _report(asyncio.run(engine.resume(args.run_id, inputs, args.retry_step)))
         if args.skill_command == "cancel":
             outcome = engine.cancel(args.run_id)
+            if outcome.message:  # what reconciling the effects found (2026-11-25)
+                print(f"{outcome.run_id}: {safe_line(outcome.message).text}", file=sys.stderr)
             print(f"{outcome.run_id}\t{outcome.status}")
             return EXIT_OK
         return _status(engine, args.run_id, args.output)

@@ -599,3 +599,53 @@ def test_an_approval_for_one_vault_is_never_written_into_another(conn, data_dir,
     assert str(other) not in (outcome.message or "") and str(vault) not in (outcome.message or "")
     stored = all_text(conn)
     assert str(vault.resolve()) not in stored and str(other.resolve()) not in stored
+
+
+# -- 7.4 `skill cancel` reconciles first and says whether a note exists ----------------------------
+
+
+def _uncertain_with_two_links(conn, data_dir, vault, monkeypatch):
+    """A run whose note was published but whose temporary file was left (as after a death
+    between the link and the removal): two links, invisible to the memory."""
+    import os
+
+    from harness.memory import decisions
+
+    real = os.unlink
+
+    def unlink(path, *args, **kwargs):
+        if os.path.basename(os.fspath(path)).startswith(decisions.TEMP_PREFIX):
+            raise PermissionError("held")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(decisions.os, "unlink", unlink)
+    terminal = ApprovingTerminal()
+    engine, sessions, _ = engine_for(conn, data_dir, vault, terminal=terminal)
+    outcome = run(engine, sessions.create_session("Demo", "demo-alpha"))
+    monkeypatch.undo()
+    assert outcome.status == "uncertain"
+    return engine, outcome.run_id, shown_target(terminal)
+
+
+def test_cancel_reconciles_and_reports_the_note_that_exists(conn, data_dir, vault, monkeypatch):
+    import os
+
+    engine, run_id, target = _uncertain_with_two_links(conn, data_dir, vault, monkeypatch)
+    assert os.lstat(vault / target).st_nlink == 2
+    outcome = engine.cancel(run_id)
+    assert outcome.status == "cancelled"
+    assert outcome.message and "is in the vault" in outcome.message
+    temps = [p.name for p in (vault / "Decisiones").iterdir() if p.name.startswith(".")]
+    assert temps == [] and os.lstat(vault / target).st_nlink == 1
+    assert target in build_context(vault.resolve(), "demo-alpha", 64_000).text
+
+
+def test_cancel_of_an_uncertain_run_without_a_note_says_nothing_was_written(conn, data_dir, vault,
+                                                                            monkeypatch):
+    engine, run_id, target = _uncertain_with_two_links(conn, data_dir, vault, monkeypatch)
+    (vault / target).unlink()
+    for leftover in (vault / "Decisiones").glob(".harness-*"):
+        leftover.unlink()
+    outcome = engine.cancel(run_id)
+    assert outcome.status == "cancelled"
+    assert outcome.message and "nothing was written" in outcome.message

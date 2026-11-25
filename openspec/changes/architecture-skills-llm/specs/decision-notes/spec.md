@@ -112,6 +112,10 @@ Si el proceso muere después de consumir la aprobación y antes de registrar el 
 - **WHEN** la nota se publica pero su temporal no se puede borrar porque otro programa lo tiene abierto
 - **THEN** la ejecución queda `uncertain` (no `failed`), `resume` termina con código 1 nombrando el temporal mientras siga retenido, y cuando se libera `resume` lo borra, completa el paso sin escribir otra vez y la nota aparece en `memory context`
 
+#### Scenario: Cancelar una ejecución incierta
+- **WHEN** la nota se publicó pero el temporal quedó (muerte o fallo entre el enlace y el borrado) y la persona ejecuta `skill cancel`
+- **THEN** `cancel` reconcilia primero: borra el temporal propio, la nota vuelve a tener un solo enlace y entra en `memory context`, el mensaje dice que la nota está en el vault y la ejecución queda `cancelled`; si no hay nota, el mensaje dice que no se escribió nada
+
 #### Scenario: Nota distinta con el mismo identificador
 - **WHEN** al reconciliar existe una nota con ese identificador y otro contenido
 - **THEN** el paso sigue `uncertain`, `resume` termina con código 1 nombrando el conflicto y no se escribe nada
