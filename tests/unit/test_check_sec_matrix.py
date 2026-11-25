@@ -184,12 +184,14 @@ def test_an_invented_id_in_the_known_debt_list(project, capsys):
 def test_a_broken_relative_link(project, capsys):
     guide = project / "docs" / "security" / "known-debt.md"
     guide.write_text(f"`{TEST_A}`; ver [la matriz](../security/no-existe.md) y "
-                     "[otra](https://example.com) y [aquí](#ancla).\n",
+                     "[otra](https://example.com) y [aquí](#ancla).\n"
+                     "Como código: `[texto](url)` y\n```\n[bloque](tampoco.md)\n```\n",
                      encoding="utf-8", newline="\n")
     code, out = check(project, matrix(), capsys)
     assert code == 1
     assert "docs/security/known-debt.md: broken link: ../security/no-existe.md" in out
     assert "example.com" not in out and "#ancla" not in out
+    assert "url" not in out and "tampoco.md" not in out  # code is an example, not a link
 
 
 def test_the_collection_is_real_and_a_broken_one_is_a_failure(tmp_path, capsys):

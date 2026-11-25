@@ -65,6 +65,7 @@ TEST_ID = re.compile(r"^tests/[A-Za-z0-9_/]+\.py::[A-Za-z_][A-Za-z0-9_]*(?:::[A-
 TEST_ID_IN_TEXT = re.compile(r"tests/[A-Za-z0-9_/]+\.py::[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)?")
 REQUIREMENT_SEPARATOR = " · "
 LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
+INLINE_CODE = re.compile(r"(`+)(?:(?!\1).)+?\1")
 
 
 class CollectError(Exception):
@@ -213,11 +214,24 @@ def check_cited_ids(doc: Path, label: str, collected: set[str]) -> list[str]:
             for test_id in ids if not is_collected(test_id, collected)]
 
 
+def without_code(text: str) -> str:
+    """The text without fenced blocks and inline code spans: a link written as code is an
+    example, not a link."""
+    kept, fenced = [], False
+    for line in text.split("\n"):
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+            continue
+        if not fenced:
+            kept.append(INLINE_CODE.sub("", line))
+    return "\n".join(kept)
+
+
 def check_links(doc: Path, label: str) -> list[str]:
     if not doc.is_file():
         return []  # a document that does not exist has no links (a link TO it is checked)
     problems = []
-    for target in LINK.findall(read_text(doc)):
+    for target in LINK.findall(without_code(read_text(doc))):
         if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", target) or target.startswith("#"):
             continue  # a URL or an anchor in the same document
         relative = target.split("#", 1)[0]

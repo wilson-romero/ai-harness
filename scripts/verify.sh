@@ -23,6 +23,9 @@ uv lock --check
 step "tests"
 uv run pytest
 
+step "SEC matrix: rows, states, cited tests and requirements exist"
+uv run python scripts/check_sec_matrix.py
+
 step "openspec: specs and changes"
 openspec validate --all --strict --no-interactive
 
