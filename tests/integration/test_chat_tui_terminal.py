@@ -1,0 +1,174 @@
+"""`main.py chat` full screen at a real (pseudo-)terminal (shell-tui, task 5.1).
+
+The child runs the real program with the Mock. Ctrl+C is the byte 0x03 written to the
+terminal: Textual's raw mode makes it a key, never a signal. The output is full-screen drawing,
+so the test looks for pieces of text with the escape sequences removed, and for the sequences
+that enter and leave the alternate screen and show the cursor. Skipped where `pty` cannot be
+imported, with that reason.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import signal
+import struct
+import sys
+import time
+
+import pytest
+
+from tests.conftest import REPO_ROOT, query, run_main, subprocess_env, wait_for_running
+
+pty = pytest.importorskip("pty", reason="no pseudo-terminal module on this system")
+select = pytest.importorskip("select")
+termios = pytest.importorskip("termios")
+fcntl = pytest.importorskip("fcntl")
+
+DEADLINE_S = 60.0
+ESCAPES = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[=>78PMc]|[\x07\x08\x0f]")
+ALT_SCREEN_ON, ALT_SCREEN_OFF, CURSOR_SHOWN = "\x1b[?1049h", "\x1b[?1049l", "\x1b[?25h"
+READY = "Type a question"
+
+
+class FullScreenChild:
+    def __init__(self, data_dir, *args: str, **env: str) -> None:
+        environment = subprocess_env(data_dir, **{"TERM": "xterm-256color", **env})
+        for name in ("NO_COLOR", "HARNESS_PLAIN"):
+            if name not in env:
+                environment.pop(name, None)
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.chdir(REPO_ROOT)
+            os.execve(sys.executable, [sys.executable, "main.py", *args], environment)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 110, 0, 0))
+        self.pid, self.fd = pid, fd
+        self.raw = ""
+        self.mark = 0
+
+    def _read(self, timeout: float) -> bool:
+        ready, _, _ = select.select([self.fd], [], [], timeout)
+        if not ready:
+            return True
+        try:
+            chunk = os.read(self.fd, 65536)
+        except OSError:
+            chunk = b""
+        if not chunk:
+            return False
+        self.raw += chunk.decode("utf-8", errors="replace")
+        return True
+
+    def text(self, start: int = 0) -> str:
+        return ESCAPES.sub("", self.raw[start:])
+
+    def read_until(self, text: str) -> None:
+        """Until `text` is drawn after what the last call found."""
+        deadline = time.monotonic() + DEADLINE_S
+        while text not in self.text(self.mark):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not self._read(min(remaining, 0.5)) and \
+                    text not in self.text(self.mark):
+                raise AssertionError(f"{text!r} never appeared:\n{self.text()[-3000:]}")
+        self.mark = len(self.raw)
+
+    def type(self, data: str) -> None:
+        os.write(self.fd, data.encode("utf-8"))
+
+    def wait(self) -> int:
+        deadline = time.monotonic() + DEADLINE_S
+        while time.monotonic() < deadline:
+            try:
+                self._read(0.1)
+            except OSError:
+                pass
+            pid, status = os.waitpid(self.pid, os.WNOHANG)
+            if pid:
+                while self._read(0.05):
+                    if not select.select([self.fd], [], [], 0)[0]:
+                        break
+                os.close(self.fd)
+                return os.waitstatus_to_exitcode(status)
+        self.kill()
+        raise AssertionError("the conversation did not end")
+
+    def kill(self) -> None:
+        try:
+            os.kill(self.pid, 9)
+            os.waitpid(self.pid, 0)
+        except (OSError, ChildProcessError):
+            pass
+
+
+def _restored(child: FullScreenChild) -> bool:
+    """The last alternate-screen sequence leaves it, and the cursor is shown after it."""
+    off = child.raw.rfind(ALT_SCREEN_OFF)
+    return off > child.raw.rfind(ALT_SCREEN_ON) and CURSOR_SHOWN in child.raw[off - 200:]
+
+
+def test_a_question_on_the_full_screen_and_ctrl_q(data_dir):
+    child = FullScreenChild(data_dir, "chat")
+    try:
+        child.read_until(READY)
+        assert ALT_SCREEN_ON in child.raw
+        child.type("hola\r")
+        child.read_until("Received 4 characters")
+        child.type("\x11")  # ctrl+q
+        assert child.wait() == 0
+    finally:
+        child.kill()
+    assert _restored(child)
+    assert query(data_dir, "SELECT status FROM requests") == [("completed",)]
+
+
+def test_ctrl_c_interrupts_the_question_not_the_screen(data_dir):
+    session_id = run_main(data_dir, "session", "create", "S").stdout.strip()
+    child = FullScreenChild(data_dir, "chat", "--session", session_id,
+                            HARNESS_MOCK_DELAY_MS="60000")
+    try:
+        child.read_until(READY)
+        child.type("\x03")  # nothing running: the screen stays
+        child.read_until("still open")
+        child.read_until(READY)
+        child.type("pregunta lenta\r")
+        wait_for_running(data_dir, session_id)
+        child.type("\x03")
+        child.read_until("is uncertain")
+        child.type("/exit\r")
+        assert child.wait() == 0
+    finally:
+        child.kill()
+    assert _restored(child)
+    assert query(data_dir, "SELECT status FROM requests") == [("uncertain",)]
+
+
+def test_sigterm_closes_and_restores_the_terminal(data_dir):
+    child = FullScreenChild(data_dir, "chat")
+    try:
+        child.read_until(READY)
+        os.kill(child.pid, signal.SIGTERM)
+        assert child.wait() == 0
+    finally:
+        child.kill()
+    assert _restored(child)
+    assert query(data_dir, "SELECT COUNT(*) FROM sessions") == [(1,)]
+
+
+@pytest.mark.parametrize(("args", "env"), [
+    (("chat", "--plain"), {}),
+    (("chat",), {"NO_COLOR": "1"}),
+    (("chat",), {"TERM": "dumb"}),
+    (("chat",), {"HARNESS_PLAIN": "1"}),
+    (("chat",), {"TEXTUAL_LOG": "conversacion.log"}),
+])
+def test_plain_text_when_asked(data_dir, args, env):
+    child = FullScreenChild(data_dir, *args, **env)
+    try:
+        child.read_until("\n> ")
+        assert "ai-harness conversation" in child.text()
+        assert "\x1b[" not in child.raw  # no colour, no cursor movement: plain text
+        child.type("\x04")
+        assert child.wait() == 0
+    finally:
+        child.kill()
+    assert not (REPO_ROOT / "conversacion.log").exists()

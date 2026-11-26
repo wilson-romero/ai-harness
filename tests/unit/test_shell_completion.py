@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import pytest
-from prompt_toolkit.completion import CompleteEvent
-from prompt_toolkit.document import Document
 
 from harness.shell.completion import NONE, PATH, acceptable_path, complete
 from harness.shell.parser import COMMANDS
-from harness.shell.styled import ShellCompleter
 from harness.shell.terminal import ShellState
+from harness.shell.tui import _file_choices, _path_candidates
 from tests.shell_support import ScriptedTerminal, make_conversation
 from tests.skill_support import copy_skills
 
@@ -60,18 +58,10 @@ def test_the_path_completer_skips_names_it_could_not_show(tmp_path, monkeypatch)
     except OSError:  # a file system that refuses the name: nothing to skip
         hostile = False
     monkeypatch.chdir(tmp_path)
-    completer = ShellCompleter(STATE)
-    found = [c.text for c in completer.get_completions(Document("/file n"), CompleteEvent())]
-    assert found == ["ota.md"]  # only "nota.md": the others are skipped
-    if hostile:  # negative control: the name is really there for the library
-        raw = [c.text for c in completer._paths.get_completions(Document("n"), CompleteEvent())]
-        assert any("\x1b" in text for text in raw)
-
-
-def test_commands_complete_through_the_prompt_toolkit_adapter():
-    found = list(ShellCompleter(STATE).get_completions(Document("/res"), CompleteEvent()))
-    assert [(c.text, c.start_position) for c in found] == [("/resume", -4)]
-    assert list(ShellCompleter(None).get_completions(Document("/res"), CompleteEvent())) == []
+    assert _path_candidates("n") == ["nota.md"]  # the others are skipped
+    assert _file_choices() == ["nota.md"]  # the file picker offers the same (shell-tui D5)
+    if hostile:  # negative control: the name is really there on the disk
+        assert any("\x1b" in path.name for path in tmp_path.iterdir())
 
 
 async def test_the_conversation_offers_skill_folders_and_listed_sessions(conn, data_dir,

@@ -80,6 +80,32 @@ class ShellState:
     status: Callable[[], str]  # the status line of the session held now
     resume_count: Callable[[], int]  # how many sessions the last /sessions listed
     skill_names: Callable[[], list[str]]  # folder names with the shape of a skill name
+    # shell-tui D4: read in the conversation's own thread only (they query the database).
+    panel: Callable[[], PanelState] | None = None  # the side panel of the session held now
+    sessions: Callable[[], list[str]] | None = None  # what /sessions lists; sets /resume numbers
+
+
+@dataclass(frozen=True)
+class PanelState:
+    """The side panel of the full-screen terminal (shell-tui D4): every field is harness state
+    of the session held at the moment it is read, cleaned for a terminal; nothing foreign."""
+
+    session_name: str
+    session_id: str  # in full: the first 8 characters of a UUIDv7 are its time
+    project: str
+    provider: str
+    notes: tuple[str, ...]  # memory notes included in the last question (shown names)
+    sends: int  # requests of this session that went to the provider
+    last_request: str  # status of the last request of this session, or "-"
+
+
+@runtime_checkable
+class ApprovalTerminal(Protocol):
+    """A terminal that draws the approval notice itself (shell-tui D6). The conversation hands
+    it the pieces of the notice it is about to show; the terminal recognises that exact text
+    when the engine shows it and draws a box from the pieces instead."""
+
+    def expect_approval(self, shown: str, header: list[str], content: list[str]) -> None: ...
 
 
 @runtime_checkable

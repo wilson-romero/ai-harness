@@ -58,7 +58,9 @@ from harness.shell.render import (  # noqa: F401 - re-exported: the names tests 
     wrap_rows,
 )
 from harness.shell.terminal import (
+    ApprovalTerminal,
     ConversationTerminal,
+    PanelState,
     ShellState,
     StyledTerminal,
     WaitInterrupted,
@@ -210,6 +212,7 @@ class Conversation:
         self._attachment: tuple[str, str] | None = None  # (name, block) for the next question
         self._loop: asyncio.AbstractEventLoop | None = None
         self._current: asyncio.Task | None = None
+        self._notes: tuple[str, ...] = ()  # memory notes of the last question (shell-tui D4)
 
     # -- output ---------------------------------------------------------------------------------
 
@@ -247,7 +250,11 @@ class Conversation:
         for line in proposal.content.split("\n"):
             content += wrap_rows(line, columns, FOREIGN_PREFIX)
         rule = self._harness_rows([APPROVAL_RULE])
-        return "\n".join([*self._harness_rows(header), *rule, *content, *rule])
+        header_rows = self._harness_rows(header)
+        shown = "\n".join([*header_rows, *rule, *content, *rule])
+        if isinstance(self._terminal, ApprovalTerminal):
+            self._terminal.expect_approval(shown, header, content)
+        return shown
 
     # -- interruption (D6, D7) --------------------------------------------------------------------
 
@@ -281,6 +288,8 @@ class Conversation:
                 status=self._status_line,
                 resume_count=lambda: len(self._listed),
                 skill_names=self._skill_names,
+                panel=self._panel,
+                sessions=self._session_choices,
             ))
         if session_id is not None:
             self._switch_to(self._take_existing(session_id))
@@ -476,6 +485,7 @@ class Conversation:
         self._release()
         self._session, self._lock = taken
         self._attachment = None
+        self._notes = ()
 
     def _release(self) -> None:
         if self._lock is not None:
@@ -509,6 +519,33 @@ class Conversation:
             return status_line(None, self._deps.provider_name, "-")
         return status_line(session.project_id, self._deps.provider_name, session.session_id)
 
+    def _panel(self) -> PanelState:
+        """The side panel (shell-tui D4): the session held now, from the database and the
+        configuration only. Called in the conversation's thread, between actions."""
+        session = self._service.require_session(str(self._session_id))
+        (sends,) = self._deps.conn.execute(
+            "SELECT COUNT(*) FROM requests WHERE session_id = ?", (str(session.session_id),)
+        ).fetchone()
+        last = self._last_request()
+        return PanelState(
+            session_name=terminal_safe(session.name),
+            session_id=str(session.session_id),
+            project=terminal_safe(session.project_id or "-"),
+            provider=terminal_safe(self._deps.provider_name),
+            notes=self._notes,
+            sends=int(sends),
+            last_request=last[1] if last is not None else "-",
+        )
+
+    def _session_choices(self) -> list[str]:
+        """What /sessions lists, one line each, numbered as /resume takes them: it sets the
+        numbers exactly as /sessions does (shell-tui D5)."""
+        sessions = self._service.list_sessions()
+        self._listed = [s.session_id for s in sessions]
+        return [f"{'*' if s.session_id == self._session_id else ' '}{number:>3}  "
+                f"{s.session_id}  {s.project_id or '-'}  {terminal_safe(s.name)}"
+                for number, s in enumerate(sessions, start=1)]
+
     def _skill_names(self) -> list[str]:
         """Names of the skill folders, for completion only: never read further, never shown
         unless they have the shape of a skill name."""
@@ -535,6 +572,7 @@ class Conversation:
 
     def _context_for_question(self, text: str) -> ProjectContext | None:
         """Same checks, refusals and audit as `ask --project` with the session's project."""
+        self._notes = ()
         session = self._service.require_session(str(self._session_id))
         if session.project_id is None:
             return None
@@ -545,6 +583,8 @@ class Conversation:
             self._service.deny_project_question(str(session.session_id))
             raise
         self._context_summary(context)
+        # The names the context already lists, cleaned and redacted (shell-tui D4).
+        self._notes = tuple(safe_line(note.relative).text for note in context.included)
         return context
 
     def _context_summary(self, context: ProjectContext) -> None:
