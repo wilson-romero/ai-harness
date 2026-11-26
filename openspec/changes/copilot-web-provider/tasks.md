@@ -204,6 +204,7 @@ Wilson ejecutó la rama en Windows 11 AMD64 (Python 3.14.10, Edge 158, PowerShel
 
 - [x] 8.13 Las sugerencias de seguimiento no forman parte de la respuesta (D8, «Los controles no son respuesta»). Fallo observado en la página real (2026-11-26, una pregunta del coordinador con un prompt sintético fijo, envío 12 de 100): tras la respuesta salieron tres líneas de sugerencias. Arreglo por estructura en `REPLY_TEXT_JS`: el texto de botones, barras de herramientas y menús dentro del turno no se lee. Oráculo y control negativo: en D8.
   - Recibo (2026-11-26, macOS-26.2 arm64, Python 3.14.8, Edge 158): contra el lector anterior, 1 FAILED (`…ZQX-END-5Copy` y las tres sugerencias); con el arreglo, las pruebas de lectura de la respuesta pasan (5 passed). Página real: ver el recibo siguiente.
+  - Recibo (2026-11-26, macOS-26.2 arm64, Python 3.14.8, Edge 158, página real con la cuenta de prueba, con ventana, envío 13 de 100, prompt sintético fijo que pide una sola palabra): `ask` exit 0 en 16,8 s; salida de 1 línea no vacía, de 5 caracteres, igual (por hash) a la palabra pedida; sin avisos en stderr. La salida se guardó solo en `HARNESS_DATA_DIR` y no se leyó. Antes de ese envío, al reabrir la conversación del coordinador sin enviar nada, la primera clasificación fue la de inicio de sesión y el guion se detuvo; el `ask` posterior, que exige que ese estado dure 3 s, encontró el chat listo. Es coherente con una redirección de inicio de sesión que se resuelve sola, pero no está demostrado.
 
 ## Workflow follow-up
 
