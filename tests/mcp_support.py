@@ -182,6 +182,20 @@ def result_lines(out: str) -> str:
 LOOPBACK_PORT_ZERO = {"('127.0.0.1', 0)", "('::1', 0)"}
 
 
+def unexpected_sockets(report: dict, events: list[dict]) -> str:
+    """The failure message of the socket oracle (revised on 2026-11-26): the process and its
+    environment, then every unexpected event in full (what, address, why it is not the event
+    loop's own pair, its whole stack), so one failing run says what happened."""
+    lines = [f"process {report.get('argv')}: {report.get('environment')}"]
+    for event in events:
+        what = event["event"] + (f" {event['address']}" if "address" in event else "")
+        if "family" in event:
+            what += f" family={event['family']}"
+        lines.append(f"- {what}: {event.get('why', '?')}")
+        lines.extend(f"    {frame}" for frame in event.get("stack", []))
+    return "\n".join(lines)
+
+
 def child_env(**extra: str) -> dict[str, str]:
     """The environment of a harness process run by a test: a copy of this one, never built."""
     env = {k: v for k, v in os.environ.items() if k not in HARNESS_VARS}

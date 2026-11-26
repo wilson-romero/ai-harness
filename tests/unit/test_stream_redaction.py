@@ -671,7 +671,11 @@ def test_a_failing_log_does_not_end_the_session(tmp_path, monkeypatch):
     async def session() -> None:
         async with bounded_stdio([sys.executable, "-c", child], dict(os.environ), None,
                                  descriptor, state):
-            await anyio.sleep(1.0)
+            # Revised on 2026-11-26: wait for the bytes, not for a fixed second; starting a
+            # Python process alone can take seconds on a machine that scans each new one.
+            with anyio.fail_after(60):
+                while state.stderr_bytes < 100_000 and state.fault is None:
+                    await anyio.sleep(0.05)
 
     try:
         anyio.run(session)  # raises (an ExceptionGroup) if the stderr reader dies

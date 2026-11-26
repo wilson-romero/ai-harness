@@ -341,7 +341,12 @@ def _server_log(data_dir: Path, server: str) -> Path | None:
             if path.exists():
                 os.chmod(path, 0o600)
         if path.exists() and path.stat().st_size > LOG_ROTATE_BYTES:
-            os.replace(path, path.with_name(path.name + ".1"))
+            try:
+                os.replace(path, path.with_name(path.name + ".1"))
+            except PermissionError:
+                # Revised on 2026-11-26: another session still writes it, and the system does
+                # not replace an open file (Windows, WinError 32). Append now, rotate next time.
+                pass
     except OSError:
         print("warning: the server's stderr log cannot be written; it is discarded",
               file=sys.stderr)

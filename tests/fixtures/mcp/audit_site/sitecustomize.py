@@ -36,8 +36,8 @@ def _write() -> None:
     try:
         path = os.path.join(_target, f"sockets-{os.getpid()}.json")
         with open(path, "w", encoding="utf-8") as handle:
-            json.dump({"argv": [os.path.basename(a) for a in sys.argv[:3]], "events": _events},
-                      handle)
+            json.dump({"argv": [os.path.basename(a) for a in sys.argv[:3]],
+                       "environment": socket_origin.environment(), "events": _events}, handle)
     except OSError:
         pass
 
