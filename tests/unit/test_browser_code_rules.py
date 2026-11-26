@@ -58,3 +58,26 @@ def test_provider_types_only_into_the_editor_and_sends_only_with_the_measured_co
     assert any(a.startswith("await composer.fill(self.request.prompt") for a in actions)
     assert any(a.startswith('await composer.press("Enter"') for a in actions)
     assert any(a.startswith("await self.locators.send.resolve(page).first.click(") for a in actions)
+
+
+LAUNCH = re.compile(r"\.launch_persistent_context\(|\bchromium\.launch\(|\.connect_over_cdp\(")
+
+
+def test_edge_is_launched_in_one_place_only():
+    """Every path that opens the dedicated profile (`copilot login`, the probe, a one-shot
+    `ask`, a conversation's `open_resources`) goes through `EdgeLauncher._launch`, so all of
+    them pass the same arguments (sandbox, dropped defaults, Playwright's `--password-store` and
+    `--use-mock-keychain`, which set where the cookie key comes from) and the same profile
+    directory. A second launch site could open the profile with another key source and lose
+    its cookies (2026-11-26 review of the lost sessions)."""
+    found = _offenders(LAUNCH, "harness", "main.py", "scripts")
+    assert [f.split(":")[0] for f in found] == ["harness/browser/edge.py"], found
+
+
+def test_the_launch_rule_sees_another_launch_site(tmp_path):
+    """Negative control: the pattern catches a direct launch however it is written."""
+    for line in ("ctx = await pw.chromium.launch_persistent_context(str(p))",
+                 "browser = await playwright.chromium.launch(channel='msedge')",
+                 "b = await pw.chromium.connect_over_cdp('http://127.0.0.1:9222')"):
+        assert LAUNCH.search(line), line
+    assert not LAUNCH.search("async with launcher.open(wait_s=None) as context:")
