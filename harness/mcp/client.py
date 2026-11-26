@@ -120,6 +120,7 @@ class Outcome:
     interrupted: bool = False
     killed_at_deadline: bool = False  # the harness's own deadline, not a phase deadline
     stderr_bytes: int = 0  # everything the server wrote on stderr in this session
+    stderr_dropped: int = 0  # of those, the bytes that are in no form in its log
     call_sent: bool = False
     duration_ms: int = 0
 
@@ -289,6 +290,7 @@ def _absorb(message: dict[str, Any], outcome: Outcome, request: SessionRequest) 
     outcome.fault_bytes_exact = message.get("fault_bytes_exact") is not False
     outcome.call_bytes = _int(message.get("call_bytes")) or 0
     outcome.stderr_bytes = _int(message.get("stderr_bytes")) or 0
+    outcome.stderr_dropped = _int(message.get("stderr_dropped")) or 0
     raw = message.get("result")
     if outcome.error_code is None and raw is not None:
         try:

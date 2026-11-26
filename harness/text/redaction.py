@@ -117,8 +117,9 @@ class Redacted:
         return len(self.kinds)
 
 
-def redact(text: str) -> Redacted:
-    """Replace every known credential with `[REDACTED:<kind>]`."""
+def _redact_once(text: str) -> Redacted:
+    """One pass: each pattern in `PATTERNS` order replaces its matches in the text left by the
+    patterns before it (the marker a pattern leaves is a boundary for the next ones)."""
     kinds: list[str] = []
     for kind, spans_of in PATTERNS:
         spans = spans_of(text)
@@ -135,6 +136,175 @@ def redact(text: str) -> Redacted:
     return Redacted(text=text, kinds=tuple(kinds))
 
 
+# A pass that changes nothing ends the loop. Not unbounded: a chain of glued tokens that each
+# need the next one masked first would cost one pass per token over the whole text.
+REDACT_PASSES = 4
+
+
+def redact(text: str) -> Redacted:
+    """Replace every known credential with `[REDACTED:<kind>]`.
+
+    The pass above is repeated until it finds nothing (at most `REDACT_PASSES` times; revised
+    2026-11-25): a credential glued to the end of another one (`dop_v1_<hex>sk-ant-...`) only
+    has its boundary once the first is a marker. The first pass is the original function, so
+    later passes can only mask more. Not covered: a credential whose start another pattern
+    swallowed (an Anthropic or Slack key ending in the header of a JWT leaves the JWT's other
+    two segments, which no pattern matches); a hand-made chain of more than four glued
+    credentials that each find their boundary only once the next one is a marker (GitLab
+    tokens whose body ends in `-`, then an AWS key): the first ones stay in clear, and nothing
+    says so (the single pass of before masked only the last one).
+    """
+    kinds: list[str] = []
+    for _ in range(REDACT_PASSES):
+        result = _redact_once(text)
+        if not result.kinds:
+            break
+        text = result.text
+        kinds.extend(result.kinds)
+    return Redacted(text=text, kinds=tuple(kinds))
+
+
 def secret_kinds(text: str) -> Counter[str]:
     """Which credential kinds a text contains, without returning any value."""
     return Counter(redact(text).kinds)
+
+
+# The stream redactor (mcp-gateway D3, revised 2026-11-25 for the fourth time: simplified).
+# A line ends at LF, CRLF or a lone CR. A line of at most `STREAM_LINE_BYTES`, its end included,
+# goes through `redact` whole; a longer one is never redacted in parts: it is dropped, with a
+# marker.
+STREAM_LINE_BYTES = 16 * 1024
+# A private key block hides at most this many bytes after its BEGIN header (a 16384-bit RSA
+# key in PEM is about 13 KiB); past that a marker says so and the next line is handled as usual.
+STREAM_KEY_BYTES = 32 * 1024
+LONG_LINE_MARKER = "[ai-harness: a line of {size} bytes was dropped: too long to redact]\n"
+KEY_BOUND_MARKER = ("[ai-harness: no END line within {limit} bytes of a private key header; "
+                    "the rest of this line is dropped]\n")
+_LINE_END = re.compile(rb"\r\n|\r|\n")
+_PEM_MARK = re.compile(rb"-----(BEGIN|END) (?:[A-Z0-9]+ )*PRIVATE KEY-----")
+_MARK_WINDOW = 256  # bytes of a line kept to find a header or footer split across reads
+
+
+@dataclass(frozen=True)
+class Piece:
+    """What `LineRedactor` releases: `output` to write, standing for `raw` input bytes, which
+    are in the log (as text or as a credential's marker) only if `kept`."""
+
+    raw: int
+    output: bytes
+    kept: bool
+
+
+class LineRedactor:
+    """`redact` over a byte stream that arrives in arbitrary chunks (mcp-gateway D3, SEC-01).
+
+    A line ends at LF, CRLF or a lone CR; a CR at the end of a read waits for the next byte,
+    so a CRLF is one line also when a read splits it. A
+    line of at most `line_bytes` (its line end included) is redacted whole; a longer one is dropped
+    up to its line end and replaced by one marker: a credential in it is not written, and
+    neither is the rest of that line. From a line with a private key's BEGIN header to the line
+    with its END, the lines after the header line are dropped; if the END is not within
+    `key_bytes` after the header, a marker says so and logging goes on at the next line.
+
+    Only the current line is held (at most `line_bytes`). Bytes that are not UTF-8 pass
+    unchanged (`surrogateescape`). No input makes it raise. Not covered: a credential of a
+    format `redact` does not know; a header or footer longer than 256 bytes split across reads;
+    a key block longer than `key_bytes`; the unfinished line if `finish` is never called.
+    """
+
+    def __init__(self, line_bytes: int = STREAM_LINE_BYTES,
+                 key_bytes: int = STREAM_KEY_BYTES) -> None:
+        self._line_bytes, self._key_bytes = line_bytes, key_bytes
+        self._line = bytearray()  # the current line while it is within the limit
+        self._size = 0  # bytes of the current line so far
+        self._tail = b""  # its last bytes, to find a header or footer split across reads
+        self._in_key = False  # the current line started inside a private key block
+        self._open = False  # a private key block is open at this point of the stream
+        self._key_seen = 0  # bytes after the BEGIN header of the open block
+        self._cr = False  # the line taken so far ends with a CR that may be followed by a LF
+
+    @property
+    def pending(self) -> int:
+        return len(self._line)
+
+    def feed(self, data: bytes) -> list[Piece]:
+        out: list[Piece] = []
+        pos = 0
+        if self._cr and data:  # the last read ended with a CR: it ends its line either way
+            if data[:1] == b"\n":
+                self._take(b"\n", out)
+                pos = 1
+            out.append(self._end_line())
+        while pos < len(data):
+            end = _LINE_END.search(data, pos)
+            stop = end.end() if end else len(data)
+            self._take(data[pos:stop], out)
+            if end and end.group() == b"\r" and stop == len(data):
+                self._cr = True
+            elif end:
+                out.append(self._end_line())
+            pos = stop
+        return out
+
+    def finish(self) -> list[Piece]:
+        """The stream ended: its last line, even without a line end, is complete."""
+        return [self._end_line()] if self._size else []
+
+    def _take(self, part: bytes, out: list[Piece]) -> None:
+        self._watch_keys(part, out)
+        self._size += len(part)
+        if self._in_key or self._size > self._line_bytes:
+            self._line.clear()
+        else:
+            self._line += part
+
+    def _end_line(self) -> Piece:
+        size = self._size
+        if self._in_key:
+            piece = Piece(size, b"", False)
+        elif size > self._line_bytes:
+            piece = Piece(size, LONG_LINE_MARKER.format(size=size).encode("ascii"), False)
+        else:  # the line end stays: a key block without END would otherwise swallow it
+            body = bytes(self._line).rstrip(b"\r\n")  # a line holds one line end at most
+            end = bytes(self._line[len(body):])
+            piece = Piece(size, _encoded(redact(_text(body)).text) + end, True)
+        self._line.clear()
+        self._size, self._tail, self._in_key, self._cr = 0, b"", self._open, False
+        return piece
+
+    def _watch_keys(self, part: bytes, out: list[Piece]) -> None:
+        """Follow BEGIN headers and END footers through `part`, counting the bytes after an
+        open header; past `key_bytes` the block is abandoned, with a marker."""
+        window = self._tail + part
+        skip = len(self._tail)
+        counted = 0  # bytes of `part` already counted
+        search = 0
+        while mark := _PEM_MARK.search(window, search):
+            search = mark.start() + 1  # every position: a footer may end where a header starts
+            if mark.end() <= skip:
+                continue  # seen in an earlier part
+            at = mark.end() - skip
+            self._count(at - counted, out)
+            counted = at
+            if mark.group(1) == b"BEGIN":
+                self._open, self._key_seen = True, 0
+            else:
+                self._open = False
+        self._count(len(part) - counted, out)
+        self._tail = window[-_MARK_WINDOW:]
+
+    def _count(self, size: int, out: list[Piece]) -> None:
+        if not self._open:
+            return
+        self._key_seen += size
+        if self._key_seen > self._key_bytes:
+            self._open = False
+            out.append(Piece(0, KEY_BOUND_MARKER.format(limit=self._key_bytes).encode(), False))
+
+
+def _encoded(text: str) -> bytes:
+    return text.encode("utf-8", "surrogateescape")
+
+
+def _text(data: bytes | bytearray) -> str:
+    return bytes(data).decode("utf-8", "surrogateescape")

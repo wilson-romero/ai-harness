@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import hashlib
 import json
 import sqlite3
@@ -100,6 +101,7 @@ class _Run:
     outputs: dict[str, str] = field(default_factory=dict)  # this invocation's step outputs
     started: float = 0.0
     applied: list[str] = field(default_factory=list)  # targets applied in this invocation
+    source_checked: bool = False  # the early check of applied sources ran (2026-11-25)
 
 
 @dataclass(frozen=True)
@@ -146,6 +148,17 @@ def _check_unicode(inputs: Mapping[str, str]) -> None:
     for name, value in inputs.items():
         if not (is_valid_unicode(name) and is_valid_unicode(value)):
             raise InvalidInput(f"input {name!r} is not valid Unicode text")
+
+
+# Reserved keys of an effect's binding: the source key fixed when the run was created.
+SOURCE_PARTITION = "source.partition"
+SOURCE_SHA256 = "source.sha256"
+
+
+def _bound_source(context: EffectContext) -> tuple[str, str] | None:
+    partition = context.binding.get(SOURCE_PARTITION)
+    digest = context.binding.get(SOURCE_SHA256)
+    return (partition, digest) if partition and digest else None
 
 
 def step_marker(skill: str, step: str, attempt: int) -> str:
@@ -239,7 +252,7 @@ class SkillEngine:
                 )
             run_id = str(uuid7())
             now = utc_iso(self._clock())
-            bindings = self._bind(skill, session, run_id, now, manifest)
+            bindings = self._bind(skill, session, run_id, now, manifest, inputs)
             try:
                 with transaction(self._conn):
                     self._conn.execute(
@@ -393,16 +406,20 @@ class SkillEngine:
             step = skill.step(key)
             assert isinstance(step, ApprovalStep)
             ref = step_row["effect_ref"] or "-"
+            effect = self._effects[step.effect]
+            context = self._effect_context(state, step)
             try:
-                result = (self._effects[step.effect].reconcile(
-                    self._effect_context(state, step), step_row["effect_ref"],
-                    step_row["output_sha256"]) if step_row["output_sha256"] else "conflict")
+                result = (effect.reconcile(context, step_row["effect_ref"],
+                                           step_row["output_sha256"])
+                          if step_row["output_sha256"] else "conflict")
             except EffectRefused as refused:
                 result = f"refused:{refused.code}"
                 lines.append(f"step {key!r}: could not be checked: {refused}")
             with transaction(self._conn):
                 self._audit("skill.step.reconciled", result.split(":")[0], session,
                             row["run_id"], f"step={key};attempt={step_row['attempt']};cancel")
+                if result == "applied":  # applied for real, even if the run is cancelled
+                    self._record_source(row["run_id"], effect, context, step_row["effect_ref"])
             if result == "applied":
                 lines.append(f"step {key!r}: the approved content ({ref}) is in the vault; "
                              "cancelling does not remove it")
@@ -496,7 +513,9 @@ class SkillEngine:
                 (step.id, utc_iso(self._clock()), state.run_id),
             )
             if isinstance(step, LlmStep):
-                outcome = await self._llm(state, step, latest)
+                outcome = self._check_sources(state)
+                if outcome is None:
+                    outcome = await self._llm(state, step, latest)
             elif isinstance(step, ValidateStep):
                 outcome = self._validate(state, step, latest)
             else:
@@ -854,6 +873,7 @@ class SkillEngine:
         with transaction(self._conn):
             self._audit("effect.applied", "applied", state.session, state.run_id,
                         f"step={step.id};ref={proposed.effect_ref}")
+            self._record_source(state.run_id, effect, effect_context, proposed.effect_ref)
         if proposal.target is not None:
             state.applied.append(proposal.target)
         self._complete(state, step.id, row, proposal.content)
@@ -900,6 +920,7 @@ class SkillEngine:
                     state.outputs[key] = stored
                 self._audit("skill.step.reconciled", "applied", state.session, state.run_id,
                             detail)
+                self._record_source(state.run_id, effect, context, row["effect_ref"])
             return
         if result == "absent":
             if row["attempt"] >= MAX_ATTEMPTS:
@@ -972,7 +993,60 @@ class SkillEngine:
         return (f"approval={approval['approval_id']};step={approval['step_key']};"
                 f"hash={approval['proposal_hash']}")
 
-    def _bind(self, skill: Skill, session: Session, run_id: str, now: str, manifest: str) -> str:
+    def _check_sources(self, state: _Run) -> RunOutcome | None:
+        """Before the first model call of this invocation: has an effect of this skill already
+        been applied from the same source, and is it still in place? (D8, revised 2026-11-25.)
+
+        Only a refusal is acted on; the title check after the model stays the authority. The
+        approval step whose effect refuses fails with its code, before anything is sent."""
+        if state.source_checked:
+            return None
+        state.source_checked = True
+        latest = self._latest_steps(state.run_id)
+        for step in state.skill.workflow.steps:
+            if not isinstance(step, ApprovalStep) or latest[step.id]["status"] == "completed":
+                continue
+            effect = self._effects[step.effect]
+            refusal_of = getattr(effect, "early_refusal", None)
+            if refusal_of is None:
+                continue
+            context = self._effect_context(state, step)
+            key = _bound_source(context)
+            if key is None:
+                continue
+            refs = [r[0] for r in self._conn.execute(
+                "SELECT effect_ref FROM effect_sources WHERE scope = ? AND partition_key = ? "
+                "AND source_sha256 = ? ORDER BY recorded_at, effect_ref",
+                (effect.scope, *key),
+            )]
+            refused = refusal_of(context, refs) if refs else None
+            if refused is None:
+                continue
+            row = latest[step.id]
+            with transaction(self._conn):
+                self._set_step(row, "failed", error_code=refused.code, finished=True)
+                self._finish_run_locked(state.run_id, state.session, "failed", refused.code)
+            return RunOutcome(state.run_id, "failed",
+                              message=f"step {step.id!r}: {refused}; nothing was sent to the "
+                              "provider, asked or applied")
+        return None
+
+    def _record_source(self, run_id: str, effect: Effect, context: EffectContext,
+                       effect_ref: str | None) -> None:
+        """Inside the transaction that records the effect as applied: which source it came
+        from, as fixed when the run was created (never from this invocation's inputs, which a
+        `resume` may not have). Never for a rejected, abandoned or uncertain step."""
+        key = _bound_source(context)
+        if key is None or effect_ref is None:
+            return
+        self._conn.execute(
+            "INSERT OR IGNORE INTO effect_sources (scope, partition_key, source_sha256, "
+            "effect_ref, run_id, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (effect.scope, *key, effect_ref, run_id, utc_iso(self._clock())),
+        )
+
+    def _bind(self, skill: Skill, session: Session, run_id: str, now: str, manifest: str,
+              inputs: Mapping[str, str]) -> str:
         """What each effect of the skill fixes for the whole run, as canonical JSON (2026-11-25).
 
         Asked before the run exists: an effect that refuses (no vault configured, say) leaves
@@ -987,8 +1061,16 @@ class SkillEngine:
                 skill_version=skill.version, skill_sha256=skill.sha256,
                 inputs=json.loads(manifest),
             )
-            bound = self._effects[step.effect].bind(context)
-            bindings[step.effect] = {str(k): str(v) for k, v in bound.items()}
+            effect = self._effects[step.effect]
+            bound = {str(k): str(v) for k, v in effect.bind(context).items()}
+            # The source key is fixed here, from the inputs of `run`, so that a `resume` without
+            # inputs can still record it once the effect is applied (2026-11-25, review 4).
+            key_of = getattr(effect, "source_key", None)
+            key = (key_of(dataclasses.replace(context, binding=bound), inputs)
+                   if key_of is not None else None)
+            if key is not None:
+                bound[SOURCE_PARTITION], bound[SOURCE_SHA256] = key
+            bindings[step.effect] = bound
         return json.dumps(bindings, sort_keys=True, separators=(",", ":"))
 
     def _effect_context(self, state: _Run, step: ApprovalStep) -> EffectContext:
