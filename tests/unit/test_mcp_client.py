@@ -18,10 +18,11 @@ from harness.mcp.client import (
 )
 from harness.mcp.config import ServerEntry
 from harness.mcp.worker import classify
+from tests.mcp_support import ABSOLUTE_PROGRAM
 from tests.mcp_support import hang_guard  # noqa: F401 - fixture
 
 ENTRY = ServerEntry.model_validate({
-    "command": ["/opt/synthetic/server"], "env": ["DECLARED"], "startup_timeout_s": 1,
+    "command": [ABSOLUTE_PROGRAM], "env": ["DECLARED"], "startup_timeout_s": 1,
     "call_timeout_s": 1, "tools": {},
 })
 

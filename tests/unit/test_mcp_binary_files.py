@@ -1,0 +1,136 @@
+"""MCP files written through descriptors: the argument key and the server log (hotfix 0.2.1).
+
+On Windows a descriptor opened without O_BINARY translates b"\\n" into b"\\r\\n". v0.2.0 wrote
+the key that way, so a key with a 0x0A byte came out longer than 32 bytes and every later
+call in that data dir failed with "the MCP argument key is damaged". These tests simulate that
+text mode on any platform: a fake O_BINARY bit, and an `os.write` that translates on every
+descriptor opened without it.
+"""
+
+from __future__ import annotations
+
+import os
+import threading
+from pathlib import Path
+
+import pytest
+
+from harness.mcp import audit
+from harness.mcp.audit import ARGS_KEY, KEY_BYTES, args_key
+
+FAKE_O_BINARY = 1 << 29  # a bit no platform uses for open(2) flags here
+NEWLINE_KEY = bytes(range(KEY_BYTES))  # contains 0x0A, like one random key in about eight
+
+
+@pytest.fixture
+def text_mode(monkeypatch):
+    """Descriptors behave like Windows ones: text mode unless opened with O_BINARY."""
+    assert not os.O_WRONLY & FAKE_O_BINARY and not os.O_CREAT & FAKE_O_BINARY
+    monkeypatch.setattr(os, "O_BINARY", FAKE_O_BINARY, raising=False)
+    text_descriptors: set[int] = set()
+    real_open, real_write, real_close = os.open, os.write, os.close
+
+    def fake_open(path, flags, mode=0o777, **kwargs):
+        descriptor = real_open(path, flags & ~FAKE_O_BINARY, mode, **kwargs)
+        if not flags & FAKE_O_BINARY:
+            text_descriptors.add(descriptor)
+        return descriptor
+
+    def fake_write(descriptor, data):
+        if descriptor in text_descriptors:
+            real_write(descriptor, bytes(data).replace(b"\n", b"\r\n"))
+            return len(data)
+        return real_write(descriptor, data)
+
+    def fake_close(descriptor):
+        text_descriptors.discard(descriptor)
+        real_close(descriptor)
+
+    monkeypatch.setattr(os, "open", fake_open)
+    monkeypatch.setattr(os, "write", fake_write)
+    monkeypatch.setattr(os, "close", fake_close)
+    monkeypatch.setattr(audit.secrets, "token_bytes", lambda n: NEWLINE_KEY[:n])
+    return text_descriptors
+
+
+def test_a_key_with_a_newline_byte_is_written_exactly_in_text_mode(tmp_path, text_mode):
+    key = args_key(tmp_path)
+    assert key == NEWLINE_KEY
+    assert (tmp_path / ARGS_KEY).read_bytes() == NEWLINE_KEY
+    assert args_key(tmp_path) == NEWLINE_KEY
+
+
+def test_the_simulation_really_translates_without_the_flag(tmp_path, text_mode):
+    """Control: the double damages a write made without O_BINARY, as Windows does."""
+    path = tmp_path / "plain"
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        os.write(descriptor, b"a\nb")
+    finally:
+        os.close(descriptor)
+    assert path.read_bytes() == b"a\r\nb"
+
+
+def _damaged(data_dir: Path, content: bytes) -> Path:
+    path = data_dir / ARGS_KEY
+    path.parent.mkdir(mode=0o700, parents=True)
+    path.write_bytes(content)
+    return path
+
+
+def test_a_damaged_key_left_by_v0_2_0_is_set_aside_and_replaced(tmp_path):
+    damaged = NEWLINE_KEY.replace(b"\n", b"\r\n")
+    path = _damaged(tmp_path, damaged)
+    key = args_key(tmp_path)
+    assert len(key) == KEY_BYTES and path.read_bytes() == key
+    aside = sorted(path.parent.glob("mcp-args.key.damaged-*"))
+    assert [p.read_bytes() for p in aside] == [damaged]
+    assert args_key(tmp_path) == key  # stable from now on
+    assert sorted(path.parent.glob("mcp-args.key.damaged-*")) == aside
+
+
+@pytest.mark.parametrize("content", [b"", b"short", b"x" * (KEY_BYTES + 1)])
+def test_any_wrong_length_key_is_recovered(tmp_path, content):
+    path = _damaged(tmp_path, content)
+    key = args_key(tmp_path)
+    assert len(key) == KEY_BYTES and path.read_bytes() == key
+
+
+def test_a_good_key_is_never_replaced(tmp_path):
+    path = _damaged(tmp_path, b"k" * KEY_BYTES)
+    assert args_key(tmp_path) == b"k" * KEY_BYTES
+    assert list(path.parent.glob("*.damaged-*")) == []
+
+
+def test_concurrent_recoveries_agree_on_one_key(tmp_path):
+    _damaged(tmp_path, b"x" * (KEY_BYTES + 3))
+    keys: list[bytes] = []
+    errors: list[BaseException] = []
+
+    def work():
+        try:
+            keys.append(args_key(tmp_path))
+        except BaseException as error:  # noqa: BLE001 - reported by the assertion below
+            errors.append(error)
+
+    threads = [threading.Thread(target=work) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert errors == []
+    assert len(keys) == 8 and len(set(keys)) == 1
+    assert len(list((tmp_path / "keys").glob("mcp-args.key.damaged-*"))) == 1
+
+
+def test_the_server_log_keeps_exact_bytes_in_text_mode(tmp_path, text_mode):
+    from harness.mcp.worker import _open_errlog
+
+    path = tmp_path / "server.log"
+    descriptor = _open_errlog(str(path))
+    assert descriptor is not None
+    try:
+        os.write(descriptor, b"line one\nline two\n")
+    finally:
+        os.close(descriptor)
+    assert path.read_bytes() == b"line one\nline two\n"

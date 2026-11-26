@@ -330,6 +330,8 @@ Una respuesta que pasa de `max_result_bytes` se corta mientras llega: el error e
 
 Un servidor que escribe en stderr más de 64 MiB antes de terminar de contestar se detiene con `stderr_too_large`; si la respuesta ya había llegado, vale, el servidor se detiene igual y el comando avisa. Si el servidor escribe más de 1 MiB, el comando avisa de que solo se guardó el primer MiB. Un error JSON-RPC que el propio servidor envía es `server_error`; una conexión que se cierra es `server_exited`.
 
+El harness no abre ningún socket que acepte conexiones de otros: habla con el servidor por los tubos que él mismo crea. En Windows, al arrancar, el bucle de eventos de Python crea su par de sockets interno escuchando un instante en `127.0.0.1` con un puerto efímero; acepta una sola conexión, comprueba que es la suya y cierra esa escucha. Los tests lo distinguen de cualquier otro socket por la pila de llamadas, no por la dirección; el detalle y lo que no prueban está en `SECURITY.md` (revisado el 2026-11-25).
+
 Límite: un proceso que el servidor lance en **otra sesión o grupo** (`setsid`, un demonio) o fuera del Job Object escapa a ese cierre, y el harness no lo ve: la auditoría dirá igualmente `server_stopped = 1`.
 
 ### Qué se guarda
