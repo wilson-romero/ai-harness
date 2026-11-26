@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 
 from harness.skills.engine import SkillEngine
+from tests.conftest import REPO_ROOT
 from tests.shell_support import (
     CODE,
     INTERRUPT,
@@ -20,6 +21,7 @@ from tests.shell_support import (
 from tests.skill_support import ScriptedProvider, WriteEffect, copy_skills, with_effect
 
 LINE = "/skill demo-echo text=texto-sintetico"
+EXTRACT = "tarea: architecture-memory/extract"
 
 
 def _setup(conn, data_dir, tmp_path, lines, approvals, provider=None):
@@ -180,6 +182,67 @@ async def test_skill_inputs_from_a_file_and_bad_inputs(conn, data_dir, tmp_path)
     assert "invalid skill name" in terminal.text
     assert len(effect.written()) == 1
     assert any("texto-desde-fichero" in prompt for prompt in provider.prompts)
+
+
+async def test_the_same_source_again_is_refused_before_the_provider(conn, data_dir, vault,
+                                                                    monkeypatch):
+    """architecture-skills-llm D8 (revised 2026-11-25) inside the conversation: the second
+    `/skill architecture-memory` with a source already saved is refused before the model is
+    asked, with the engine's message, and the conversation goes on."""
+    monkeypatch.setenv("HARNESS_VAULT_ROOT", str(vault.resolve()))
+    inputs = REPO_ROOT / "tests" / "fixtures" / "skill-inputs"
+    provider = ScriptedProvider({EXTRACT: (inputs / "decision-ok.json").read_text("utf-8")})
+    line = f"/skill architecture-memory --file source={inputs / 'fuente-decision.md'}"
+    terminal = ScriptedTerminal([line, line, "pregunta", "/exit"], [CODE])
+    conversation, _, _ = make_conversation(conn, data_dir, terminal, provider, vault=vault,
+                                           skills_dir=REPO_ROOT / "skills")
+    assert await conversation.run(None, "demo-alpha") == 0
+    runs = conn.execute("SELECT status, error_code FROM skill_runs ORDER BY rowid").fetchall()
+    assert [tuple(r) for r in runs] == [("completed", None), ("failed", "duplicate_decision")]
+    assert provider.calls == 2  # the first run's extraction and the question: no second ask
+    refused = next(l for l in terminal.shown if "nothing was sent to the provider" in l)
+    (target,) = [l.removeprefix("applied: ") for l in terminal.shown if l.startswith("applied:")]
+    assert refused.startswith("skill: ") and target in refused
+    assert len(terminal.questions) == 1  # no approval asked the second time
+    assert provider.prompts[-1].endswith("pregunta")  # the session is still usable
+
+
+def _decision_setup(conn, data_dir, vault, monkeypatch, lines, approvals, provider=None):
+    monkeypatch.setenv("HARNESS_VAULT_ROOT", str(vault.resolve()))
+    inputs = REPO_ROOT / "tests" / "fixtures" / "skill-inputs"
+    provider = provider or ScriptedProvider()
+    provider.answers = {EXTRACT: (inputs / "decision-ok.json").read_text("utf-8")}
+    line = f"/skill architecture-memory --file source={inputs / 'fuente-decision.md'}"
+    terminal = ScriptedTerminal([line if l == "SKILL" else l for l in lines], approvals)
+    conversation, _, _ = make_conversation(conn, data_dir, terminal, provider, vault=vault,
+                                           skills_dir=REPO_ROOT / "skills")
+    return conversation, terminal, provider
+
+
+def _sources(conn) -> int:
+    return conn.execute("SELECT count(*) FROM effect_sources").fetchone()[0]
+
+
+async def test_a_confirmed_rejection_records_no_source(conn, data_dir, vault, monkeypatch):
+    """Option B with the early check: a rejected decision is not «already saved», so the same
+    source runs again, asks the model and can be approved."""
+    conversation, terminal, provider = _decision_setup(
+        conn, data_dir, vault, monkeypatch, ["SKILL", "SKILL", "/exit"], ["n", "reject", CODE])
+    assert await conversation.run(None, "demo-alpha") == 0
+    runs = [r[0] for r in conn.execute("SELECT status FROM skill_runs ORDER BY rowid")]
+    assert runs == ["cancelled", "completed"]
+    assert provider.calls == 2 and _sources(conn) == 1
+
+
+async def test_ctrl_c_during_the_extraction_records_no_source(conn, data_dir, vault,
+                                                               monkeypatch):
+    provider = _CtrlCAfterSend()
+    conversation, terminal, _ = _decision_setup(conn, data_dir, vault, monkeypatch,
+                                                ["SKILL", "/exit"], [], provider)
+    provider.conversation = conversation
+    assert await conversation.run(None, "demo-alpha") == 0
+    assert [r[0] for r in conn.execute("SELECT status FROM skill_runs")] == ["uncertain"]
+    assert provider.calls == 1 and _sources(conn) == 0
 
 
 async def test_ctrl_c_during_the_llm_step_leaves_a_run_that_can_be_ended(conn, data_dir,
