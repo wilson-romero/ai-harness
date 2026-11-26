@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -110,18 +111,63 @@ def test_a_good_key_is_never_replaced(tmp_path):
     assert list(path.parent.glob("*.damaged-*")) == []
 
 
-def test_concurrent_recoveries_agree_on_one_key(tmp_path):
+@pytest.fixture
+def share_locks(monkeypatch):
+    """Windows's mandatory sharing on any system (revised on 2026-11-26): while a file is open
+    for reading, renaming, replacing or deleting it fails with a sharing violation, which
+    Python raises as `PermissionError` (WinError 32). Reads are held open a little longer so a
+    concurrent rename has a window to meet them."""
+    import pathlib
+
+    opened: dict[str, int] = {}
+    guard = threading.Lock()
+    real_read, real_rename = pathlib.Path.read_bytes, os.rename
+    real_replace, real_unlink = os.replace, os.unlink
+
+    def read_bytes(self):
+        name = os.path.normcase(os.path.abspath(self))
+        with guard:
+            opened[name] = opened.get(name, 0) + 1
+        try:
+            data = real_read(self)
+            time.sleep(0.02)
+            return data
+        finally:
+            with guard:
+                opened[name] -= 1
+
+    def refuse_if_open(real):
+        def call(source, *args, **kwargs):
+            with guard:
+                if opened.get(os.path.normcase(os.path.abspath(source)), 0):
+                    raise PermissionError(13, "The process cannot access the file because it "
+                                              "is being used by another process", str(source))
+            return real(source, *args, **kwargs)
+        return call
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(os, "rename", refuse_if_open(real_rename))
+    monkeypatch.setattr(os, "replace", refuse_if_open(real_replace))
+    monkeypatch.setattr(os, "unlink", refuse_if_open(real_unlink))
+
+
+@pytest.mark.parametrize("sharing", ["as_is", "share_locks"])
+def test_concurrent_recoveries_agree_on_one_key(tmp_path, request, sharing):
+    if sharing == "share_locks":
+        request.getfixturevalue("share_locks")
     _damaged(tmp_path, b"x" * (KEY_BYTES + 3))
     keys: list[bytes] = []
     errors: list[BaseException] = []
 
-    def work():
+    def work(index: int):
+        # staggered starts: some readers arrive while the first recovery is renaming the key
+        time.sleep(0.004 * index)
         try:
             keys.append(args_key(tmp_path))
         except BaseException as error:  # noqa: BLE001 - reported by the assertion below
             errors.append(error)
 
-    threads = [threading.Thread(target=work) for _ in range(8)]
+    threads = [threading.Thread(target=work, args=(index,)) for index in range(8)]
     for thread in threads:
         thread.start()
     for thread in threads:
