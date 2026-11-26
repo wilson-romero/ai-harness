@@ -1,8 +1,10 @@
 # ai-harness
 
-Copiloto de arquitectura que se ejecuta en local. Mantiene varias conversaciones persistentes con un proveedor de lenguaje y, en cortes posteriores, usará Microsoft Copilot Web, herramientas MCP, Skills, una segunda memoria en Markdown y Enterprise Architect.
+Copiloto de arquitectura que se ejecuta en local. Mantiene varias conversaciones persistentes con un proveedor de lenguaje, lee una segunda memoria en Markdown, ejecuta Skills declarativos y llama a herramientas de solo lectura de servidores MCP. En cortes posteriores usará Microsoft Copilot Web y Enterprise Architect.
 
-Estado: **Corte 1 · Esqueleto** y **Corte 3 · Memoria**. Sesiones, historial y recuperación funcionan con un proveedor Mock, y el harness lee (sin escribir nunca) una segunda memoria en Markdown compatible con `claude-memory-system`. El plan de entregas está en [`docs/plan/2026-11-24-ai-harness-cortes.md`](docs/plan/2026-11-24-ai-harness-cortes.md).
+**Es un proyecto educativo:** sirve para aprender a construir un harness, no está pensado para uso en producción. Se ejercita solo con prompts sintéticos y no guarda contenido real. Quien lo use para automatizar un servicio real es responsable de cumplir las condiciones de uso de ese servicio.
+
+Estado (revisado el 2026-11-25): **Corte 1 · Esqueleto**, **Corte 3 · Memoria**, **Corte 4 · Skills** y, del Corte 5, la **pasarela MCP** (`mcp-gateway`); la lectura de Enterprise Architect (`ea-read`) está en pausa. Sesiones, historial y recuperación funcionan con un proveedor Mock, el único disponible hoy: el proveedor de Copilot Web está en desarrollo y no forma parte de esta versión. El harness lee una segunda memoria en Markdown compatible con `claude-memory-system`, ejecuta Skills declarativos y llama por stdio a herramientas de solo lectura de servidores MCP declarados en una lista local (ver [Herramientas MCP](#herramientas-mcp)). Su única escritura en esa memoria es una nota de decisión nueva en `Decisiones/`, después de una aprobación humana (ver [Skills de arquitectura](#skills-de-arquitectura)). El plan de entregas está en [`docs/plan/2026-11-24-ai-harness-cortes.md`](docs/plan/2026-11-24-ai-harness-cortes.md).
 
 ## Requisitos
 
@@ -52,7 +54,7 @@ Para verlo sin Copilot, contra un chat sintético local y sin ventana: `uv run p
 
 ## Memoria del proyecto
 
-El harness lee un vault de Markdown con la estructura de `claude-memory-system` (`projects/<slug>/_project.md`, `projects/<slug>/sessions/`, `Decisiones/`, `Lecciones/`, `Memoria-CC/`…). **Solo lee**: ningún comando crea, modifica, mueve ni borra nada en el vault.
+El harness lee un vault de Markdown con la estructura de `claude-memory-system` (`projects/<slug>/_project.md`, `projects/<slug>/sessions/`, `Decisiones/`, `Lecciones/`, `Memoria-CC/`…). Los comandos `memory …` y `ask --project` **solo leen**: no crean, modifican, mueven ni borran nada en el vault. La única escritura del harness en el vault es la del Skill `architecture-memory`: una nota de decisión nueva en `Decisiones/` (y la carpeta, si no existe), solo después de que una persona apruebe en la terminal el contenido exacto; nunca modifica ni borra una nota existente (ver [Skills de arquitectura](#skills-de-arquitectura)).
 
 ```sh
 export HARNESS_VAULT_ROOT="$HOME/ruta/al/vault"   # ruta absoluta
@@ -90,7 +92,7 @@ Todo texto del vault que sale hacia la terminal, el proveedor o SQLite (cuerpos,
 
 ### Sincronización
 
-El harness no tiene ningún código que copie, suba o sincronice el vault, y nunca escribe en él; un test lo comprueba buscando esas operaciones en `harness/memory/` y comparando la huella del vault antes y después de cada comando. **No impide ni detecta** que otro programa lo sincronice: el vault puede vivir, por ejemplo, en una carpeta de OneDrive, y lo que ese cliente haga con él depende de su configuración, no del harness. Con «archivos a petición» (OneDrive, iCloud), `memory search` y `memory maintain` leen todas las notas y pueden hacer que el cliente descargue el vault entero; no está medido.
+El harness no tiene ningún código que copie, suba o sincronice el vault, y los comandos de memoria nunca escriben en él; un test lo comprueba buscando esas operaciones en `harness/memory/` (con una única excepción con nombre, el escritor de notas de decisión) y comparando la huella del vault antes y después de cada comando. La única escritura del harness en el vault es una nota de decisión nueva, después de una aprobación (ver [Skills de arquitectura](#skills-de-arquitectura)). **No impide ni detecta** que otro programa lo sincronice: el vault puede vivir, por ejemplo, en una carpeta de OneDrive, y lo que ese cliente haga con él depende de su configuración, no del harness. Con «archivos a petición» (OneDrive, iCloud), `memory search` y `memory maintain` leen todas las notas y pueden hacer que el cliente descargue el vault entero; no está medido.
 
 `HARNESS_DATA_DIR` no puede estar dentro del vault: `memory …` y `ask --project` lo rechazan con un error (código 1) antes de escribir nada, también si se llega por un enlace. El vault dentro del directorio de datos sí vale. `session …`, `history` y `ask` sin `--project` no leen el vault y no lo comprueban.
 
@@ -127,7 +129,7 @@ uv run python main.py skill cancel RUN_ID
 
 - `llm`: envía la plantilla `templates/<nombre>.md` a través de la sesión, con el mismo plazo y los mismos estados que `ask`. `"memory": "project"` añade el contexto del proyecto de la sesión (la sesión tiene que tener proyecto). `timeout_s` de 1 a 600.
 - `validate`: comprueba la salida de un paso anterior (`of`) con reglas declaradas: `min_bytes`/`max_bytes`, `required_headings` (Markdown), o `format: json` con campos tipados (`string`, `integer`, `boolean`, `string_list`, con `max_length`, `single_line`, `enum`, `slug`, `date`, `min`, `max`, `max_items`) y sin campos extra. Su salida es el texto saneado y redactado, o el JSON canónico.
-- `approval`: pide una aprobación humana sobre la salida de un `validate` anterior y aplica un efecto de la lista cerrada del harness. Hoy solo existe `none` (consumir la aprobación deja seguir).
+- `approval`: pide una aprobación humana sobre la salida de un `validate` anterior y aplica un efecto de la lista cerrada del harness: `none` (consumir la aprobación deja seguir) o `vault.save_decision` (escribe una nota de decisión nueva; ver [Skills de arquitectura](#skills-de-arquitectura)).
 
 Referencias en las plantillas: `{{inputs.NOMBRE}}`, `{{steps.ID.output}}` y `{{steps.ID.fields.CAMPO}}`, a una entrada declarada o a un paso anterior. Cualquier otra cosa entre `{{` y `}}` invalida el Skill. Se sustituyen una sola vez, sin evaluar nada, y cada valor va marcado como datos entre `<<<DATOS <código>` y `DATOS <código>>>>`, con los mismos `‹‹‹`/`›››` que la memoria. El hash del Skill (SHA-256 de sus ficheros con los finales de línea normalizados) es el mismo en macOS y en Windows.
 
@@ -171,6 +173,81 @@ Si una pregunta vence después de enviarse, o el proceso muere a mitad, el paso 
 ### Qué se guarda de una ejecución
 
 Nombre, versión y hash del Skill, estados, intentos, fechas y, de las entradas, solo su SHA-256 y su tamaño (`inputs_manifest`): **nunca** su contenido. Como pregunta de la sesión se guarda una marca `[skill <nombre>/<paso> intento <n>]`, nunca el prompt compuesto. La salida de cada paso se guarda solo con un proveedor sintético (el Mock); con cualquier otro, solo su SHA-256 y su tamaño, y una ejecución interrumpida no se puede reanudar. La propuesta no se guarda: se recalcula. La auditoría lleva la ejecución, el paso, el hash y el resultado, sin texto.
+
+## Skills de arquitectura
+
+Dos Skills en `skills/` (la carpeta por defecto de `HARNESS_SKILLS_DIR`), los dos en una sesión creada con `--project`, que les da el contexto de memoria de ese proyecto:
+
+- **`hls-review`** revisa un documento de diseño de alto nivel: una pregunta con el documento marcado como datos y la memoria del proyecto, y una comprobación de que la respuesta tiene `Resumen`, `Alternativas`, `Restricciones`, `Requisitos no funcionales`, `Supuestos` y `Preguntas pendientes` (como mucho 32 KiB). La revisión sale por stdout. **No escribe nada** y no pide aprobación. Si falta un encabezado, termina `failed` con `validation_failed:required_headings:<encabezado>` y no imprime la respuesta.
+- **`architecture-memory`** extrae una decisión de un texto fuente como un único objeto JSON (`title` de 8 a 120 caracteres en una línea; `context` y `decision` de hasta 2000; `alternatives`, `consequences` y, opcional, `assumptions`, de hasta 8 elementos de 400), la valida con un esquema cerrado, prepara la nota, **la muestra entera** con su ruta y su hash, y solo si la apruebas la escribe en el vault.
+
+Con el vault sintético y las respuestas guionizadas del repo, en PowerShell (desde la raíz del repo):
+
+```powershell
+$base = Join-Path $env:TEMP "ai-harness-demo"
+New-Item -ItemType Directory -Force $base | Out-Null
+Copy-Item -Recurse tests\fixtures\vault-synthetic (Join-Path $base "vault")
+$env:HARNESS_DATA_DIR = Join-Path $base "data"
+$env:HARNESS_VAULT_ROOT = Join-Path $base "vault"
+$env:HARNESS_MOCK_RESPONSES = (Resolve-Path tests\fixtures\skill-inputs\respuestas-demo.json).Path
+uv run python main.py skill list
+$sesion = uv run python main.py session create "Demo" --project demo-alpha
+uv run python main.py skill run hls-review --session $sesion --input-file document=tests\fixtures\skill-inputs\hls-corto.md
+uv run python main.py skill run architecture-memory --session $sesion --input-file source=tests\fixtures\skill-inputs\fuente-decision.md
+uv run python main.py memory context demo-alpha
+```
+
+En zsh o bash, lo mismo con `export` y rutas con `/`:
+
+```sh
+base="$(mktemp -d)"
+cp -R tests/fixtures/vault-synthetic "$base/vault"
+export HARNESS_DATA_DIR="$base/data" HARNESS_VAULT_ROOT="$base/vault"
+export HARNESS_MOCK_RESPONSES="$PWD/tests/fixtures/skill-inputs/respuestas-demo.json"
+sesion="$(uv run python main.py session create "Demo" --project demo-alpha)"
+uv run python main.py skill run hls-review --session "$sesion" --input-file document=tests/fixtures/skill-inputs/hls-corto.md
+uv run python main.py skill run architecture-memory --session "$sesion" --input-file source=tests/fixtures/skill-inputs/fuente-decision.md < /dev/null   # código 3
+uv run python main.py skill resume RUN_ID --input-file source=tests/fixtures/skill-inputs/fuente-decision.md   # en una terminal
+```
+
+Qué se ve: `skill list` muestra los dos Skills `1.0.0 valid`; `hls-review` imprime la revisión y termina con 0. `architecture-memory` en una terminal muestra la cabecera de la aprobación (`vault:` con la raíz resuelta del vault, `target: Decisiones/<fecha>-cola-gestionada-para-los-eventos-de-pedidos-f43c794e.md`, `bytes`, `hash`, `expires`) y la nota completa entre dos líneas de guiones; al escribir los 8 primeros caracteres del hash, imprime la nota y `applied: Decisiones/<fecha>-cola-gestionada-para-los-eventos-de-pedidos-f43c794e.md` y termina con 0 (`<fecha>` es el día local en que empezó la ejecución). `n` la cancela (código 1) sin escribir nada. Con stdin redirigido no pregunta: termina con 3 y `skill resume RUN_ID` en una terminal la retoma. Después, `memory context demo-alpha` incluye la nota en la sección de decisiones. Repetir la extracción con el mismo título termina `failed` con `duplicate_decision` y la ruta de la nota existente, sin pedir aprobación. `scripts/demo_architecture_skills.py` recorre los pasos que no necesitan a una persona y comprueba la huella del vault en cada uno.
+
+### Dónde y cómo se escribe una decisión
+
+- **Dónde:** directamente en `Decisiones/` de `HARNESS_VAULT_ROOT`, que es donde el contexto de un proyecto ya busca sus decisiones. La ejecución queda ligada al vault con el que empezó: la cabecera de la aprobación muestra su raíz y el hash la incluye, y si al reanudar `HARNESS_VAULT_ROOT` apunta a otro vault, falla con `vault_changed` sin escribir en ninguno (SQLite guarda solo un resumen SHA-256 de la raíz, nunca la ruta). Si la carpeta no existe, el harness la crea en la primera escritura aprobada, y solo entonces; ningún comando de solo lectura la crea. Si `Decisiones/` es un enlace, una unión, no es una carpeta, sale de la raíz real del vault o solo se diferencia en mayúsculas (`decisiones/`), la ejecución falla con `unsafe_target` antes de pedir aprobación.
+- **Nombre:** `YYYY-MM-DD-<slug>-<id8>.md`. La fecha es el día local en que empezó la ejecución (no cambia al reanudar); el slug sale del título (ASCII, minúsculas, `[a-z0-9-]`, como mucho 48 caracteres; `decision` si quedaría vacío o sería un nombre reservado de Windows); `id8` son los 8 primeros caracteres hexadecimales del identificador. El nombre es válido en Windows y en macOS.
+- **Identificador:** `decision_id = dec-` + 16 caracteres del SHA-256 del proyecto y del título normalizado (NFKC, sin distinguir mayúsculas, espacios colapsados). El mismo título en el mismo proyecto da el mismo identificador.
+- **Frontmatter:** `type: decision`, `decision_id`, `project_slug` (el de la sesión), `status: accepted`, `created`, `updated`, `tags: [decision, <proyecto>]`, `source: ai-harness`, `skill: architecture-memory@1.0.0` y `run_id`. Ningún valor del frontmatter sale del texto del modelo, ni siquiera el título.
+- **Cuerpo:** título, `Contexto`, `Decisión`, `Alternativas consideradas`, `Consecuencias`, `Supuestos` («Ninguno declarado.» si no hay) y `Procedencia` (Skill con versión y hash, ejecución, notas de memoria consultadas con su hash, tamaño y hash de la fuente, y número de credenciales enmascaradas). El texto del modelo pasa por el mismo saneado y la misma redacción que lo que se aprueba; una línea suya que empieza por `#` o `---` se escribe con `\` delante, y `<<<`/`>>>` se cambian por `‹‹‹`/`›››`, así que no puede abrir secciones, imitar un frontmatter ni falsificar los delimitadores cuando `memory context` la lea.
+- **Inerte en Obsidian:** en todo texto que viene del modelo (y en las rutas de la procedencia), estos caracteres se escriben como entidad HTML, que Obsidian muestra tal cual en la vista de lectura sin que nada los ejecute: `&` → `&amp;`, `<` → `&lt;` (HTML, `<script>`, comentarios `<!-- -->`, Templater `<% %>` y `<%* %>`), `` ` `` → `&#96;` (bloques ```` ``` ```` de `dataview`/`dataviewjs` y código en línea `` `= …` `` y `` `$= …` ``), `~~` → `~&#126;` (bloques `~~~`), `%%` → `%&#37;` (comentarios de Obsidian, ocultos al leer pero que `memory context` devolvería al modelo), `![` → `!&#91;` (imágenes, también remotas, y embebidos `![[…]]`), `[[` → `[&#91;` (enlaces internos, que añadirían enlaces y aristas del grafo hacia notas que elige el modelo) y `::` → `:&#58;` (campos en línea de Dataview). Se escapa, no se borra: al leer la nota ves exactamente lo que escribió el modelo; en el fichero, o en el modo fuente, verás las entidades. **Supuesto que queda:** un plugin que actúe sobre otra sintaxis que no está en esta lista (por ejemplo, un enlace Markdown normal `[texto](url)`, que solo actúa si haces clic) no está neutralizado.
+- **Deduplicación:** antes de pedir la aprobación y otra vez justo antes de escribir, el harness busca en `Decisiones/` una nota con ese `decision_id` en su frontmatter. Si existe, falla con `duplicate_decision` y su ruta. **Es una deduplicación débil:** el identificador sale del título, y el título lo elige el modelo; la misma decisión extraída otra vez con otro título (otras palabras, otro orden) da otro identificador y se escribe como nota nueva. Solo detecta el mismo título salvo mayúsculas, espacios y formas Unicode equivalentes. Una decisión equivalente escrita a mano sin `decision_id` tampoco se detecta. **Antes de preguntar al modelo** (revisado el 2026-11-25), el harness mira si ya guardó una decisión de ese proyecto, en ese vault, desde el mismo texto fuente y si su nota sigue en `Decisiones/`: si es así, falla con `duplicate_decision` y su ruta sin enviar nada al proveedor. «El mismo texto» se mide con un SHA-256 calculado sin BOM, con CRLF y CR sueltos como LF y sin los saltos de línea del final (solo para este hash; el texto enviado no cambia); otros espacios u otra forma Unicode cuentan como otro texto. Cuenta toda decisión escrita de verdad: aprobada y aplicada, también si la ejecución se reanudó con `skill resume RUN_ID` sin entradas o si un paso `uncertain` se reconcilió como escrito en `skill resume` o en `skill cancel`; no cuenta una aprobación rechazada o abandonada. Las decisiones guardadas antes de esta versión no tienen ese registro: las encuentra solo la comprobación por título. Para extraer otra decisión del mismo texto, cámbialo.
+- **Nunca sobrescribe ni edita:** escribe un temporal oculto (`Decisiones/.harness-<ejecución>-<paso>.tmp`, que la memoria no lee) y lo publica con un enlace duro, que **falla si el nombre final ya existe**; nunca usa una operación que sustituya un fichero. Nunca modifica, mueve ni borra una nota existente. Las escrituras de dos procesos del harness se ordenan con un bloqueo (`locks/vault-decisions.lock` en el directorio de datos): el segundo espera hasta 5 s y, si no le toca, falla con código 1 dejando la aprobación concedida para `skill resume` (con el proveedor Mock, cuyas salidas se guardan). Con un proveedor real, cuyas salidas no se guardan, el harness reintenta en la misma invocación hasta 30 s y, si el escritor sigue ocupado, revoca la aprobación, termina `failed` con `effect_busy` y hay que repetir la ejecución con `skill run`. Por lo mismo, con un proveedor real, si el proceso muere antes de publicar la nota, `skill resume` termina `failed` diciendo que hay que repetir la ejecución; nunca queda una aprobación usable en una ejecución terminada.
+- **Si el proceso muere a mitad**, `skill resume` mira el vault sin escribir: si la nota con ese identificador y esos bytes está, termina; si no está, pide una aprobación nueva para los mismos bytes; si hay otra nota con ese identificador, se niega (código 1) y la ejecución queda `uncertain` para que lo mires. Lo mismo si algo falla después de publicar la nota (por ejemplo, no se puede borrar el temporal porque OneDrive o un antivirus lo tiene abierto en Windows): la ejecución queda `uncertain`, nunca `failed`, y `skill resume` lo vuelve a intentar. Mientras el temporal no se pueda borrar, la nota existe pero **la memoria no la lee** (tiene dos enlaces duros), y `skill resume` termina con código 1 nombrando el temporal; cierra el programa que lo retiene y repite `skill resume`. `skill cancel RUN_ID` sobre una ejecución `uncertain` también comprueba el vault primero: borra el temporal propio si puede (así una nota publicada vuelve a ser visible), dice por stderr si la nota está en el vault o si no se escribió nada, y termina la ejecución sin borrar nunca una nota.
+- **Qué guarda SQLite:** con un proveedor real, de la nota solo el identificador (`skill_steps.effect_ref`), su SHA-256 y su tamaño; nunca el título, el texto ni la ruta.
+
+Para comprobar en tu vault (por ejemplo, una carpeta de OneDrive) las operaciones de ficheros de las que depende la escritura, sin tocar nada tuyo:
+
+```powershell
+uv run python scripts/diag_vault_write.py <carpeta-de-prueba>
+```
+
+Crea una subcarpeta nueva dentro de la que indiques, comprueba allí la creación exclusiva, el enlace duro que no sustituye un nombre existente, el número de enlaces, que `fstat` y `lstat` dan el mismo inodo y el borrado del temporal, lo borra todo y escribe un bloque `--- ai-harness diag_vault_write ---` con valores `true`/`false`, recuentos, categorías de error y tiempos, sin rutas ni nombres.
+
+Límites conocidos:
+
+1. El vault tiene que estar en un sistema de ficheros con enlaces duros (APFS, NTFS). En FAT32, exFAT o algunas unidades de red la escritura falla con `write_failed` sin escribir nada.
+2. El bloqueo solo ordena a los procesos del harness que comparten directorio de datos. Otro programa (Obsidian, el curador de `claude-memory-system`) puede crear un fichero con el mismo nombre en el mismo instante: el harness no lo sobrescribe, falla con `conflict`. Entre la comprobación de `Decisiones/` y la escritura del temporal, alguien con permiso de escritura en el vault podría cambiar la carpeta por un enlace; el harness lo detecta después de publicar, retira su nota y falla, pero el temporal habrá existido un momento fuera.
+3. No se sincroniza el directorio tras publicar: después de un corte de luz justo en ese momento, la nota podría no estar, y `skill resume` lo vería como ausente y pediría aprobarla otra vez.
+4. **Riesgo de atribución del curador:** el curador de `claude-memory-system` atribuye a su propia ejecución cualquier `.md` de `Decisiones/` modificado después de que empiece. Si el harness escribe una decisión mientras el curador corre en el mismo equipo, el log del curador la contará como suya. No se pierde ni se rompe nada.
+
+## Puerta MVP sin EA
+
+El flujo completo sin Enterprise Architect: **requerimiento → memoria del proyecto → `hls-review` → tu decisión → `architecture-memory` → aprobación → nota nueva en `Decisiones/` → la nota vuelve en `memory context`**. Son los dos Skills de arriba, por separado y en la **misma sesión**, con tu decisión entre medias: lees la revisión, escribes en un fichero tuyo la decisión que tomas y se la pasas a `architecture-memory` con `--input-file source=<fichero>`. Nada pasa de un Skill al otro sin que lo leas. No hay código nuevo: es la integración de lo que ya existe.
+
+- **Demo automática** (sin persona, salvo la aprobación, que imprime como instrucciones con los comandos exactos para PowerShell y zsh/bash): `uv run python scripts/demo_mvp_without_ea.py`. Termina en `demo: PASS`. Con `--keep` deja la carpeta temporal y la ejecución esperando, para que la apruebes tú en una terminal.
+- **A mano**, paso a paso y con qué se ve en cada uno: [`docs/runbook/mvp-without-ea.md`](docs/runbook/mvp-without-ea.md), primero con el vault sintético y el Mock, después con una copia de tu vault.
+- **Datos:** los requerimientos sintéticos, la revisión y la decisión guionizadas del Mock y una decisión de ejemplo están en `tests/fixtures/mvp/`. Los tres `requerimiento-<n>-*.md` son también los de la medición con Copilot real (seis preguntas), que queda pendiente del merge del proveedor de Copilot.
+- **Test:** `tests/integration/test_mvp_flow.py` recorre el flujo con la CLI: `session create`, `memory context`, `skill status` y `history` en procesos separados, y los dos Skills en proceso con un proveedor guionizado que guarda en memoria lo que recibe (para comprobar que la memoria del proyecto, el requerimiento y tu decisión llegan a la pregunta) y la terminal de prueba del motor para aprobar. También comprueba que repetir `architecture-memory` con el mismo fichero de decisión se rechaza con `duplicate_decision` antes de preguntar al modelo (ningún envío más), que otro texto de la misma decisión del que el modelo saca el mismo título se rechaza después de su respuesta, y que un modelo que obedece las órdenes de un requerimiento no aprueba, no elige carpeta ni proyecto. No dice nada de si Copilot real cumple los formatos.
 
 ## Herramientas MCP
 
@@ -283,7 +360,7 @@ El plazo de arranque cubre la negociación y la lista de herramientas. El plazo 
 
 Una respuesta que pasa de `max_result_bytes` se corta mientras llega: el error es `result_too_large` y no se imprime nada del resultado. Una línea que no es JSON-RPC termina la sesión con `protocol_error`.
 
-Un servidor que escribe en stderr más de 64 MiB en una sesión se detiene con `stderr_too_large`. Un error JSON-RPC que el propio servidor envía es `server_error`; una conexión que se cierra es `server_exited`.
+Un servidor que escribe en stderr más de 64 MiB antes de terminar de contestar se detiene con `stderr_too_large`; si la respuesta ya había llegado, vale, el servidor se detiene igual y el comando avisa. Si algo del stderr del servidor no llegó a su log, el comando avisa de cuántos bytes faltan; la última línea del log dice por qué. Un error JSON-RPC que el propio servidor envía es `server_error`; una conexión que se cierra es `server_exited`.
 
 Límite: un proceso que el servidor lance en **otra sesión o grupo** (`setsid`, un demonio) o fuera del Job Object escapa a ese cierre, y el harness no lo ve: la auditoría dirá igualmente `server_stopped = 1`.
 
@@ -292,12 +369,12 @@ Límite: un proceso que el servidor lance en **otra sesión o grupo** (`setsid`,
 - La tabla `tool_calls` de SQLite guarda:
   - servidor, herramienta y operación;
   - decisión y motivo;
-  - un HMAC-SHA-256 de los argumentos, con una clave aleatoria local (`HARNESS_DATA_DIR/keys/mcp-args.key`, solo legible por su dueño, nunca se imprime), y su tamaño;
+  - un HMAC-SHA-256 de los argumentos, con una clave aleatoria local (`HARNESS_DATA_DIR/keys/mcp-args.key`, nunca se imprime; en macOS y Linux el fichero es `0600` y su carpeta `0700`; en Windows el harness no fija ninguna ACL y el fichero hereda los permisos de la carpeta donde esté `HARNESS_DATA_DIR`), y su tamaño;
   - estado, código de error y si el servidor quedó parado;
   - bytes del resultado y duración.
 
   **Nunca** guarda los argumentos ni el resultado.
-- El stderr del servidor va a `HARNESS_DATA_DIR/logs/mcp/<servidor>.stderr.log`, nunca a la terminal. Se guarda sin sanear, porque es lo que escribió el servidor. Cada sesión guarda como mucho 1 MiB; del resto solo se anota cuántos bytes se descartaron. Antes de cada sesión, un fichero de más de 1 MiB pasa a `.1` (que sustituye al anterior), así que los dos ficheros de un servidor no pasan de unos 4 MiB. En macOS y Linux la carpeta es `0700` y los ficheros `0600`.
+- El stderr del servidor va a `HARNESS_DATA_DIR/logs/mcp/<servidor>.stderr.log`, nunca a la terminal. Se guarda línea a línea, con las credenciales de formato conocido sustituidas por `[REDACTED:<tipo>]` antes de escribirse (revisado el 2026-11-25), aunque un token llegue partido en varias lecturas. Una línea termina en LF, CRLF o un CR suelto (una barra de progreso). Una línea de más de 16 KiB no se redacta por partes: se descarta entera y en su lugar queda una marca que lo dice, así que una credencial en ella no llega al log, pero el resto de la línea tampoco. Una clave privada PEM se sustituye por una marca y se descartan las líneas siguientes hasta su línea END; si END no llega en 32 KiB, una marca lo dice y el log sigue en la línea siguiente. Lo que **no** cubre: una credencial de formato desconocido; una clave de más de 32 KiB; una credencial cuyo comienzo se tragó otra (una clave de Anthropic o de Slack que acaba en la cabecera de un JWT deja en claro el resto del JWT); y si el harness mata el proceso de sesión al vencer su plazo, la última línea sin final y el recuento se pierden. Cada sesión escribe como mucho 1 MiB, entrega al log como mucho 65 536 líneas (un CRLF es una) y pasa a la redacción como mucho 4 MiB; la primera línea que pasaría cualquiera de los tres no se escribe, ni nada después, y una línea final anota cuántos bytes del stderr no están en el log de ninguna forma y por qué. Así, una ráfaga de líneas vacías o de CR (64 KiB de saltos) termina el log para el resto de la sesión. Un fallo del propio registro no corta la sesión ni escribe nada sin redactar: el log dice dónde se paró, salvo si lo que falla es escribir en el log. Una cadena hecha a mano de más de cuatro credenciales pegadas puede dejar las primeras en claro. Antes de cada sesión, un fichero de más de 1 MiB pasa a `.1` (que sustituye al anterior), así que los dos ficheros de un servidor no pasan de unos 4 MiB. En macOS y Linux la carpeta es `0700` y los ficheros `0600`.
 - Una llamada `running` cuyo comando ya no existe (se cortó la luz, se mató el proceso) se marca `failed`/`interrupted` en el siguiente `mcp call`. "Ya no existe" lo dice un bloqueo que el comando mantiene mientras vive, no la antigüedad de la fila.
 - Todo lo que se imprime (resultado, descripciones, nombres y errores del servidor) sale sin caracteres de control, de formato ni secuencias de escape. Las credenciales conocidas salen como `[REDACTED:<tipo>]`. Imágenes y audio se sustituyen por `[<tipo> withheld: N bytes of base64]`, y los recursos por `[<tipo> withheld]`.
 
@@ -344,6 +421,8 @@ Solo una pregunta a la vez por sesión: una segunda pregunta mientras la primera
 - SQLite en `HARNESS_DATA_DIR/harness.sqlite3`, sin cifrar.
 - El texto de prompts y respuestas se guarda solo si el proveedor declara que su contenido es sintético (el Mock). Con cualquier otro proveedor se guardan la solicitud, su estado y sus fechas, sin el texto.
 - La auditoría registra qué pasó y cuándo, nunca el texto.
+- De cada decisión que `architecture-memory` escribe de verdad, SQLite (tabla `effect_sources`) guarda su identificador, el resumen SHA-256 de la raíz del vault, el proyecto y el SHA-256 del texto fuente normalizado; la ejecución guarda esos mismos hashes desde que empieza. Nunca el texto, el título ni la ruta (ver [Skills de arquitectura](#skills-de-arquitectura)).
+- El stderr de cada servidor MCP, redactado, en `HARNESS_DATA_DIR/logs/mcp/` (ver [Herramientas MCP](#herramientas-mcp)).
 
 ## Desarrollo
 
@@ -353,4 +432,4 @@ Solo una pregunta a la vez por sesión: una segunda pregunta mientras la primera
 - Sin código condicionado por plataforma fuera de Enterprise Architect: lo que pasa en macOS es lo que corre en Windows.
 - Copilot Web (Corte 2): perfil dedicado de Edge, login manual, sonda y uso real en [`docs/runbook/copilot.md`](docs/runbook/copilot.md).
 - Puerta local antes de un merge: `scripts/verify.sh` sobre el árbol limpio.
-- Demos, iguales en macOS y Windows (PowerShell incluido): `uv run python scripts/demo_session_core.py` (Corte 1), `uv run python scripts/demo_copilot_provider.py` (Corte 2, proveedor de Copilot contra el chat sintético), `uv run python scripts/demo_project_memory.py` (Corte 3), `uv run python scripts/demo_skill_engine.py` (Corte 4, motor de Skills) y `uv run python scripts/demo_mcp_gateway.py` (Corte 5, pasarela MCP). Terminan en `demo: PASS`.
+- Demos, iguales en macOS y Windows (PowerShell incluido): `uv run python scripts/demo_session_core.py` (Corte 1), `uv run python scripts/demo_copilot_provider.py` (Corte 2, proveedor de Copilot contra el chat sintético), `uv run python scripts/demo_project_memory.py` (Corte 3), `uv run python scripts/demo_skill_engine.py` (Corte 4, motor de Skills), `uv run python scripts/demo_architecture_skills.py` (Corte 4, Skills de arquitectura), `uv run python scripts/demo_mcp_gateway.py` (Corte 5, pasarela MCP) y `uv run python scripts/demo_mvp_without_ea.py` (Puerta MVP sin EA). Terminan en `demo: PASS`.

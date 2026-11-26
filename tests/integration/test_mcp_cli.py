@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from harness.mcp.client import BASE_ENV_NAMES, RECURSION_MARKER
+from harness.mcp.client import BASE_ENV_NAMES, GUARANTEED_EXTRA_S, RECURSION_MARKER
 from harness.storage.database import DATABASE_NAME
 from tests.conftest import SECRET_SAMPLES
 from tests.mcp_support import (
@@ -34,9 +34,9 @@ from tests.mcp_support import (
 )
 
 ALPHA = '{"project": "demo-alpha"}'
-# The SDK's shutdown: 0.5 s to flush, 2 s grace after closing stdin, SIGTERM and 2 s more,
-# 2 s to reap. Anything slower than a phase deadline plus this is a lifecycle bug.
-SHUTDOWN_MARGIN_S = 7.0
+# Revised on 2026-11-25: time bounds are the guarantee of D4 (startup + call +
+# `GUARANTEED_EXTRA_S`), never a measured value plus a little. That a phase deadline (and not
+# the harness's) ended a command is shown by its message, not by how close to it it ended.
 DRIVER = REPO_ROOT / "tests" / "fixtures" / "mcp" / "driver.py"
 
 
@@ -122,6 +122,34 @@ def test_the_servers_stderr_goes_to_its_log_not_to_the_terminal(mcp, ws, data_di
     assert "CANARIO-STDERR-SINTETICO" not in out + err
     log = data_dir / "logs" / "mcp" / "synthetic.stderr.log"
     assert "CANARIO-STDERR-SINTETICO" in log.read_text(encoding="utf-8")
+    assert server.stopped()
+
+
+def test_a_credential_split_across_two_stderr_writes_is_redacted_in_the_log(mcp, ws, data_dir):
+    """SEC-01 on the server's log (revised 2026-11-25): the token arrives in two writes."""
+    server = ws.server("stderr-split-secret")
+    code, _, err, _ = mcp("tools", "synthetic")
+    assert code == 0, err
+    log = (data_dir / "logs" / "mcp" / "synthetic.stderr.log").read_text(encoding="utf-8")
+    assert "CANARIO-STDERR-SINTETICO" in log  # the line was logged at all
+    assert "[REDACTED:github]" in log
+    assert "S" * 18 not in log  # neither half of the token
+    assert server.stopped()
+
+
+def test_a_burst_of_utf8_continuation_bytes_on_stderr_does_not_end_the_session(mcp, ws,
+                                                                               data_dir):
+    """Second review of 2026-11-25, finding 1: this input made the redactor raise and the
+    session die with an ExceptionGroup. Now it is one line over the limit: dropped, marked."""
+    server = ws.server("stderr-continuation-bytes")
+    code, out, err, _ = mcp("tools", "synthetic")
+    assert code == 0, err
+    assert "get_project_metadata" in out
+    log = (data_dir / "logs" / "mcp" / "synthetic.stderr.log").read_bytes()
+    assert log == (b"[ai-harness: a line of 70000 bytes was dropped: too long to redact]\n"
+                   b"\n[ai-harness: 70000 more bytes of stderr were dropped; lines too long to "
+                   b"redact or private key blocks, marked above]\n")
+    assert "warning: 70000 of the 70000 bytes the server wrote on stderr are not in its log" in err
     assert server.stopped()
 
 
@@ -288,7 +316,7 @@ def test_a_server_that_never_answers_the_handshake(mcp, ws, data_dir):
     code, _, err, elapsed = mcp("call", "synthetic", "get_project_metadata", "--args", ALPHA)
     assert code == 1
     assert "timeout: the server did not answer in time (start and handshake, 2 s)" in err
-    assert elapsed < 2 + SHUTDOWN_MARGIN_S
+    assert elapsed < 2 + 5 + GUARANTEED_EXTRA_S
     assert (rows(data_dir)[0]["status"], rows(data_dir)[0]["error_code"]) == ("timeout", "timeout")
     assert server.stopped()
 
@@ -296,8 +324,8 @@ def test_a_server_that_never_answers_the_handshake(mcp, ws, data_dir):
 def test_a_tool_that_never_ends(mcp, ws, data_dir):
     server = ws.server("hang-call", call=2)
     code, _, err, elapsed = mcp("call", "synthetic", "get_project_metadata", "--args", ALPHA)
-    assert code == 1 and "(call, 2 s)" in err
-    assert elapsed < 2 + SHUTDOWN_MARGIN_S
+    assert code == 1 and "timeout: the server did not answer in time (call, 2 s)" in err
+    assert elapsed < 5 + 2 + GUARANTEED_EXTRA_S
     row = rows(data_dir)[0]
     assert (row["status"], row["error_code"], row["server_stopped"]) == ("timeout", "timeout", 1)
     assert server.stopped()
@@ -307,7 +335,7 @@ def test_a_server_that_ignores_the_end_of_its_input_and_sigterm(mcp, ws, data_di
     server = ws.server("ignore-close", startup=5, call=5)
     code, out, _, elapsed = mcp("call", "synthetic", "get_project_metadata", "--args", ALPHA)
     assert code == 0 and "Demo Alpha" in out
-    assert elapsed < 5 + 5 + 15  # within the command's total deadline
+    assert elapsed < 5 + 5 + GUARANTEED_EXTRA_S
     assert rows(data_dir)[0]["server_stopped"] == 1
     assert server.stopped()
 
@@ -399,7 +427,7 @@ def test_a_line_without_end_is_never_buffered_whole(mcp, ws, data_dir):
         tracemalloc.stop()
     assert code == 1 and "result_too_large" in err and "at least" in err
     assert peak < 16 * 1024 * 1024, peak
-    assert elapsed < 10
+    assert elapsed < 5 + 10 + GUARANTEED_EXTRA_S
     print(f"\nlong-line: {elapsed:.2f} s, Python heap peak {peak / 1024 / 1024:.1f} MiB")
     assert server.stopped()
 

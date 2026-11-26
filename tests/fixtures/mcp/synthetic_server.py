@@ -31,6 +31,12 @@ MODES = (
     # added after the independent review of 2026-11-24
     "regex-bomb", "stderr-flood", "grandchild", "grandchild-escapes", "server-error",
     "destructive", "forge-output", "paged", "result-over-64k", "line-over-limit",
+    # added on 2026-11-25: stderr floods whose outcome does not depend on timing
+    "stderr-noisy", "stderr-after-answer",
+    # added on 2026-11-25: a credential on stderr, split across two writes
+    "stderr-split-secret",
+    # added on 2026-11-25 (second review): 70 000 UTF-8 continuation bytes, no line end
+    "stderr-continuation-bytes",
 )
 # A pattern with catastrophic backtracking and the subject that triggers it: a regex engine
 # that runs it never finishes (seconds per extra character, exponential).
@@ -122,7 +128,6 @@ class Server:
         self.state, self.mode, self.repo = state, mode, repo
         self.out = sys.stdout.buffer
         self.lock = threading.Lock()
-        self.flood: threading.Thread | None = None
 
     # -- bookkeeping ---------------------------------------------------------------------------
 
@@ -174,9 +179,11 @@ class Server:
         if self.mode == "chatty-stderr":
             sys.stderr.write(STDERR_CANARY + "\n")
             sys.stderr.flush()
-        if self.mode == "stderr-flood":
-            self.flood = threading.Thread(target=self.flood_stderr, daemon=True)
-            self.flood.start()
+        if self.mode == "stderr-split-secret":
+            self.split_secret()
+        if self.mode == "stderr-continuation-bytes":
+            sys.stderr.buffer.write(b"\x80" * 70_000)
+            sys.stderr.buffer.flush()
         if self.mode in ("grandchild", "grandchild-escapes"):
             self.start_grandchild(escape=self.mode == "grandchild-escapes")
         stdin = sys.stdin.buffer
@@ -189,6 +196,9 @@ class Server:
             except ValueError:
                 continue
             self.handle(message)
+        if self.mode == "stderr-after-answer":
+            # Only once stdin is closed: the harness has the result before the first byte.
+            self.flood_stderr(256)
         if self.mode == "ignore-close":
             while True:  # stdin is closed; stay alive until killed
                 time.sleep(1)
@@ -250,10 +260,6 @@ class Server:
 
     def call(self, request_id, name, arguments: dict) -> None:
         mode = self.mode
-        if self.flood is not None:
-            # Answer only once the flood is over: the cap on stderr, not the speed of this
-            # machine, decides how the call ends. Without the cap the call completes.
-            self.flood.join()
         if mode == "hang-call":
             while True:
                 time.sleep(1)
@@ -279,6 +285,14 @@ class Server:
         if mode == "regex-bomb":
             self.text(request_id, "bomba", structured={"project": BOMB_SUBJECT})
             return
+        if mode == "stderr-flood":
+            # 256 MiB (enough to show an unbounded log, not to fill a disk) BEFORE answering:
+            # the harness must pass its 64 MiB cap before any answer can exist.
+            self.flood_stderr(256)
+            self.text(request_id, "respuesta tras la inundacion")
+            return
+        if mode == "stderr-noisy":
+            self.flood_stderr(8)  # over the 1 MiB kept, under the 64 MiB cap; then answer
         if mode == "server-error":
             self.error(request_id, -32000, "error generico del servidor sintetico")
             return
@@ -319,10 +333,22 @@ class Server:
         else:
             self.text(request_id, f"herramienta sintetica {name} llamada", is_error=False)
 
-    def flood_stderr(self) -> None:
-        # 256 MiB at most: enough to show an unbounded log, not enough to fill a disk.
-        chunk = b"E" * (1024 * 1024)
-        for _ in range(256):
+    def split_secret(self) -> None:
+        """A synthetic token on stderr in two separate writes, cut in its middle; then the
+        canary, so the test can tell the line was logged at all."""
+        token = github_token()
+        line = f"token {token} {STDERR_CANARY}\n".encode("ascii")
+        cut = line.index(token.encode("ascii")) + len(token) // 2
+        for part in (line[:cut], line[cut:]):
+            sys.stderr.buffer.write(part)
+            sys.stderr.buffer.flush()
+            time.sleep(0.2)  # makes two reads likely; the unit tests prove the split exactly
+
+    def flood_stderr(self, mebibytes: int) -> None:
+        """Write to stderr in the calling thread: nothing else happens until it is written.
+        Lines of 1 KiB (revised 2026-11-25): a line over 16 KiB is dropped whole by the log."""
+        chunk = (b"E" * 1023 + b"\n") * 1024
+        for _ in range(mebibytes):
             try:
                 sys.stderr.buffer.write(chunk)
                 sys.stderr.buffer.flush()

@@ -149,6 +149,8 @@ def _string(name: str, spec: FieldSpec, value: Any) -> str:
     value = unicodedata.normalize("NFC", safe_text(value).text)
     if spec.max_length is not None and len(value) > spec.max_length:
         raise _Fail("max_length", name)
+    if spec.min_length is not None and len(value) < spec.min_length:
+        raise _Fail("min_length", name)
     if spec.enum is not None and value not in spec.enum:
         raise _Fail("enum", name)
     if spec.format == "slug" and not _SLUG_RE.fullmatch(value):

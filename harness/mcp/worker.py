@@ -102,7 +102,11 @@ async def _converse(request: dict[str, Any], channel: _Channel) -> dict[str, Any
             await _talk(request, channel, state, outcome, scope)
         except Exception as exc:  # noqa: BLE001 - classified, never printed
             outcome["error_code"] = classify(exc, outcome["phase"], state)
-    if state.fault is not None:
+    if state.fault == "stderr_too_large" and "result" in outcome:
+        # The result was complete before the cap was passed: it stands. The server was stopped
+        # all the same, and the harness warns that its stderr was cut (D4, revised 2026-11-25).
+        pass
+    elif state.fault is not None:
         outcome["error_code"] = state.fault
         outcome["fault_bytes"] = state.fault_bytes
         outcome["fault_bytes_exact"] = state.fault_bytes_exact
@@ -111,6 +115,7 @@ async def _converse(request: dict[str, Any], channel: _Channel) -> dict[str, Any
     outcome["call_bytes"] = state.call_bytes
     outcome["server_stopped"] = state.server_stopped
     outcome["stderr_bytes"] = state.stderr_bytes
+    outcome["stderr_dropped"] = state.stderr_dropped
     if outcome["error_code"] is None and outcome["phase"] == "shutdown":
         outcome["phase"] = "done"
     return outcome
@@ -201,11 +206,16 @@ async def _list_tools(client: Client) -> dict[str, dict[str, Any]]:
 
 
 def _open_errlog(path: str | None) -> int | None:
-    """The server's log, appended to; created readable by its owner only. None: dropped."""
+    """The server's log, appended to; created readable by its owner only. None: dropped.
+
+    What reaches it is redacted first (`transport.StderrLog`, revised 2026-11-25).
+    """
     if not path:
         return None
     try:
-        return os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        # O_BINARY: the log keeps the server's exact bytes, also on Windows.
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
+        return os.open(path, flags, 0o600)
     except OSError:
         return None
 

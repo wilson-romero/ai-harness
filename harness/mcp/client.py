@@ -66,6 +66,7 @@ GUARANTEED_EXTRA_S = 15.0  # CHILD_MARGIN_S + TREE_END_S, rounded up
 CHANNEL_LINE_LIMIT = 32 * 1024 * 1024  # one message of the session process
 EXIT_POLL_S = 0.01
 TICK_S = 0.1
+WORKER_EXIT_WAIT_S = 2.0  # after the outcome, for the session process to exit on its own
 
 
 def build_server_env(entry: ServerEntry, environ: Mapping[str, str]) -> dict[str, str]:
@@ -118,6 +119,8 @@ class Outcome:
     server_stopped: bool | None = None
     interrupted: bool = False
     killed_at_deadline: bool = False  # the harness's own deadline, not a phase deadline
+    stderr_bytes: int = 0  # everything the server wrote on stderr in this session
+    stderr_dropped: int = 0  # of those, the bytes that are in no form in its log
     call_sent: bool = False
     duration_ms: int = 0
 
@@ -262,6 +265,17 @@ async def _converse(
         outcome.error_code = "internal_error"
         return
     _absorb(message, outcome, request)
+    await _let_it_exit(process)
+
+
+async def _let_it_exit(process: Any) -> None:
+    """After its outcome the session process ends by itself (its exit handlers run); give it
+    a moment before the tree is ended, never past the command's own deadline."""
+    with anyio.CancelScope() as scope:
+        remaining = anyio.current_effective_deadline() - anyio.current_time()
+        scope.deadline = anyio.current_time() + min(WORKER_EXIT_WAIT_S, remaining - 0.1)
+        while process.returncode is None:
+            await anyio.sleep(EXIT_POLL_S)
 
 
 def _absorb(message: dict[str, Any], outcome: Outcome, request: SessionRequest) -> None:
@@ -275,6 +289,8 @@ def _absorb(message: dict[str, Any], outcome: Outcome, request: SessionRequest) 
     outcome.fault_bytes = _int(message.get("fault_bytes"))
     outcome.fault_bytes_exact = message.get("fault_bytes_exact") is not False
     outcome.call_bytes = _int(message.get("call_bytes")) or 0
+    outcome.stderr_bytes = _int(message.get("stderr_bytes")) or 0
+    outcome.stderr_dropped = _int(message.get("stderr_dropped")) or 0
     raw = message.get("result")
     if outcome.error_code is None and raw is not None:
         try:

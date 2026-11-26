@@ -125,6 +125,28 @@ La transacción que consume una aprobación SHALL poner el paso en `applying` y 
 - **WHEN** el proceso muere después de aplicar el efecto y antes de registrar el paso, y se reanuda
 - **THEN** el paso queda `completed` sin aplicar el efecto otra vez y sin pedir otra aprobación
 
+#### Scenario: Excepción inesperada del efecto
+- **WHEN** `apply` lanza cualquier excepción que no es un rehúse controlado (`EffectRefused`, que solo puede lanzarse antes de cualquier efecto)
+- **THEN** el paso y la ejecución quedan `uncertain` (no `failed`) con `effect_uncertain`, el mensaje pide `skill resume` y la reanudación reconcilia sin aplicar nada dos veces
+
+### Requirement: Rehúses controlados y turno exclusivo del efecto
+Un efecto SHALL poder rehusar en `prepare` con un código (`EffectRefused`): el paso y la ejecución quedan `failed` con ese código sin crear ninguna aprobación. El motor SHALL tomar el turno exclusivo del efecto antes de consumir la aprobación; si está ocupado (`EffectBusy`), nada se consume.
+
+#### Scenario: Rehúse antes de pedir
+- **WHEN** `prepare` rehúsa con `duplicate_decision`
+- **THEN** la ejecución queda `failed` con ese código, no hay fila en `approvals` y no se pregunta nada
+
+#### Scenario: Turno ocupado
+- **WHEN** el turno exclusivo del efecto está ocupado al ir a consumir una aprobación concedida, con un proveedor sintético
+- **THEN** la aprobación sigue `granted`, nada se aplica y `skill resume` la usa cuando el turno queda libre
+
+### Requirement: Ninguna aprobación viva tras terminar
+Al terminar una ejecución, cualquier aprobación suya `pending` o `granted` SHALL quedar `revoked`. Lo que un efecto fija al crear la ejecución (`Effect.bind`) SHALL guardarse con ella y SHALL NOT contener rutas ni contenido.
+
+#### Scenario: Ninguna ejecución terminada con aprobación viva
+- **WHEN** una ejecución con una aprobación `pending` o `granted` termina `failed` o `cancelled`
+- **THEN** esa aprobación queda `revoked`
+
 ### Requirement: Propuesta alterada denegada
 Antes de aplicar un efecto, el sistema SHALL recalcular la propuesta desde los datos guardados y SHALL aplicar el efecto solo si su hash coincide con el de la aprobación. Si no coincide, SHALL denegar el efecto, revocar la aprobación y dejar el paso en `failed`. La propuesta se prepara una sola vez por intento: el efecto SHALL recibir exactamente la propuesta mostrada y hasheada, nunca una preparada de nuevo.
 
