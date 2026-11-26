@@ -10,9 +10,15 @@ from harness.memory.context import (
     TRUNCATION_MARK,
     build_context,
 )
-from tests.conftest import PRIVATE_KEY_SAMPLE, SECRET_SAMPLES, write_note
+from tests.conftest import (
+    PRIVATE_KEY_SAMPLE,
+    SECRET_SAMPLES,
+    header_paths,
+    note_header,
+    write_note,
+)
 
-HEADER_RE = re.compile(r"^--- nota: (\S+) \(", re.MULTILINE)
+# Header paths are mapped back to vault paths (prompt-economy D2, revised 2026-11-26).
 NONCE_RE = re.compile(r"<<<MEMORIA ([0-9a-f]{16})")
 FIXED_NONCE = "0123456789abcdef"
 
@@ -31,7 +37,7 @@ def _block(out):
 
 
 def _paths(text):
-    return HEADER_RE.findall(text)
+    return header_paths(text)
 
 
 # -- selection and order (5.1) ------------------------------------------------------------------
@@ -65,7 +71,7 @@ def test_no_project_mixing(context):
     assert code == 0
     assert "CANARIO-BETA" not in out
     assert not any(p.startswith("projects/demo-beta/") for p in _paths(out))
-    assert "Decisiones/beta-almacen.md" not in out
+    assert "Decisiones/beta-almacen" not in out  # as a header would show it (D2)
 
 
 def test_machine_memory_excluded(context):
@@ -147,8 +153,8 @@ def test_note_truncated(context, vault):
     # at NOTE_MAX_BYTES, not the cut to the share.
     code, out, err = context(HARNESS_MEMORY_CONTEXT_MAX_BYTES="65536")
     assert code == 0
-    section = out.split("--- nota: Decisiones/alpha-larga.md (nota, 2026-11-01)\n")[1]
-    section = section.split("\n\n--- nota:")[0]
+    section = out.split("--- Decisiones/alpha-larga (nota, 2026-11-01)\n")[1]
+    section = section.split("\n\n--- ")[0]
     assert section.endswith(TRUNCATION_MARK)
     assert section == "a" * (cut - 1) + "\n" + TRUNCATION_MARK
     assert len(section.encode("utf-8")) <= NOTE_MAX_BYTES
@@ -157,6 +163,25 @@ def test_note_truncated(context, vault):
 
 
 # -- marking (5.3) ------------------------------------------------------------------------------
+
+
+def test_note_headers_are_short_and_keep_path_type_and_date(vault):
+    # prompt-economy D2 (2026-11-26): 527 -> 384 characters for these seven headers.
+    block = build_context(vault.resolve(), "demo-alpha", 8192, nonce=FIXED_NONCE).text
+    headers = [line for line in block.split("\n") if line.startswith("--- ")]
+    assert headers == [
+        "--- _project (project, 2026-11-21)",
+        "--- Decisiones/alpha-mensajeria (decision, 2026-11-16)",
+        "--- Lecciones/2026-11-10-reintentos-idempotentes (leccion, 2026-11-10)",
+        "--- Memoria-CC/project_alpha-integraciones (project, 2026-11-15)",
+        "--- sessions/2026-11-21-121500 (session, 2026-11-21)",
+        "--- sessions/2026-11-20-111500 (session, 2026-11-20)",
+        "--- sessions/2026-11-19-101500 (session, 2026-11-19)",
+    ]
+    assert len("\n".join(headers)) == 384
+    # The shown path maps back to the vault path exactly (the stored provenance).
+    included = build_context(vault.resolve(), "demo-alpha", 8192).included
+    assert header_paths(block) == [note.relative for note in included]
 
 
 def test_block_is_marked_as_untrusted_data(context):
@@ -210,7 +235,7 @@ def test_forged_marker_in_a_note(cli, vault, recorder, monkeypatch):
     closing = CLOSE_MARKER.format(nonce=nonce)
     assert sent.count(closing) == 1
     assert sent.index("INSTRUCCION-FALSIFICADA") < sent.index(closing)
-    assert sent.index(closing) > max(sent.index(p) for p in _paths(sent))
+    assert sent.index(closing) > max(sent.index(note_header(p)) for p in _paths(sent))
 
 
 def test_question_last(cli, vault, recorder):
@@ -305,8 +330,8 @@ def test_leftover_budget_takes_back_an_omitted_note(context, vault):
     ]
     assert "8 note(s) included, 1 truncated, 0 omitted" in err
     # The long note is cut only by the per-note maximum, not by its share.
-    section = out.split("--- nota: Decisiones/alpha-demo-larga.md (decision, 2026-11-22)\n")[1]
-    section = section.split("\n\n--- nota:")[0]
+    section = out.split("--- Decisiones/alpha-demo-larga (decision, 2026-11-22)\n")[1]
+    section = section.split("\n\n--- ")[0]
     assert section.endswith(TRUNCATION_MARK)
     assert NOTE_MAX_BYTES - 4 <= len(section.encode("utf-8")) <= NOTE_MAX_BYTES
     assert len(_block(out).encode("utf-8")) <= 8192

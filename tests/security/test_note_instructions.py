@@ -9,7 +9,7 @@ the note: that is a mitigation (the notice and the markers), not a guarantee.
 
 import re
 
-from tests.conftest import fingerprint, query, write_note
+from tests.conftest import NOTE_HEADER_RE, fingerprint, note_header, query, write_note
 
 NONCE_RE = re.compile(r"<<<MEMORIA ([0-9a-f]{16})")
 ORDERS_NOTE = "Decisiones/alpha-ordenes.md"
@@ -30,8 +30,8 @@ def _normalised(sent):
 
 def _without_section(sent, relative):
     """The sent text with one note's section (header, body and separator) taken out."""
-    start = sent.index(f"--- nota: {relative} ")
-    end = sent.index("--- nota: ", start + 1)
+    start = sent.index("\n" + note_header(relative)) + 1
+    end = NOTE_HEADER_RE.search(sent, start + 1).start()
     return sent[:start] + sent[end:]
 
 
@@ -120,8 +120,8 @@ def test_note_with_orders_that_reaches_the_limit(cli, vault, data_dir, recorder)
     assert "projects/demo-alpha/_project.md" in paths
     assert "projects/demo-alpha/sessions/2026-11-21-121500.md" in paths
     # The real decision, dated in the past, still goes before the notes dated 2099.
-    assert with_orders.index("--- nota: Decisiones/alpha-mensajeria.md") < with_orders.index(
-        "--- nota: Decisiones/alpha-ordenes-"
+    assert with_orders.index(note_header("Decisiones/alpha-mensajeria.md")) < with_orders.index(
+        "--- Decisiones/alpha-ordenes-"
     )
     assert _block_bytes(with_orders) <= 8192
     assert "projects/demo-beta" not in with_orders and "CANARIO-BETA" not in with_orders

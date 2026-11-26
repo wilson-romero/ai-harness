@@ -169,7 +169,8 @@ def make_inert(text: str) -> str:
 
 def _escape_line(line: str) -> str:
     """Model text cannot open a section, draw a rule that reads as a frontmatter fence, or
-    imitate the `--- nota: …` header that `memory context` puts before each note."""
+    imitate the `--- <path> (<type>, <updated>)` header that `memory context` puts before each
+    note (every line that starts with `---` is escaped, whatever the header looks like)."""
     line = make_inert(neutralise_delimiters(line))
     stripped = line.strip()
     if (

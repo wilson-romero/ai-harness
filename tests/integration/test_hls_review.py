@@ -11,7 +11,7 @@ import pytest
 from harness.core.errors import InvalidInput
 from harness.memory.context import build_context
 from harness.skills.config import DEFAULT_SKILLS_DIR
-from tests.conftest import REPO_ROOT, fingerprint, run_main
+from tests.conftest import REPO_ROOT, fingerprint, note_header, run_main
 from tests.skill_support import ScriptedProvider, build
 
 INPUTS = REPO_ROOT / "tests" / "fixtures" / "skill-inputs"
@@ -47,7 +47,7 @@ def test_complete_review_with_the_mock(conn, data_dir, vault):
     assert "## Preguntas pendientes" in outcome.output
     assert provider.calls == 1
     prompt = provider.prompts[0]
-    assert "<<<MEMORIA" in prompt and "projects/demo-alpha/_project.md" in prompt
+    assert "<<<MEMORIA" in prompt and note_header("projects/demo-alpha/_project.md") in prompt
     # The whole document is between the opening and the closing marker of its reference (the
     # same nonce), after the instructions, and nowhere else in the prompt.
     document = _fixture("hls-corto.md").strip("\n")

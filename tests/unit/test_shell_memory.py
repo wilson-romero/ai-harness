@@ -8,7 +8,7 @@ import re
 import pytest
 
 from harness.shell.conversation import FOREIGN_PREFIX, MAX_QUESTION_BYTES
-from tests.conftest import SECRET_SAMPLES, fingerprint, make_symlink
+from tests.conftest import SECRET_SAMPLES, fingerprint, make_symlink, note_header
 from tests.shell_support import CountingProvider, ScriptedTerminal, make_conversation, statuses
 
 NONCE = re.compile(r"\b[0-9a-f]{16}\b")
@@ -42,11 +42,11 @@ async def test_a_question_with_memory(conn, data_dir, vault):
     (sent,) = provider.prompts
     assert sent.startswith("Lo que sigue es memoria local del proyecto `demo-alpha`")
     assert "<<<MEMORIA " in sent and sent.endswith("\n\npregunta")
-    assert "--- nota: projects/demo-alpha/_project.md" in sent
+    assert note_header("projects/demo-alpha/_project.md") in sent
     paths = [row[0] for row in conn.execute("SELECT note_path FROM request_context")]
     assert "projects/demo-alpha/_project.md" in paths
     stored = _stored_text(conn)
-    assert "<<<MEMORIA" not in stored and "--- nota:" not in stored
+    assert "<<<MEMORIA" not in stored and note_header("projects/demo-alpha/_project.md") not in stored
     assert any(line.startswith("context: demo-alpha, ") for line in terminal.shown)
     outcomes = [row[0] for row in conn.execute(
         "SELECT outcome FROM audit_events WHERE event_type = 'memory.context'")]

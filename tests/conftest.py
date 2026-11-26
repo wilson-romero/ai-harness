@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -91,6 +92,30 @@ def write_note(root: Path, relative: str, body: str, **fields: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
+
+
+# A note header in the memory block (prompt-economy D2, revised 2026-11-26): `--- <path>
+# (<type>, <updated>)`, the path without `projects/<slug>/` and without `.md`.
+NOTE_HEADER_RE = re.compile(r"^--- (\S+) \([^\n]*\)$", re.MULTILINE)
+
+
+def vault_path(shown: str, slug: str = "demo-alpha") -> str:
+    """The vault path a header path stands for: the inverse that the design says is exact."""
+    if shown == "_project" or shown.startswith("sessions/"):
+        return f"projects/{slug}/{shown}.md"
+    return f"{shown}.md"
+
+
+def note_header(relative: str, slug: str = "demo-alpha") -> str:
+    """The start of the header of the note at vault path `relative`, up to the path."""
+    prefix = f"projects/{slug}/"
+    shown = relative[len(prefix):] if relative.startswith(prefix) else relative
+    return f"--- {shown.removesuffix('.md')} "
+
+
+def header_paths(text: str, slug: str = "demo-alpha") -> list[str]:
+    """The vault paths of the note headers of a memory block, in order."""
+    return [vault_path(shown, slug) for shown in NOTE_HEADER_RE.findall(text)]
 
 
 def make_symlink(link: Path, target: Path) -> None:
