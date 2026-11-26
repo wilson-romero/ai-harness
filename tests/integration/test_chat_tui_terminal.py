@@ -172,3 +172,48 @@ def test_plain_text_when_asked(data_dir, args, env):
     finally:
         child.kill()
     assert not (REPO_ROOT / "conversacion.log").exists()
+
+
+def test_lines_written_at_once_send_one_question(data_dir):
+    """Review 2026-11-26: one write with two lines. The screen handles both Enters before the
+    core's thread runs again; only one of them may become a question."""
+    child = FullScreenChild(data_dir, "chat", HARNESS_MOCK_DELAY_MS="1500")
+    try:
+        child.read_until(READY)
+        child.type("uno\rdos\r")
+        child.read_until("Received ")  # Textual inserts the keys before it handles Enter
+        child.read_until(READY)
+        time.sleep(1.0)  # a second question would be running by now
+        child.type("\x11")
+        assert child.wait() == 0
+    finally:
+        child.kill()
+    assert query(data_dir, "SELECT status FROM requests") == [("completed",)]
+
+
+def test_a_hangup_during_a_question_exits_cleanly(data_dir):
+    """Review 2026-11-26: the terminal goes away (SIGHUP, master closed) while a question runs:
+    the request ends uncertain, the session is released and the exit code is 0, not the 120
+    of a failed flush of the standard streams."""
+    session_id = run_main(data_dir, "session", "create", "S").stdout.strip()
+    child = FullScreenChild(data_dir, "chat", "--session", session_id,
+                            HARNESS_MOCK_DELAY_MS="60000")
+    try:
+        child.read_until(READY)
+        child.type("pregunta lenta\r")
+        wait_for_running(data_dir, session_id)
+        os.close(child.fd)
+        os.kill(child.pid, signal.SIGHUP)
+        deadline = time.monotonic() + DEADLINE_S
+        while time.monotonic() < deadline:
+            pid, status = os.waitpid(child.pid, os.WNOHANG)
+            if pid:
+                break
+            time.sleep(0.1)
+        else:
+            raise AssertionError("the conversation did not end")
+    finally:
+        child.kill()
+    assert os.waitstatus_to_exitcode(status) == 0
+    assert query(data_dir, "SELECT status FROM requests") == [("uncertain",)]
+    assert run_main(data_dir, "ask", session_id, "otra").returncode == 0  # the session is free

@@ -335,13 +335,13 @@ async def test_the_file_picker_attaches_a_file(tmp_path, monkeypatch):
 # -- approvals (D6) ----------------------------------------------------------------------------
 
 
-def _skill_tui(tmp_path, **options) -> tuple[Tui, WriteEffect]:
+def _skill_tui(tmp_path, provider=None, **options) -> tuple[Tui, WriteEffect]:
     root = copy_skills(tmp_path)
     with_effect(root, "demo-echo", "test.write")
     effect = WriteEffect(tmp_path / "efecto")
     data_dir = tmp_path / "datos"
     data_dir.mkdir()
-    return Tui(data_dir, ScriptedProvider(), skills_dir=root,
+    return Tui(data_dir, provider or ScriptedProvider(), skills_dir=root,
                effects={"test.write": effect}, **options), effect
 
 
@@ -568,4 +568,7 @@ def test_no_input_history_is_ever_written_to_disk():
                if "FileHistory" in path.read_text(encoding="utf-8")]
     assert writers == []
     source = (root / "shell" / "tui.py").read_text(encoding="utf-8")
+    # The one open is of the null device, after a hang-up (review 2026-11-26).
+    assert source.count("os.open(os.devnull, os.O_WRONLY)") == 1
+    source = source.replace("os.open(os.devnull, os.O_WRONLY)", "")
     assert "open(" not in source and "write_text" not in source and ".log(" not in source

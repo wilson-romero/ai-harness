@@ -38,6 +38,7 @@ TEXTUAL_DEBUG_VARIABLES = (
     "TEXTUAL_DRIVER", "TEXTUAL_DEVTOOLS_HOST", "TEXTUAL_DEVTOOLS_PORT", "TEXTUAL_ALLOW_SIGNALS",
     "TEXTUAL_SHOW_RETURN",
 )
+FULL_SCREEN_FAILED = "the full screen could not start on this console; going on in plain text"
 NO_TERMINAL = (
     "chat needs an interactive terminal (its input and output must be a console); "
     "scripts use the single commands: session, ask, history, memory, skill"
@@ -145,7 +146,14 @@ def run_chat(args: argparse.Namespace, terminal: ConversationTerminal | None = N
             terminal.attach(conversation)  # type: ignore[union-attr]
             return asyncio.run(run)
 
-        return full_screen(lambda: converse(args, settings, terminal, in_thread))
+        try:
+            return full_screen(lambda: converse(args, settings, terminal, in_thread))
+        except Exception as error:  # noqa: BLE001 - only FullScreenUnavailable is caught
+            if type(error).__name__ != "FullScreenUnavailable":
+                raise
+            # Before anything was opened or asked: the plain conversation, said once.
+            print(f"{FULL_SCREEN_FAILED} ({error})", file=sys.stderr, flush=True)
+            terminal = ConsoleTerminal()
 
     def in_main(conversation: Conversation, run: Coroutine[Any, Any, int]) -> int:
         with interrupts_to(conversation):

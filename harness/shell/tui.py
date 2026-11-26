@@ -23,6 +23,7 @@ import getpass
 import os
 import queue
 import signal
+import sys
 import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -65,9 +66,14 @@ from harness.shell.render import (
     rows_of_plain_text,
 )
 from harness.shell.terminal import PanelState, ShellState, WaitInterrupted
+from harness.skills.approvals import REJECT_WORD
 from harness.text.safe_text import terminal_safe
 
 APP_TITLE = "ai-harness"
+OFF = "off in the conversation"
+CRASHED = ("ai-harness: the full screen stopped on an internal error; nothing of the "
+           "conversation is shown here. The session was released; `chat --plain` works "
+           "without the full screen.")
 READY_HINT = "Type a question, or / for a command"
 BUSY_HINT = "working: ctrl+c interrupts"
 FOOTER = "ctrl+p commands  ctrl+c interrupts  ctrl+n new session  ctrl+q leaves"
@@ -172,7 +178,12 @@ class TuiTerminal:
         self._lines: queue.SimpleQueue[tuple[str, str | None]] = queue.SimpleQueue()
         self._answers: queue.SimpleQueue[tuple[str, str | None]] = queue.SimpleQueue()
         self._waiting: str | None = None  # "line" or "ask": what the core waits for now
+        # Taking a line or an answer and closing the wait are one step (review 2026-11-26):
+        # the screen handles every key of a fast paste before the core's thread runs again,
+        # so the wait must close in the screen's thread when it takes the first line.
+        self._state_lock = threading.Lock()
         self._closing = False
+        self.hung_up = False  # SIGHUP: the terminal is gone, its streams with it
         self._loop: asyncio.AbstractEventLoop | None = None
         self._wake: asyncio.Event | None = None
         self._state: ShellState | None = None
@@ -258,19 +269,39 @@ class TuiTerminal:
             return
         self._post("show_panel", panel)
 
-    def _drop_stale(self, items: queue.SimpleQueue[tuple[str, str | None]]) -> list:
-        """Interruptions that arrived before this wait began were meant for something else."""
+    def _drop_stale(self, items: queue.SimpleQueue[tuple[str, str | None]], *,
+                    everything: bool = False) -> list:
+        """Interruptions that arrived before this wait began were meant for something else;
+        with `everything`, any item is (an answer queued before its box was shown)."""
         kept = []
         while True:
             try:
                 item = items.get_nowait()
             except queue.Empty:
                 break
-            if item != _INTERRUPT:
+            if item != _INTERRUPT and not everything:
                 kept.append(item)
         for item in kept:
             items.put(item)
         return kept
+
+    def _arm(self, waiting: str) -> None:
+        with self._state_lock:
+            self._waiting = waiting
+
+    def _disarm(self, waiting: str) -> None:
+        with self._state_lock:
+            if self._waiting == waiting:
+                self._waiting = None
+
+    def _take(self, waiting: str) -> bool:
+        """In the screen's thread: whether the core waits for `waiting`; if so, the wait is
+        closed in the same step, so a second line or answer is refused until it reopens."""
+        with self._state_lock:
+            if self._waiting != waiting:
+                return False
+            self._waiting = None
+            return True
 
     async def read_line(self, prompt: str) -> str | None:
         self._loop = asyncio.get_running_loop()
@@ -280,7 +311,7 @@ class TuiTerminal:
         if self._closing:
             return None
         self._refresh_panel()
-        self._waiting = "line"
+        self._arm("line")
         self._post("set_ready", True)
         try:
             while True:
@@ -300,7 +331,7 @@ class TuiTerminal:
                     continue
                 return text
         finally:
-            self._waiting = None
+            self._disarm("line")
             self._post("set_ready", False)
 
     def _offer_sessions(self) -> None:
@@ -316,17 +347,17 @@ class TuiTerminal:
     def ask(self, question: str) -> str | None:
         """The approval prompt (D6): it blocks the core's thread, as in every terminal, and
         never the screen. Ctrl+C or leaving answers None: undecided."""
-        self._drop_stale(self._answers)
+        self._drop_stale(self._answers, everything=True)  # no answer before its box
         if self._closing:
             return None
         approval = self._approval
-        self._waiting = "ask"
+        self._arm("ask")
         self._post("open_approval", approval[1] if approval else [],
                    approval[2] if approval else [], question)
         try:
             kind, text = self._answers.get()
         finally:
-            self._waiting = None
+            self._disarm("ask")
             self._post("close_approval")
         return text if kind == "answer" else None
 
@@ -342,22 +373,25 @@ class TuiTerminal:
         return self._waiting == "line"
 
     def submit_line(self, line: str) -> bool:
-        """A line for the core: taken only while it waits for one (no type-ahead, D6)."""
-        if self._waiting != "line":
+        """A line for the core: one, and only while it waits for one (no type-ahead, D6)."""
+        if not self._take("line"):
             return False
         self._lines.put(("line", line))
         self._notify()
         return True
 
     def request_sessions(self) -> bool:
-        if self._waiting != "line":
-            return False
-        self._lines.put(_SESSIONS)
+        """The session list for the picker; the core keeps waiting for a line after it."""
+        with self._state_lock:
+            if self._waiting != "line":
+                return False
+            self._lines.put(_SESSIONS)
         self._notify()
         return True
 
     def answer(self, text: str) -> bool:
-        if self._waiting != "ask":
+        """One answer per question of the box (review 2026-11-26)."""
+        if not self._take("ask"):
             return False
         self._answers.put(("answer", text))
         return True
@@ -516,19 +550,50 @@ def _path_candidates(word: str) -> list[str]:
 class CodeInput(Input):
     """The approval answer (D6): its own input, never in the history, never pasted into."""
 
+    # Of the bindings Input has in Textual 8.2.8 (widgets/_input.py:76-140), these move text
+    # in or out of the box: ctrl+v pastes the app's clipboard, ctrl+x and ctrl+c copy to it
+    # (and to the terminal's, by OSC 52). The others move the cursor, select or delete
+    # inside the box, and stay (review 2026-11-26).
+
+    def _refuse(self) -> None:
+        self.app.notify(plain("Paste and copy are off here: type the answer"),  # type: ignore[arg-type]
+                        severity="warning", timeout=3)
+
     def _on_paste(self, event: Paste) -> None:
         event.stop()
         event.prevent_default()
-        self.app.notify(plain("Paste is ignored here: type the answer"),  # type: ignore[arg-type]
-                        severity="warning", timeout=3)
+        self._refuse()
+
+    def action_paste(self) -> None:
+        self._refuse()
+
+    def action_cut(self) -> None:
+        self._refuse()
+
+    def action_copy(self) -> None:
+        self._refuse()
+
+
+APPROVAL_RULE_SHOWN = "The code is taken only once the end of the proposal has been shown."
+NOT_SEEN = "Read the whole proposal first: page down or end shows the rest."
 
 
 class ApprovalScreen(ModalScreen[None]):
     """The approval box: harness chrome (title, header from the engine, question) around the
     proposal content in a foreign area. The content rows are the ones the core hashed and
-    showed, unchanged (they are never parsed)."""
+    showed, unchanged (they are never parsed). The keys that scroll the proposal act on the
+    box while the code input keeps the focus; the code is refused until the end of the
+    proposal has been on the screen (review 2026-11-26)."""
 
-    BINDINGS: ClassVar = [Binding("escape", "nothing", show=False)]
+    BINDINGS: ClassVar = [
+        Binding("escape", "nothing", show=False),
+        Binding("pagedown", "scroll_proposal('page_down')", show=False, priority=True),
+        Binding("pageup", "scroll_proposal('page_up')", show=False, priority=True),
+        Binding("down", "scroll_proposal('down')", show=False, priority=True),
+        Binding("up", "scroll_proposal('up')", show=False, priority=True),
+        Binding("end", "scroll_proposal('end')", show=False, priority=True),
+        Binding("home", "scroll_proposal('home')", show=False, priority=True),
+    ]
 
     def __init__(self, header: list[str], content: list[str], question: str) -> None:
         super().__init__(id="approval")
@@ -536,6 +601,30 @@ class ApprovalScreen(ModalScreen[None]):
         self._content = content
         self._question = question
         self.opened = time.monotonic()
+
+    @property
+    def _key(self) -> tuple[str, ...]:
+        return tuple(self._content)
+
+    @property
+    def seen_end(self) -> bool:
+        return self._key in self.app.seen_proposals  # type: ignore[attr-defined]
+
+    def action_scroll_proposal(self, how: str) -> None:
+        area = self.query_one("#approval-content", VerticalScroll)
+        getattr(area, f"scroll_{how}")(animate=False)
+
+    def _watch_scroll(self) -> None:
+        """Mark the end as shown once it is on the screen, and say how much is left."""
+        area = self.query_one("#approval-content", VerticalScroll)
+        if not area.size.height:
+            return  # not laid out yet: nothing has been shown
+        left = int(area.max_scroll_y - area.scroll_y)
+        if left <= 0:
+            self.app.seen_proposals.add(self._key)  # type: ignore[attr-defined]
+        text = (f"{left} more line(s) below. {APPROVAL_RULE_SHOWN}" if left > 0 and not
+                self.seen_end else f"End of the proposal shown. {APPROVAL_RULE_SHOWN}")
+        self.query_one("#approval-more", Static).update(plain(text, "bold"))
 
     def compose(self) -> ComposeResult:
         with Vertical(id="approval-box") as box:
@@ -547,24 +636,36 @@ class ApprovalScreen(ModalScreen[None]):
                 area.can_focus = False
                 yield Static(rows_content(rows_of_plain_text("\n".join(self._content)),
                                           strip_gutter=True), markup=False)
+            yield Static(plain(APPROVAL_RULE_SHOWN, "bold"), markup=False, id="approval-more")
             yield Static(plain(self._question, "bold"), markup=False, id="approval-question")
             yield Static(Content(""), markup=False, id="approval-message")
             yield CodeInput(id="approval-input")
 
     def on_mount(self) -> None:
         self.query_one(CodeInput).focus()
+        self.set_interval(0.1, self._watch_scroll)
+        self.call_after_refresh(self._watch_scroll)
 
     def action_nothing(self) -> None:
         return
+
+    def _say(self, text: str) -> None:
+        self.query_one("#approval-message", Static).update(plain(text, STYLES[HARNESS_WARNING]))
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
         if time.monotonic() - self.opened < self.app.arm_s:  # type: ignore[attr-defined]
             event.input.value = ""
-            self.query_one("#approval-message", Static).update(
-                plain("Too soon: read the proposal, then type the answer", STYLES[HARNESS_WARNING]))
+            self._say("Too soon: read the proposal, then type the answer")
             return
         value = event.value
+        # Rejecting needs no reading; anything that could be the code does.
+        if value.strip().lower() not in ("n", REJECT_WORD):
+            self._watch_scroll()
+            if not self.seen_end:
+                event.input.value = ""
+                self._say(NOT_SEEN)
+                return
         event.input.value = ""
         self.app.terminal.answer(value)  # type: ignore[attr-defined]
 
@@ -686,6 +787,7 @@ class HarnessApp(App[int]):
     #approval-content { height: 1fr; border: round $secondary; }
     #approval-question { height: auto; margin: 1 0 0 0; }
     #approval-message { height: auto; }
+    #approval-more { height: auto; }
     .picker { align: center middle; }
     #picker-box { width: 80%%; height: 70%%; border: round $accent; background: $surface; }
     """ % SIDE_COLUMNS
@@ -708,6 +810,7 @@ class HarnessApp(App[int]):
         self._started = 0.0
         self._leaving = False
         self._approval: ApprovalScreen | None = None
+        self.seen_proposals: set[tuple[str, ...]] = set()  # whose end has been shown
         terminal.app = self
 
     # -- layout -----------------------------------------------------------------------------
@@ -723,9 +826,53 @@ class HarnessApp(App[int]):
         """No system command (theme, screenshot, keys, quit): only the harness's (D7)."""
         return iter(())
 
+    # Every App method of Textual 8.2.8 that writes a file, opens a URL, reaches the
+    # terminal's clipboard or leaves the screen for the shell (app.py:1770, 1844-1950,
+    # 4770-4960; review 2026-11-26): none of them may run in the conversation (D7).
+
     def save_screenshot(self, *args: object, **kwargs: object) -> str:  # noqa: ARG002
         """Never: a screenshot would put the conversation in a file (D7)."""
-        raise RuntimeError("screenshots are disabled in the conversation")
+        raise RuntimeError(OFF)
+
+    def action_screenshot(self, *args: object, **kwargs: object) -> None:  # noqa: ARG002
+        self._refused("screenshots")
+
+    def deliver_screenshot(self, *args: object, **kwargs: object) -> None:  # noqa: ARG002
+        self._refused("screenshots")
+
+    def deliver_text(self, *args: object, **kwargs: object) -> None:  # noqa: ARG002
+        self._refused("saving files")
+
+    def deliver_binary(self, *args: object, **kwargs: object) -> None:  # noqa: ARG002
+        self._refused("saving files")
+
+    def open_url(self, *args: object, **kwargs: object) -> None:  # noqa: ARG002
+        self._refused("opening links")
+
+    def action_suspend_process(self) -> None:
+        self._refused("suspending")
+
+    def copy_to_clipboard(self, text: str) -> None:
+        """Inside the screen only: never to the terminal's clipboard (OSC 52)."""
+        self._clipboard = text
+
+    def _refused(self, what: str) -> None:
+        self.notify(plain(f"{what.capitalize()} is off in the conversation"),  # type: ignore[arg-type]
+                    severity="warning", timeout=3)
+
+    # A crash prints a fixed line, never Textual's traceback with local variables, which
+    # can hold the text the screen was showing (app.py:3285-3296; review 2026-11-26).
+
+    def _fatal_error(self) -> None:
+        self._crash()
+
+    def panic(self, *renderables: object) -> None:  # noqa: ARG002
+        self._crash()
+
+    def _crash(self) -> None:
+        self._return_code = 1
+        self._exit_renderables.append(CRASHED)
+        self._close_messages_no_wait()
 
     def on_mount(self) -> None:
         self.ui_loop = asyncio.get_running_loop()
@@ -926,11 +1073,15 @@ def _file_choices(root: Path | None = None) -> list[str]:
 def _signals_to(terminal: TuiTerminal) -> Iterator[None]:
     """SIGINT interrupts like Ctrl+C (D8); SIGTERM and SIGHUP leave like Ctrl+Q, so the
     screen is restored and the provider closed. Handlers never raise."""
-    wanted = [(signal.SIGINT, lambda *_: terminal.interrupt())]
-    for name in ("SIGTERM", "SIGHUP"):
-        number = getattr(signal, name, None)  # SIGHUP does not exist everywhere
-        if number is not None:
-            wanted.append((number, lambda *_: terminal.close_input()))
+    def hang_up(*_: object) -> None:
+        terminal.hung_up = True
+        terminal.close_input()
+
+    wanted = [(signal.SIGINT, lambda *_: terminal.interrupt()),
+              (signal.SIGTERM, lambda *_: terminal.close_input())]
+    number = getattr(signal, "SIGHUP", None)  # SIGHUP does not exist everywhere
+    if number is not None:
+        wanted.append((number, hang_up))
     previous = []
     for number, handler in wanted:
         with contextlib.suppress(ValueError, OSError):
@@ -945,15 +1096,40 @@ def _signals_to(terminal: TuiTerminal) -> Iterator[None]:
 CORE_JOIN_S = 30.0  # after the screen is gone: how long the core may take to close
 
 
+def _streams_to_nowhere() -> None:
+    """After a hang-up the terminal is gone: what is still buffered for it, and any message
+    on the way out, goes to the null device, so leaving does not fail on a dead stream (the
+    exit code 120 of a failed flush; review 2026-11-26)."""
+    with contextlib.suppress(OSError, ValueError):
+        null = os.open(os.devnull, os.O_WRONLY)
+        for stream in (sys.stdout, sys.stderr):
+            with contextlib.suppress(OSError, ValueError, AttributeError):
+                os.dup2(null, stream.fileno())
+        os.close(null)
+
+
+class FullScreenUnavailable(Exception):
+    """Textual loaded but could not drive this console; nothing of the conversation ran."""
+
+
 def run_full_screen(terminal: TuiTerminal, body: Callable[[], int]) -> int:
     """Show the screen until the conversation ends; then restore the terminal, close the
     conversation if the screen ended first, and return its exit code."""
     app = HarnessApp(terminal, body)
     with _signals_to(terminal):
-        result = app.run()
-        if app.core is not None and app.core.is_alive():
+        try:
+            result = app.run()
+        except Exception as error:  # noqa: BLE001 - the console driver could not start
+            if app.core is None:
+                raise FullScreenUnavailable(type(error).__name__) from None
+            raise
+        if app.core is None:  # the screen never came up: nothing of the conversation ran
+            raise FullScreenUnavailable("the screen did not start")
+        if app.core.is_alive():
             terminal.close_input()
             app.core.join(CORE_JOIN_S)
+    if terminal.hung_up:
+        _streams_to_nowhere()
     if app.error is not None:
         raise app.error
     if result is None:
