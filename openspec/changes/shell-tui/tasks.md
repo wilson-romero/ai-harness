@@ -33,7 +33,8 @@ Cada `[x]` lleva su recibo debajo, con fecha y plataforma. Los oráculos se nomb
   - Recibo (2026-11-26, macOS arm64): pasa.
 - [x] 4.4 README, «Conversación › Aspecto»: captura de texto (Pilot, contenido sintético), bloques, panel, teclas, aprobación y cómo quitarlo.
   - Recibo (2026-11-26, macOS arm64): hecho con `capture_tui.py` (fuera del repositorio) sobre una copia de `tests/fixtures/vault-synthetic`.
-- [ ] 4.5 `scripts/verify.sh` sobre el árbol limpio. Oráculo: código 0 y la línea `verify: PASS on <sha>`.
+- [x] 4.5 `scripts/verify.sh` sobre el árbol limpio. Oráculo: código 0 y la línea `verify: PASS on <sha>`.
+  - Recibo (2026-11-26, macOS arm64): `bash scripts/verify.sh` → código 0, `verify: PASS on 656a51cdb98e95a93ce1072a85a108bdf2d06384` (1478 passed en 244,95 s; public-safety PASS; OpenSpec 18 passed). El SHA es el del commit anterior al que añade este recibo (solo cambia `tasks.md`).
 - [ ] 4.6 Windows (Wilson): lo que dice «Supuestos de Windows» en `design.md`. Resultado: PASS, FAIL o NOT RUN con lo que se vio.
 
 ## 5. Archivo
