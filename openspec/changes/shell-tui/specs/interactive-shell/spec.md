@@ -20,6 +20,17 @@ La pantalla completa SHALL conducir la misma conversación que el texto plano: l
 - **WHEN** la persona elige una sesión en el selector de sesiones
 - **THEN** la conversación recibe la línea `/resume N` con el número que `/sessions` le daría, y la cambia como si se hubiera escrito
 
+#### Scenario: Varias líneas escritas de golpe
+- **WHEN** llegan varias pulsaciones de `Enter` antes de que el núcleo vuelva a esperar una línea
+- **THEN** el núcleo recibe una sola línea y el proveedor una sola petición
+
+### Requirement: Una respuesta por pregunta de la aprobación
+La pantalla completa SHALL entregar al núcleo una sola respuesta por cada pregunta de la aprobación y SHALL descartar cualquier respuesta que llegue antes de que la pregunta se muestre.
+
+#### Scenario: Dos respuestas seguidas
+- **WHEN** la persona envía dos respuestas antes de que el núcleo haga la pregunta siguiente
+- **THEN** el núcleo recibe la primera y la segunda se rechaza
+
 ### Requirement: Texto ajeno contenido e inerte en la pantalla completa
 En la pantalla completa, el texto que viene de fuera del harness SHALL mostrarse solo dentro de un bloque con borde cuyo título pone el harness, a partir del texto ya saneado, y SHALL NOT interpretarse como marcado de la pantalla: corchetes de estilo, de enlace o de acción se muestran como caracteres, y ninguna parte del bloque ejecuta una acción ni abre nada al pulsarla. El texto ajeno SHALL NOT dibujarse fuera de su bloque, cambiar el panel lateral ni abrir la caja de aprobación.
 
@@ -63,9 +74,20 @@ La entrada de la caja de aprobación SHALL NOT guardar historial, SHALL NOT acep
 - **WHEN** la persona pega el código en la entrada de la caja
 - **THEN** la entrada sigue vacía y la aprobación no se decide
 
+#### Scenario: Código pegado con el teclado
+- **WHEN** el código está en el portapapeles de la aplicación y la persona pulsa `ctrl+v` en la entrada de la caja
+- **THEN** la entrada sigue vacía y la aprobación no se decide
+
 #### Scenario: Respuesta adelantada
 - **WHEN** llega una respuesta a la caja antes del intervalo mínimo
 - **THEN** la caja la rechaza, sigue abierta y la aprobación no se decide
+
+### Requirement: La propuesta entera antes del código
+La caja de aprobación SHALL dejar recorrer la propuesta con el teclado sin quitar el foco a la entrada, SHALL decir cuántas líneas quedan por debajo y SHALL rechazar el código mientras el final de la propuesta no se haya mostrado; la caja SHALL decir esa regla. Rechazar SHALL NOT exigir haber llegado al final.
+
+#### Scenario: Propuesta larga
+- **WHEN** la propuesta tiene 120 líneas y la persona escribe el código sin haber bajado hasta el final
+- **THEN** la caja rechaza el código, sigue abierta y dice que se lea la propuesta entera; tras bajar al final con el teclado, el mismo código se acepta
 
 ### Requirement: Salir de la pantalla completa
 Salir SHALL hacerse con una tecla distinta de `ctrl+c` (`ctrl+q`), con `ctrl+d` en la entrada vacía o con `/exit`, y SHALL cerrar el proveedor, soltar la sesión y devolver la terminal a su estado (fuera de la pantalla alternativa, cursor visible), también tras un error o una señal de terminación.
@@ -95,3 +117,24 @@ La pantalla completa SHALL guardar lo que la persona escribe solo en memoria y S
 #### Scenario: Captura pedida
 - **WHEN** algo pide a la pantalla completa una captura de pantalla
 - **THEN** la pantalla la rechaza y no se escribe ningún fichero
+
+### Requirement: Nada sale de la pantalla
+La pantalla completa SHALL NOT guardar ficheros, abrir enlaces, suspenderse ni escribir en el portapapeles de la terminal. Si la pantalla falla por dentro, SHALL imprimir un mensaje fijo y SHALL NOT imprimir nada del contenido mostrado ni variables del programa.
+
+#### Scenario: Fallo interno
+- **WHEN** la pantalla completa se detiene por un error interno
+- **THEN** la salida de error tiene solo el mensaje fijo, sin traza ni texto de la conversación
+
+### Requirement: Consola que no admite la pantalla completa
+Si la pantalla completa no puede arrancar en la consola, la conversación SHALL seguir en texto plano tras decirlo en una línea, sin traza, y antes de haber abierto nada.
+
+#### Scenario: El driver no arranca
+- **WHEN** Textual carga pero su driver no puede manejar la consola
+- **THEN** se ve una línea que lo dice y la conversación de texto plano
+
+### Requirement: Cuelgue de la terminal
+Si la terminal se cuelga (SIGHUP) con una pregunta en curso, la conversación SHALL dejar la petición `uncertain`, soltar la sesión y salir con código 0.
+
+#### Scenario: SIGHUP durante una pregunta
+- **WHEN** la terminal desaparece mientras el proveedor trabaja
+- **THEN** la petición queda `uncertain`, la sesión se puede tomar de nuevo y el proceso sale con 0

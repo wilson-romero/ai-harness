@@ -37,6 +37,8 @@ Premisas leídas en el código fuente de `prompt_toolkit` 3.0.53 instalado (cont
 
 ### D1 · Una sola librería: `prompt_toolkit`
 
+> **Sustituida el 2026-11-26** por `shell-tui` D1: Textual es la única librería de terminal y `prompt_toolkit` se quitó (`openspec/changes/shell-tui/design.md`). Lo que sigue se queda como registro de la decisión de entonces.
+
 - **Qué:** se añade `prompt_toolkit==3.0.53` (fijada exacta en `pyproject.toml`, con `uv.lock` actualizado). Cubre la entrada (edición, historial, completado, barra inferior, `prompt_async` dentro del bucle de `asyncio`) y la salida con estilos (`print_formatted_text` con clases de estilo, que en Windows usa la API de consola cuando no hay secuencias VT). El resaltado del subconjunto de Markdown se escribe aquí, con la biblioteca estándar (D3).
 - **Por qué:** la entrada es lo que no se puede hacer sin librería de forma portable: `readline` no existe en Windows (D2 de `interactive-shell`) y la conversación no puede tener ramas por plataforma. De las candidatas, solo `prompt_toolkit` la cubre; y su salida con estilos basta para colorear filas que ya corta y marca el harness. Comparación (2026-11-26):
 

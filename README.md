@@ -100,7 +100,8 @@ En una consola, la conversación ocupa la pantalla completa ([Textual](https://t
 - **Panel:** sesión (nombre e identificador completo), proyecto, proveedor, peticiones enviadas en esta sesión, estado de la última y las notas de memoria que llevó la última pregunta. Sale solo del estado del harness y siempre describe la sesión tomada.
 - **Teclas:** `ctrl+p` abre la paleta de órdenes (solo órdenes del harness: estado, sesión nueva, cambiar de sesión, historial, contexto, elegir Skill, adjuntar fichero, buscar en la memoria…). «Switch session...» lista las sesiones y elige con el teclado; «Choose a skill...» rellena `/skill NOMBRE `; «Attach a file...» lista los ficheros de la carpeta de trabajo. `ctrl+n` sesión nueva. Flechas arriba y abajo: lo escrito en esta ejecución (solo en memoria). Tab completa los comandos `/`. `ctrl+c` interrumpe la pregunta en curso; sin nada en curso no sale. `ctrl+q`, `ctrl+d` con la entrada vacía o `/exit` salen: se cierra el proveedor y la terminal vuelve a como estaba.
 - **Mientras el proveedor trabaja** se ve `mock: thinking (N s), ctrl+c interrupts` y la entrada no envía (lo escrito se queda en ella).
-- **La aprobación** se abre en su propia caja: la cabecera del motor (destino, hash, caducidad), el contenido propuesto en un recuadro de texto ajeno y una entrada solo para el código. Esa entrada no guarda historial, no admite pegar y no acepta una respuesta en el primer medio segundo. `n` pide escribir `reject`, como en texto plano; `ctrl+c` la deja sin decidir.
+- **La aprobación** se abre en su propia caja: la cabecera del motor (destino, hash, caducidad), el contenido propuesto en un recuadro de texto ajeno y una entrada solo para el código. Esa entrada no guarda historial, no admite pegar ni copiar (tampoco con `ctrl+v` o `ctrl+x`) y no acepta una respuesta en el primer medio segundo. Una propuesta larga se recorre con `AvPág`/`RePág`, flechas, `Inicio` y `Fin` mientras se escribe en la entrada; la caja dice cuántas líneas quedan debajo y no toma el código hasta que el final de la propuesta se ha visto en pantalla. `n` pide escribir `reject`, como en texto plano, y rechazar no exige leer hasta el final; `ctrl+c` la deja sin decidir.
+- **Lo que la pantalla no hace:** capturas, guardar ficheros, abrir enlaces, suspenderse ni copiar al portapapeles de la terminal. Si falla por dentro, imprime una línea fija sin nada de la conversación. Si la consola no admite la pantalla completa, lo dice en una línea y sigue en texto plano.
 - **Un pegado de varias líneas** en la entrada se queda con la primera.
 - **Para quitarlo:** `main.py chat --plain`, o `HARNESS_PLAIN=1`, `NO_COLOR=1` o `TERM=dumb` en el entorno: la conversación de texto plano de siempre (la que usan los tests y las demos). También se usa sola sin consola, si Textual no carga o si hay puesta una variable de depuración de Textual (`TEXTUAL`, `TEXTUAL_LOG`, `TEXTUAL_SCREENSHOT`…), que guardaría o enviaría lo que se ve.
 
@@ -113,13 +114,17 @@ $w = Join-Path $env:TEMP "ai-harness-chat"
 Remove-Item -Recurse -Force $w -ErrorAction SilentlyContinue
 New-Item -ItemType Directory $w | Out-Null
 Copy-Item -Recurse tests\fixtures\vault-synthetic "$w\vault"
-@{ "tarea: architecture-memory/extract" = (Get-Content -Raw -Encoding utf8 tests\fixtures\skill-inputs\decision-ok.json) } | ConvertTo-Json | Set-Content -Encoding utf8 "$w\respuestas.json"
+$answer = [IO.File]::ReadAllText((Resolve-Path tests\fixtures\skill-inputs\decision-ok.json).Path, [Text.Encoding]::UTF8)
+$json = @{ "tarea: architecture-memory/extract" = $answer } | ConvertTo-Json
+[IO.File]::WriteAllText("$w\respuestas.json", $json, (New-Object Text.UTF8Encoding $false))
 $env:HARNESS_DATA_DIR = "$w\data"
 $env:HARNESS_VAULT_ROOT = "$w\vault"
 $env:HARNESS_MOCK_RESPONSES = "$w\respuestas.json"
 $env:HARNESS_MOCK_DELAY_MS = "0"
 uv run python main.py
 ```
+
+Las tres líneas de `respuestas.json` valen igual en Windows PowerShell 5.1 y en PowerShell 7. En 5.1, `ConvertTo-Json` convierte en un objeto el texto que devuelve `Get-Content -Raw`, porque ese texto lleva propiedades añadidas (`PSPath`…), y el Mock lo rechaza. `[IO.File]::ReadAllText` devuelve un texto sin nada más. El fichero se escribe en UTF-8 sin BOM. Uno con BOM, el que escribe `Set-Content -Encoding utf8` en 5.1, también carga, como cualquier fichero UTF-8 que lee el harness.
 
 En zsh o bash:
 
