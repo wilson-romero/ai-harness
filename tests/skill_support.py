@@ -167,10 +167,16 @@ def build(conn: sqlite3.Connection, data_dir: Path, *, provider=None, root: Path
 
 
 def all_text(conn_or_path) -> str:
-    """Every text value of every table, joined: to look for content that must not be there."""
+    """Every TEXT and BLOB value of every table, joined: to look for content that must not be
+    there. A BLOB is decoded as UTF-8 (invalid bytes replaced), so a text stored as bytes is
+    found too; numbers and NULL are left out."""
     conn = sqlite3.connect(conn_or_path) if isinstance(conn_or_path, (str, Path)) else conn_or_path
     chunks = []
     for (table,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'"):
         for row in conn.execute(f"SELECT * FROM {table}"):  # noqa: S608 - table names from SQLite
-            chunks.extend(str(value) for value in row if isinstance(value, str))
+            for value in row:
+                if isinstance(value, str):
+                    chunks.append(value)
+                elif isinstance(value, bytes):
+                    chunks.append(value.decode("utf-8", errors="replace"))
     return "\n".join(chunks)

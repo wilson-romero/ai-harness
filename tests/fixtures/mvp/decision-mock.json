@@ -1,0 +1,15 @@
+{
+  "title": "Cola gestionada para avisar de los pedidos aceptados",
+  "context": "El orquestador sintético de pedidos tiene que avisar al canal de ventas de cada pedido aceptado. El equipo no opera infraestructura propia de mensajería.",
+  "decision": "El orquestador publica un evento por pedido aceptado en una cola gestionada; un evento que no se puede publicar se reintenta con la misma clave de idempotencia y después va a una cola de errores.",
+  "alternatives": [
+    "Tabla de eventos leída por sondeo."
+  ],
+  "consequences": [
+    "No hay infraestructura de mensajería que operar.",
+    "El canal de ventas tiene que ignorar los eventos repetidos."
+  ],
+  "assumptions": [
+    "El volumen no supera 200 pedidos por minuto este año."
+  ]
+}
