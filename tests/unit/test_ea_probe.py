@@ -4,6 +4,9 @@ The real path (pywin32 and Enterprise Architect on Windows) has never run in the
 COM layer is replaced by a fake with the same small interface. What is proven here is the
 control flow around it: what happens without pywin32, with each kind of failure, with a step
 that hangs, what the summary may contain, and where the detail may be written.
+
+No test may reach real COM (hotfix 0.2.1): the real script is started only without
+site-packages, so pywin32 cannot be imported even where it is installed.
 """
 
 from __future__ import annotations
@@ -263,12 +266,42 @@ def outside(tmp_path: Path) -> Path:
 # -- without pywin32 ------------------------------------------------------------------------------
 
 
+# Revised on 2026-11-25 (hotfix 0.2.1). On Windows pywin32 comes installed with `mcp`, so the
+# real script, started with the plain interpreter, took its COM path inside the test. The
+# script is now started without site-packages (`-S`) and isolated from the environment and
+# the user site (`-I`): no installed package can be imported, pywin32 included, wherever it
+# is installed. No switch in the script is involved; the script cannot tell it is under test.
+ISOLATED = ("-I", "-S")
+FIND = "import importlib.util as u, sys; print(sorted(n for n in sys.argv[1:] if u.find_spec(n)))"
+COM_MODULES = ["pythoncom", "pywintypes", "win32com"]
+
+
+def importable(names: list[str], *flags: str) -> list[str]:
+    done = subprocess.run([sys.executable, *flags, "-c", FIND, *names], capture_output=True,
+                          text=True, encoding="utf-8", timeout=60, check=True)
+    return ast.literal_eval(done.stdout.strip())
+
+
+def run_script_isolated(*args: str, env: dict[str, str]) -> subprocess.CompletedProcess:
+    """The only way these tests start the real probe: never with pywin32 importable."""
+    assert importable(COM_MODULES, *ISOLATED) == []
+    return subprocess.run([sys.executable, *ISOLATED, str(SCRIPT), *args], capture_output=True,
+                          text=True, encoding="utf-8", env=env, timeout=120, check=False)
+
+
+def test_the_isolated_interpreter_cannot_import_installed_packages() -> None:
+    """Control: `mcp` and `pydantic` sit in the same site-packages as pywin32 on Windows. The
+    plain interpreter finds them; the isolated one finds none of them."""
+    installed = ["mcp", "pydantic"]
+    assert importable(installed) == installed
+    assert importable(installed + COM_MODULES, *ISOLATED) == []
+
+
 def test_without_pywin32_the_real_script_runs_to_the_end(outside: Path) -> None:
     import os
 
     env = dict(os.environ, HARNESS_DATA_DIR=str(outside))
-    done = subprocess.run([sys.executable, str(SCRIPT)], capture_output=True, text=True,
-                          encoding="utf-8", env=env, timeout=120, check=False)
+    done = run_script_isolated(env=env)
     assert done.returncode == 0, done.stderr
     assert "Traceback" not in done.stderr + done.stdout
     summary = summary_of(done.stdout)
@@ -534,6 +567,63 @@ def test_no_platform_conditionals_in_the_probe() -> None:
 def test_the_platform_check_says_no() -> None:
     assert PLATFORM_CONDITIONAL.search("if sys.platform == 'win32':")
     assert PLATFORM_CONDITIONAL.search("WINDOWS = os.name == 'nt'")
+
+
+def test_the_com_backend_is_built_only_when_run_as_a_script() -> None:
+    """No test can create a COM object (hotfix 0.2.1). `main` has no default backend, the
+    real one is built only under `if __name__ == "__main__":`, and the tests start the script
+    only through `run_script_isolated`, where pywin32 cannot be imported."""
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    main_guard = next(
+        node for node in tree.body
+        if isinstance(node, ast.If) and ast.unparse(node.test) == "__name__ == '__main__'"
+    )
+    inside = {id(node) for node in ast.walk(main_guard)}
+    built = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "Pywin32Backend"
+    ]
+    assert built and all(id(node) in inside for node in built), [n.lineno for n in built]
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    backend = next(a for a in main.args.kwonlyargs if a.arg == "backend")
+    assert main.args.kw_defaults[main.args.kwonlyargs.index(backend)] is None
+    with pytest.raises(TypeError):
+        probe.main([])  # nothing to fall back on
+
+    here = Path(__file__).resolve()
+    others = [
+        path.relative_to(REPO_ROOT).as_posix() for path in sorted((REPO_ROOT / "tests").rglob("*.py"))
+        if path.resolve() != here and "ea_probe" in path.read_text(encoding="utf-8")
+    ]
+    assert others == []
+    tree = ast.parse(here.read_text(encoding="utf-8"))
+    assert script_starts(tree) == ["run_script_isolated"]
+    helper = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "run_script_isolated")
+    started = [ast.unparse(n) for n in ast.walk(helper)
+               if isinstance(n, ast.List) and "SCRIPT" in ast.unparse(n)]
+    assert started == ["[sys.executable, *ISOLATED, str(SCRIPT), *args]"]
+    assert ISOLATED == ("-I", "-S")
+
+
+def script_starts(tree: ast.Module) -> list[str]:
+    """The function around every process start whose arguments name SCRIPT."""
+    found = []
+    for function in ast.walk(tree):
+        if not isinstance(function, ast.FunctionDef):
+            continue
+        for node in ast.walk(function):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in {"subprocess", "os"}
+                and any(isinstance(n, ast.Name) and n.id == "SCRIPT"
+                        for arg in node.args for n in ast.walk(arg))
+            ):
+                found.append(function.name)
+    return found
 
 
 def test_probe_imports_only_the_standard_library_and_pywin32() -> None:

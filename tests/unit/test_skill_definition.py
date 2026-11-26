@@ -275,13 +275,37 @@ def test_changing_a_template_changes_the_hash(root):
     assert after.sha256 != before.sha256 and after.version == before.version
 
 
-def test_crlf_line_ends_and_bom_give_the_same_hash(root):
-    for path in (root / "demo-echo").rglob("*"):
+def _rewrite(folder: Path, change) -> None:
+    for path in folder.rglob("*"):
         if path.is_file():
-            text = path.read_bytes().decode("utf-8")
-            path.write_bytes(b"\xef\xbb\xbf" + text.replace("\n", "\r\n").encode("utf-8"))
+            path.write_bytes(change(path.read_bytes().decode("utf-8")).encode("utf-8"))
+
+
+@pytest.mark.parametrize("checkout", ["lf", "autocrlf"])
+def test_crlf_line_ends_and_bom_give_the_same_hash(root, checkout):
+    """The copy starts as git left it: with LF, or with CRLF after a Windows checkout with
+    `core.autocrlf` (hotfix 0.2.1: the test then turned CRLF into CR CR LF itself)."""
+    folder = root / "demo-echo"
+    if checkout == "autocrlf":
+        _rewrite(folder, lambda text: text.replace("\n", "\r\n"))
+    _rewrite(folder, lambda text: "﻿" + text.replace("\r\n", "\n").replace("\n", "\r\n"))
+    assert b"\r\r" not in (folder / "SKILL.md").read_bytes()
     assert b"\r\n" in (root / "demo-echo" / "SKILL.md").read_bytes()
     assert load_skill(root, "demo-echo", EFFECTS).sha256 == DEMO_ECHO_SHA256
+
+
+def test_a_lone_carriage_return_is_a_line_end(root):
+    """D4 (revised on 2026-11-25): `\\r\\n` first, then any `\\r` left, become `\\n`. A file
+    saved with old Mac line ends gives the same hash; CR CR LF is two line ends."""
+    folder = root / "demo-echo"
+    _rewrite(folder, lambda text: text.replace("\n", "\r"))
+    assert load_skill(root, "demo-echo", EFFECTS).sha256 == DEMO_ECHO_SHA256
+    template = folder / "templates" / "draft.md"
+    lines = template.read_bytes().decode("utf-8").split("\r")
+    template.write_bytes("\r\r\n".join(lines).encode("utf-8"))
+    loaded = load_skill(root, "demo-echo", EFFECTS)
+    assert loaded.sha256 != DEMO_ECHO_SHA256
+    assert loaded.templates["templates/draft.md"] == "\n\n".join(lines)
 
 
 # -- 2.5 limits on disk --------------------------------------------------------------------------
