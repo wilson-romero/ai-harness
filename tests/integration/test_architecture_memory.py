@@ -243,11 +243,15 @@ def test_the_same_title_again_is_a_duplicate_without_an_approval(conn, data_dir,
     first = run(engine, sessions.create_session("Primera", "demo-alpha"))
     assert first.status == "completed"
     before = fingerprint(vault)
-    again, sessions2, _ = engine_for(conn, data_dir, vault,
-                                     answer(title=TITLE.upper() + "  ", context="Otra redacción."),
-                                     terminal=ApprovingTerminal())
-    second = run(again, sessions2.create_session("Segunda", "demo-alpha"))
+    again, sessions2, provider2 = engine_for(
+        conn, data_dir, vault, answer(title=TITLE.upper() + "  ", context="Otra redacción."),
+        terminal=ApprovingTerminal())
+    # Another source text: the early check does not apply, the title check after the model
+    # does (D8, revised 2026-11-25).
+    second = run(again, sessions2.create_session("Segunda", "demo-alpha"),
+                 SOURCE + "\nOtra redacción de la misma decisión.\n")
     assert second.status == "failed"
+    assert provider2.calls == 1
     assert "duplicate" in one(conn, "SELECT error_code FROM skill_runs WHERE run_id = ?",
                               second.run_id)[0]
     assert first.applied[0] in second.message
@@ -832,3 +836,172 @@ def test_apply_refuses_a_proposal_that_does_not_match_its_target(conn, data_dir,
         effect.apply(context, proposal)
     assert caught.value.code == "unsafe_target"
     assert fingerprint(vault) == before
+
+
+# -- D8 revised 2026-11-25: the same source again is refused before the model is asked ----------
+
+
+def _saved(conn, data_dir, vault, project="demo-alpha", source=SOURCE):
+    engine, sessions, _ = engine_for(conn, data_dir, vault, terminal=ApprovingTerminal())
+    outcome = run(engine, sessions.create_session("Primera", project), source)
+    assert outcome.status == "completed", outcome.message
+    return outcome
+
+
+def _again(conn, data_dir, vault, project="demo-alpha", source=SOURCE):
+    engine, sessions, provider = engine_for(conn, data_dir, vault, terminal=ApprovingTerminal())
+    return run(engine, sessions.create_session("Segunda", project), source), provider
+
+
+def test_the_same_source_again_is_refused_without_calling_the_provider(conn, data_dir, vault):
+    first = _saved(conn, data_dir, vault)
+    before = fingerprint(vault)
+    second, provider = _again(conn, data_dir, vault)
+    assert provider.calls == 0
+    assert second.status == "failed"
+    assert first.applied[0] in (second.message or "")
+    assert one(conn, "SELECT error_code FROM skill_runs WHERE run_id = ?", second.run_id) == (
+        "duplicate_decision",)
+    steps = dict(conn.execute("SELECT step_key, status FROM skill_steps WHERE run_id = ?",
+                              (second.run_id,)).fetchall())
+    assert steps == {"extract": "pending", "check": "pending", "save": "failed"}
+    assert one(conn, "SELECT count(*) FROM approvals WHERE run_id = ?", second.run_id) == (0,)
+    assert one(conn, "SELECT count(*) FROM requests") == (1,)  # only the first run's
+    assert fingerprint(vault) == before
+
+
+def test_the_same_source_with_other_line_ends_is_the_same_source(conn, data_dir, vault):
+    _saved(conn, data_dir, vault)
+    second, provider = _again(conn, data_dir, vault,
+                              source="\ufeff" + SOURCE.replace("\n", "\r\n"))
+    assert (second.status, provider.calls) == ("failed", 0)
+
+
+@pytest.mark.parametrize("variant", ["cr", "no-final-newline", "extra-final-newlines"])
+def test_line_end_variants_of_the_source_are_the_same_source(conn, data_dir, vault, variant):
+    _saved(conn, data_dir, vault)
+    source = {
+        "cr": SOURCE.replace("\n", "\r"),
+        "no-final-newline": SOURCE.rstrip("\n"),
+        "extra-final-newlines": SOURCE + "\n\n",
+    }[variant]
+    second, provider = _again(conn, data_dir, vault, source=source)
+    assert (second.status, provider.calls) == ("failed", 0)
+
+
+def test_the_source_is_recorded_only_as_hashes_once_applied(conn, data_dir, vault):
+    first = _saved(conn, data_dir, vault)
+    rows = conn.execute("SELECT * FROM effect_sources").fetchall()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["scope"] == "vault.save_decision" and row["run_id"] == first.run_id
+    assert row["partition_key"].endswith("/demo-alpha")
+    # BOM dropped, CR and CRLF to LF, trailing line ends removed (D8, revised 2026-11-25)
+    assert row["source_sha256"] == hashlib.sha256(
+        SOURCE.rstrip("\n").encode("utf-8")).hexdigest()
+    assert first.applied[0].endswith(f"-{row['effect_ref'][4:12]}.md")
+
+
+@pytest.mark.parametrize("answers", [["n"], [None]], ids=["rejected", "abandoned"])
+def test_a_rejected_or_abandoned_approval_records_no_source(conn, data_dir, vault, answers):
+    engine, sessions, _ = engine_for(conn, data_dir, vault, terminal=FakeTerminal(answers))
+    outcome = run(engine, sessions.create_session("Demo", "demo-alpha"))
+    assert outcome.status in ("cancelled", "awaiting_approval")
+    assert one(conn, "SELECT count(*) FROM effect_sources") == (0,)
+    _, provider = _again(conn, data_dir, vault)
+    assert provider.calls == 1
+
+
+def test_an_uncertain_write_records_its_source_only_when_reconciled(conn, data_dir, vault,
+                                                                      monkeypatch):
+    engine, run_id, _ = _uncertain_with_two_links(conn, data_dir, vault, monkeypatch)
+    assert one(conn, "SELECT count(*) FROM effect_sources") == (0,)
+    outcome = resume(engine, run_id)
+    assert outcome.status == "completed", outcome.message
+    assert one(conn, "SELECT run_id FROM effect_sources") == (run_id,)
+
+
+def test_a_decision_saved_before_the_migration_is_found_only_after_the_model(conn, data_dir,
+                                                                             vault):
+    first = _saved(conn, data_dir, vault)
+    conn.execute("DELETE FROM effect_sources")  # as a note saved before migration 006
+    second, provider = _again(conn, data_dir, vault)
+    assert provider.calls == 1
+    assert second.status == "failed" and first.applied[0] in (second.message or "")
+
+
+def test_a_removed_note_does_not_refuse_its_source(conn, data_dir, vault):
+    first = _saved(conn, data_dir, vault)
+    (vault / first.applied[0]).unlink()
+    second, provider = _again(conn, data_dir, vault)
+    assert provider.calls == 1
+    assert second.status == "completed", second.message
+
+
+def test_the_same_source_in_another_project_is_not_refused_early(conn, data_dir, vault):
+    _saved(conn, data_dir, vault, project="demo-alpha")
+    second, provider = _again(conn, data_dir, vault, project="demo-beta")
+    assert provider.calls == 1
+    assert second.status == "completed", second.message
+
+
+def test_an_approval_left_unanswered_and_resumed_without_inputs_records_its_source(
+        conn, data_dir, vault):
+    """The resume the product prints (`skill resume RUN_ID`) passes no input: the source key
+    fixed when the run was created is the one recorded (review of 2026-11-25, finding 4)."""
+    engine, sessions, _ = engine_for(conn, data_dir, vault, terminal=FakeTerminal([None]))
+    outcome = run(engine, sessions.create_session("Demo", "demo-alpha"))
+    assert outcome.status == "awaiting_approval"
+    engine.__dict__["_terminal"] = ApprovingTerminal()
+    resumed = asyncio.run(engine.resume(outcome.run_id, {}, None))
+    assert resumed.status == "completed", resumed.message
+    assert one(conn, "SELECT run_id FROM effect_sources") == (outcome.run_id,)
+    second, provider = _again(conn, data_dir, vault)
+    assert (second.status, provider.calls) == ("failed", 0)
+
+
+def test_an_uncertain_write_reconciled_by_a_resume_without_inputs_records_its_source(
+        conn, data_dir, vault, monkeypatch):
+    engine, run_id, _ = _uncertain_with_two_links(conn, data_dir, vault, monkeypatch)
+    outcome = asyncio.run(engine.resume(run_id, {}, None))
+    assert outcome.status == "completed", outcome.message
+    assert one(conn, "SELECT run_id FROM effect_sources") == (run_id,)
+
+
+def test_cancel_of_an_uncertain_run_whose_note_is_in_place_records_its_source(
+        conn, data_dir, vault, monkeypatch):
+    engine, run_id, _ = _uncertain_with_two_links(conn, data_dir, vault, monkeypatch)
+    assert engine.cancel(run_id).status == "cancelled"
+    assert one(conn, "SELECT run_id FROM effect_sources") == (run_id,)
+    second, provider = _again(conn, data_dir, vault)
+    assert (second.status, provider.calls) == ("failed", 0)
+
+
+def test_the_same_source_in_another_vault_is_not_refused_early(conn, data_dir, vault, tmp_path):
+    """The other vault is a copy made after the save, so it holds the same note: only the
+    vault digest in the key keeps the early check from answering for it."""
+    import shutil
+
+    _saved(conn, data_dir, vault)
+    other = tmp_path / "otro-vault"
+    shutil.copytree(vault, other)
+    second, provider = _again(conn, data_dir, other)
+    assert provider.calls == 1
+    assert second.status == "failed"  # the title check after the model, in the other vault
+
+
+def test_resume_wants_the_exact_bytes_even_where_the_dedup_key_does_not(conn, data_dir, vault):
+    """Intended (D8, second review of 2026-11-25): `resume` checks the exact bytes the run
+    started with, because a retried step sends them again; the dedup key is deliberately
+    tolerant. The same text with CRLF is refused on resume and is a duplicate on a new run."""
+    from harness.core.errors import InvalidInput
+
+    engine, sessions, _ = engine_for(conn, data_dir, vault, terminal=FakeTerminal([None]))
+    outcome = run(engine, sessions.create_session("Demo", "demo-alpha"))
+    assert outcome.status == "awaiting_approval"
+    with pytest.raises(InvalidInput, match="not the one the run started with"):
+        resume(engine, outcome.run_id, SOURCE.replace("\n", "\r\n"))
+    engine.__dict__["_terminal"] = ApprovingTerminal()
+    assert resume(engine, outcome.run_id).status == "completed"
+    second, provider = _again(conn, data_dir, vault, source=SOURCE.replace("\n", "\r\n"))
+    assert (second.status, provider.calls) == ("failed", 0)

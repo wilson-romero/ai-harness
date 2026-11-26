@@ -1,10 +1,10 @@
 # ai-harness
 
-Copiloto de arquitectura que se ejecuta en local. Mantiene varias conversaciones persistentes con un proveedor de lenguaje y, en cortes posteriores, usará Microsoft Copilot Web, herramientas MCP, Skills, una segunda memoria en Markdown y Enterprise Architect.
+Copiloto de arquitectura que se ejecuta en local. Mantiene varias conversaciones persistentes con un proveedor de lenguaje, lee una segunda memoria en Markdown, ejecuta Skills declarativos y llama a herramientas de solo lectura de servidores MCP. En cortes posteriores usará Microsoft Copilot Web y Enterprise Architect.
 
 **Es un proyecto educativo:** sirve para aprender a construir un harness, no está pensado para uso en producción. Se ejercita solo con prompts sintéticos y no guarda contenido real. Quien lo use para automatizar un servicio real es responsable de cumplir las condiciones de uso de ese servicio.
 
-Estado: **Corte 1 · Esqueleto**, **Corte 3 · Memoria** y **Corte 4 · Skills**. Sesiones, historial y recuperación funcionan con un proveedor Mock; el harness lee una segunda memoria en Markdown compatible con `claude-memory-system` y ejecuta Skills declarativos. Su única escritura en esa memoria es una nota de decisión nueva en `Decisiones/`, después de una aprobación humana (ver [Skills de arquitectura](#skills-de-arquitectura)). El plan de entregas está en [`docs/plan/2026-11-24-ai-harness-cortes.md`](docs/plan/2026-11-24-ai-harness-cortes.md).
+Estado (revisado el 2026-11-25): **Corte 1 · Esqueleto**, **Corte 3 · Memoria**, **Corte 4 · Skills**, **Corte 9 · Interfaz conversacional** ([Conversación](#conversación)) y, del Corte 5, la **pasarela MCP** (`mcp-gateway`); la lectura de Enterprise Architect (`ea-read`) está en pausa. Sesiones, historial y recuperación funcionan con un proveedor Mock, el único disponible hoy: el proveedor de Copilot Web está en desarrollo y no forma parte de esta versión. El harness lee una segunda memoria en Markdown compatible con `claude-memory-system`, ejecuta Skills declarativos y llama por stdio a herramientas de solo lectura de servidores MCP declarados en una lista local (ver [Herramientas MCP](#herramientas-mcp)). Su única escritura en esa memoria es una nota de decisión nueva en `Decisiones/`, después de una aprobación humana (ver [Skills de arquitectura](#skills-de-arquitectura)). El plan de entregas está en [`docs/plan/2026-11-24-ai-harness-cortes.md`](docs/plan/2026-11-24-ai-harness-cortes.md).
 
 ## Requisitos
 
@@ -29,9 +29,91 @@ uv run python main.py history SESSION_ID
 
 `session create` imprime el identificador de la sesión. Los comandos aceptan solo el UUID completo, no un prefijo. Los resultados salen por stdout; los avisos y los errores, por stderr, siempre en UTF-8 (también con la salida redirigida en Windows). Código de salida: 0 hecho, 1 error controlado, 2 uso incorrecto, 130 interrumpido con Ctrl+C.
 
+## Conversación
+
+Además de las órdenes sueltas, el harness se usa como una conversación: se entra una vez y se escriben preguntas y comandos.
+
+```sh
+uv run python main.py                                  # en una terminal: abre la conversación
+uv run python main.py chat --project demo-alpha        # sesión nueva con la memoria de un proyecto
+uv run python main.py chat --session SESSION_ID        # continúa una sesión
+```
+
+`main.py` sin argumentos abre la conversación solo si la entrada y la salida son una terminal; en un script o con una tubería sigue mostrando la ayuda. `chat` sin terminal termina con código 2 sin crear ni tocar ninguna sesión: para scripts están las órdenes sueltas, que no cambian.
+
+Al entrar se ve el proveedor, la sesión y el proyecto. Una línea normal es una pregunta en esa sesión, con los mismos estados y reglas que `ask` (y la memoria del proyecto, si la sesión lo tiene, como `ask --project`). Una línea que empieza por `/` es un comando y **nunca** se envía al proveedor, tampoco si está mal escrito; para preguntar algo que empieza por `/`, se escribe `//`.
+
+| Comando | Qué hace |
+|---|---|
+| `/help` | Lista los comandos. |
+| `/status` | Sesión, proyecto, proveedor, última solicitud y adjunto pendiente. |
+| `/new [--project SLUG] [NOMBRE]` | Pasa a una sesión nueva; la anterior queda libre y sin cambios. |
+| `/sessions` | Lista numerada de sesiones. |
+| `/resume N` | Pasa a la sesión número N de la última `/sessions` (un número, no un identificador). |
+| `/history` | Historial de esta sesión, y de ninguna otra. |
+| `/memory TÉRMINOS` | Lo mismo que `memory search` (dentro del proyecto de la sesión, si lo tiene). |
+| `/context` | Lo mismo que `memory context` para el proyecto de la sesión. |
+| `/skill NOMBRE [CLAVE=VALOR…] [--file CLAVE=RUTA…]` | Ejecuta un Skill en esta sesión, como `skill run`. Su aprobación se pide ahí mismo, con el aviso de siempre. |
+| `/file RUTA` | Adjunta un fichero de texto (hasta 64 KiB, UTF-8, un fichero normal: no un enlace, una tubería ni un dispositivo) a la **siguiente** pregunta. Va marcado como datos y no se guarda nunca. |
+| `/exit` | Sale. El fin de entrada (Ctrl+D; en Windows, Ctrl+Z e Intro) también. |
+
+- **Ctrl+C** durante una pregunta la interrumpe: queda `uncertain` si el prompt ya había salido, `failed` si no, nunca se reenvía y la conversación sigue. Ctrl+C mientras se espera una línea solo recuerda cómo salir. Ctrl+C durante `/skill` lo detiene: si el paso del modelo estaba en curso, queda `uncertain` (no se reenvía) y la conversación escribe los dos comandos que lo continúan o lo cancelan, que se usan tras dejar la sesión. Ctrl+C en el aviso de aprobación lo deja sin decidir: no se aplica nada. Ctrl+C mientras el proveedor abre sus recursos, al entrar, termina la conversación (código 130) sin preguntar nada; mientras los cierra, al salir, deja de esperar y avisa de que algo puede haber quedado abierto.
+- **Lo que se escribe mientras nadie lee se queda en la terminal** y es la primera línea que recibe la lectura siguiente, también el aviso de aprobación. No puede aprobar (el código sale de un hash que aún no se había mostrado). Tampoco rechaza sola: en la conversación, tras `n` el aviso pide la palabra `reject` completa, y cualquier otra respuesta deja la aprobación pendiente (sin cancelar la ejecución; se continúa con `skill resume` tras dejar la sesión) y no se envía ni se ejecuta. Solo un pegado que contenga `n` y `reject` rechaza. `skill run` desde la línea de órdenes sigue rechazando con `n`.
+- **La conversación ocupa su sesión** mientras está abierta: otro `chat` o un `ask` sobre esa sesión reciben «in use by another process» / «question in progress». Si el proceso muere, la sesión queda libre sola. Una ejecución de Skill que quede esperando aprobación se continúa con `skill resume` cuando la conversación ya no tiene esa sesión (`/new`, `/resume` o `/exit`).
+- **Lo que no es del harness lleva `| ` delante**: respuestas del proveedor, historial, notas de memoria y salida de Skills salen saneadas (sin secuencias de escape ni caracteres de control o invisibles, con las credenciales conocidas enmascaradas) y con ese prefijo, que ninguna línea del propio harness usa. Una pregunta de más de 64 KiB se rechaza sin registrar nada. El contenido dentro del aviso de aprobación también lleva `| ` (la cabecera, las reglas y la pregunta no). Una línea más ancha que la terminal se corta en filas, y cada fila que continúa la anterior empieza por `|+`: así la terminal nunca parte por su cuenta una línea ajena en una fila sin marca.
+- **Qué no hace esta versión:** ni paneles, ni colores, ni barra de estado; la respuesta aparece entera, no poco a poco; el modelo no ejecuta herramientas por su cuenta ni hay llamadas MCP desde la conversación (`mcp call` sigue siendo una orden suelta); no hay edición avanzada de la línea, autocompletado ni historial de lo escrito entre ejecuciones.
+
+### Paso a paso con el Mock
+
+Con una copia del vault sintético en una carpeta temporal y una respuesta guionizada para el Skill `architecture-memory`. En PowerShell, desde la raíz del repositorio:
+
+```powershell
+$w = Join-Path $env:TEMP "ai-harness-chat"
+Remove-Item -Recurse -Force $w -ErrorAction SilentlyContinue
+New-Item -ItemType Directory $w | Out-Null
+Copy-Item -Recurse tests\fixtures\vault-synthetic "$w\vault"
+@{ "tarea: architecture-memory/extract" = (Get-Content -Raw -Encoding utf8 tests\fixtures\skill-inputs\decision-ok.json) } | ConvertTo-Json | Set-Content -Encoding utf8 "$w\respuestas.json"
+$env:HARNESS_DATA_DIR = "$w\data"
+$env:HARNESS_VAULT_ROOT = "$w\vault"
+$env:HARNESS_MOCK_RESPONSES = "$w\respuestas.json"
+$env:HARNESS_MOCK_DELAY_MS = "0"
+uv run python main.py
+```
+
+En zsh o bash:
+
+```sh
+w="$(mktemp -d)"
+cp -R tests/fixtures/vault-synthetic "$w/vault"
+python3 -c 'import json,sys; print(json.dumps({"tarea: architecture-memory/extract": open(sys.argv[1], encoding="utf-8").read()}))' tests/fixtures/skill-inputs/decision-ok.json > "$w/respuestas.json"
+export HARNESS_DATA_DIR="$w/data" HARNESS_VAULT_ROOT="$w/vault" HARNESS_MOCK_RESPONSES="$w/respuestas.json" HARNESS_MOCK_DELAY_MS=0
+uv run python main.py
+```
+
+Dentro de la conversación (las líneas son iguales en las dos terminales; en zsh la ruta del fichero va con `/`):
+
+```text
+/new --project demo-alpha "Demo Corte 9"
+¿Qué decisiones de mensajería tiene el proyecto?
+¿Qué riesgos ves en esa decisión?
+/context
+/skill architecture-memory --file source=tests\fixtures\skill-inputs\fuente-decision.md
+```
+
+Cada pregunta muestra una línea `context: demo-alpha, 7 note(s) included…` y la respuesta del Mock con `| ` delante. `/context` muestra el bloque de memoria. El Skill muestra el aviso `Approval requested` con la nota entera, su destino `Decisiones/…` y su hash; al escribir los 8 primeros caracteres del hash se ve `applied: Decisiones/…md` y `skill: run … is completed`. Después, `/status` (anotar el identificador de la sesión) y `/exit`.
+
+Para interrumpir una pregunta lenta, se vuelve a entrar en la misma sesión con el Mock lento:
+
+```powershell
+$env:HARNESS_MOCK_DELAY_MS = "60000"
+uv run python main.py chat --session SESSION_ID
+```
+
+(en zsh: `HARNESS_MOCK_DELAY_MS=60000 uv run python main.py chat --session SESSION_ID`). Se escribe una pregunta, se pulsa Ctrl+C durante `waiting for the provider` y se ve `interrupted: request … is uncertain: the prompt may have reached the provider; it was not resent`; la conversación sigue. `/history` muestra las preguntas anteriores, el marcador del Skill y la pregunta interrumpida como `[uncertain]`. `/exit` sale con código 0.
+
 ## Memoria del proyecto
 
-El harness lee un vault de Markdown con la estructura de `claude-memory-system` (`projects/<slug>/_project.md`, `projects/<slug>/sessions/`, `Decisiones/`, `Lecciones/`, `Memoria-CC/`…). **Solo lee**: ningún comando crea, modifica, mueve ni borra nada en el vault.
+El harness lee un vault de Markdown con la estructura de `claude-memory-system` (`projects/<slug>/_project.md`, `projects/<slug>/sessions/`, `Decisiones/`, `Lecciones/`, `Memoria-CC/`…). Los comandos `memory …` y `ask --project` **solo leen**: no crean, modifican, mueven ni borran nada en el vault. La única escritura del harness en el vault es la del Skill `architecture-memory`: una nota de decisión nueva en `Decisiones/` (y la carpeta, si no existe), solo después de que una persona apruebe en la terminal el contenido exacto; nunca modifica ni borra una nota existente (ver [Skills de arquitectura](#skills-de-arquitectura)).
 
 ```sh
 export HARNESS_VAULT_ROOT="$HOME/ruta/al/vault"   # ruta absoluta
@@ -197,7 +279,7 @@ Qué se ve: `skill list` muestra los dos Skills `1.0.0 valid`; `hls-review` impr
 - **Frontmatter:** `type: decision`, `decision_id`, `project_slug` (el de la sesión), `status: accepted`, `created`, `updated`, `tags: [decision, <proyecto>]`, `source: ai-harness`, `skill: architecture-memory@1.0.0` y `run_id`. Ningún valor del frontmatter sale del texto del modelo, ni siquiera el título.
 - **Cuerpo:** título, `Contexto`, `Decisión`, `Alternativas consideradas`, `Consecuencias`, `Supuestos` («Ninguno declarado.» si no hay) y `Procedencia` (Skill con versión y hash, ejecución, notas de memoria consultadas con su hash, tamaño y hash de la fuente, y número de credenciales enmascaradas). El texto del modelo pasa por el mismo saneado y la misma redacción que lo que se aprueba; una línea suya que empieza por `#` o `---` se escribe con `\` delante, y `<<<`/`>>>` se cambian por `‹‹‹`/`›››`, así que no puede abrir secciones, imitar un frontmatter ni falsificar los delimitadores cuando `memory context` la lea.
 - **Inerte en Obsidian:** en todo texto que viene del modelo (y en las rutas de la procedencia), estos caracteres se escriben como entidad HTML, que Obsidian muestra tal cual en la vista de lectura sin que nada los ejecute: `&` → `&amp;`, `<` → `&lt;` (HTML, `<script>`, comentarios `<!-- -->`, Templater `<% %>` y `<%* %>`), `` ` `` → `&#96;` (bloques ```` ``` ```` de `dataview`/`dataviewjs` y código en línea `` `= …` `` y `` `$= …` ``), `~~` → `~&#126;` (bloques `~~~`), `%%` → `%&#37;` (comentarios de Obsidian, ocultos al leer pero que `memory context` devolvería al modelo), `![` → `!&#91;` (imágenes, también remotas, y embebidos `![[…]]`), `[[` → `[&#91;` (enlaces internos, que añadirían enlaces y aristas del grafo hacia notas que elige el modelo) y `::` → `:&#58;` (campos en línea de Dataview). Se escapa, no se borra: al leer la nota ves exactamente lo que escribió el modelo; en el fichero, o en el modo fuente, verás las entidades. **Supuesto que queda:** un plugin que actúe sobre otra sintaxis que no está en esta lista (por ejemplo, un enlace Markdown normal `[texto](url)`, que solo actúa si haces clic) no está neutralizado.
-- **Deduplicación:** antes de pedir la aprobación y otra vez justo antes de escribir, el harness busca en `Decisiones/` una nota con ese `decision_id` en su frontmatter. Si existe, falla con `duplicate_decision` y su ruta. **Es una deduplicación débil:** el identificador sale del título, y el título lo elige el modelo; la misma decisión extraída otra vez con otro título (otras palabras, otro orden) da otro identificador y se escribe como nota nueva. Solo detecta el mismo título salvo mayúsculas, espacios y formas Unicode equivalentes. Una decisión equivalente escrita a mano sin `decision_id` tampoco se detecta.
+- **Deduplicación:** antes de pedir la aprobación y otra vez justo antes de escribir, el harness busca en `Decisiones/` una nota con ese `decision_id` en su frontmatter. Si existe, falla con `duplicate_decision` y su ruta. **Es una deduplicación débil:** el identificador sale del título, y el título lo elige el modelo; la misma decisión extraída otra vez con otro título (otras palabras, otro orden) da otro identificador y se escribe como nota nueva. Solo detecta el mismo título salvo mayúsculas, espacios y formas Unicode equivalentes. Una decisión equivalente escrita a mano sin `decision_id` tampoco se detecta. **Antes de preguntar al modelo** (revisado el 2026-11-25), el harness mira si ya guardó una decisión de ese proyecto, en ese vault, desde el mismo texto fuente y si su nota sigue en `Decisiones/`: si es así, falla con `duplicate_decision` y su ruta sin enviar nada al proveedor. «El mismo texto» se mide con un SHA-256 calculado sin BOM, con CRLF y CR sueltos como LF y sin los saltos de línea del final (solo para este hash; el texto enviado no cambia); otros espacios u otra forma Unicode cuentan como otro texto. Cuenta toda decisión escrita de verdad: aprobada y aplicada, también si la ejecución se reanudó con `skill resume RUN_ID` sin entradas o si un paso `uncertain` se reconcilió como escrito en `skill resume` o en `skill cancel`; no cuenta una aprobación rechazada o abandonada. Las decisiones guardadas antes de esta versión no tienen ese registro: las encuentra solo la comprobación por título. Para extraer otra decisión del mismo texto, cámbialo.
 - **Nunca sobrescribe ni edita:** escribe un temporal oculto (`Decisiones/.harness-<ejecución>-<paso>.tmp`, que la memoria no lee) y lo publica con un enlace duro, que **falla si el nombre final ya existe**; nunca usa una operación que sustituya un fichero. Nunca modifica, mueve ni borra una nota existente. Las escrituras de dos procesos del harness se ordenan con un bloqueo (`locks/vault-decisions.lock` en el directorio de datos): el segundo espera hasta 5 s y, si no le toca, falla con código 1 dejando la aprobación concedida para `skill resume` (con el proveedor Mock, cuyas salidas se guardan). Con un proveedor real, cuyas salidas no se guardan, el harness reintenta en la misma invocación hasta 30 s y, si el escritor sigue ocupado, revoca la aprobación, termina `failed` con `effect_busy` y hay que repetir la ejecución con `skill run`. Por lo mismo, con un proveedor real, si el proceso muere antes de publicar la nota, `skill resume` termina `failed` diciendo que hay que repetir la ejecución; nunca queda una aprobación usable en una ejecución terminada.
 - **Si el proceso muere a mitad**, `skill resume` mira el vault sin escribir: si la nota con ese identificador y esos bytes está, termina; si no está, pide una aprobación nueva para los mismos bytes; si hay otra nota con ese identificador, se niega (código 1) y la ejecución queda `uncertain` para que lo mires. Lo mismo si algo falla después de publicar la nota (por ejemplo, no se puede borrar el temporal porque OneDrive o un antivirus lo tiene abierto en Windows): la ejecución queda `uncertain`, nunca `failed`, y `skill resume` lo vuelve a intentar. Mientras el temporal no se pueda borrar, la nota existe pero **la memoria no la lee** (tiene dos enlaces duros), y `skill resume` termina con código 1 nombrando el temporal; cierra el programa que lo retiene y repite `skill resume`. `skill cancel RUN_ID` sobre una ejecución `uncertain` también comprueba el vault primero: borra el temporal propio si puede (así una nota publicada vuelve a ser visible), dice por stderr si la nota está en el vault o si no se escribió nada, y termina la ejecución sin borrar nunca una nota.
 - **Qué guarda SQLite:** con un proveedor real, de la nota solo el identificador (`skill_steps.effect_ref`), su SHA-256 y su tamaño; nunca el título, el texto ni la ruta.
@@ -216,6 +298,15 @@ Límites conocidos:
 2. El bloqueo solo ordena a los procesos del harness que comparten directorio de datos. Otro programa (Obsidian, el curador de `claude-memory-system`) puede crear un fichero con el mismo nombre en el mismo instante: el harness no lo sobrescribe, falla con `conflict`. Entre la comprobación de `Decisiones/` y la escritura del temporal, alguien con permiso de escritura en el vault podría cambiar la carpeta por un enlace; el harness lo detecta después de publicar, retira su nota y falla, pero el temporal habrá existido un momento fuera.
 3. No se sincroniza el directorio tras publicar: después de un corte de luz justo en ese momento, la nota podría no estar, y `skill resume` lo vería como ausente y pediría aprobarla otra vez.
 4. **Riesgo de atribución del curador:** el curador de `claude-memory-system` atribuye a su propia ejecución cualquier `.md` de `Decisiones/` modificado después de que empiece. Si el harness escribe una decisión mientras el curador corre en el mismo equipo, el log del curador la contará como suya. No se pierde ni se rompe nada.
+
+## Puerta MVP sin EA
+
+El flujo completo sin Enterprise Architect: **requerimiento → memoria del proyecto → `hls-review` → tu decisión → `architecture-memory` → aprobación → nota nueva en `Decisiones/` → la nota vuelve en `memory context`**. Son los dos Skills de arriba, por separado y en la **misma sesión**, con tu decisión entre medias: lees la revisión, escribes en un fichero tuyo la decisión que tomas y se la pasas a `architecture-memory` con `--input-file source=<fichero>`. Nada pasa de un Skill al otro sin que lo leas. No hay código nuevo: es la integración de lo que ya existe.
+
+- **Demo automática** (sin persona, salvo la aprobación, que imprime como instrucciones con los comandos exactos para PowerShell y zsh/bash): `uv run python scripts/demo_mvp_without_ea.py`. Termina en `demo: PASS`. Con `--keep` deja la carpeta temporal y la ejecución esperando, para que la apruebes tú en una terminal.
+- **A mano**, paso a paso y con qué se ve en cada uno: [`docs/runbook/mvp-without-ea.md`](docs/runbook/mvp-without-ea.md), primero con el vault sintético y el Mock, después con una copia de tu vault.
+- **Datos:** los requerimientos sintéticos, la revisión y la decisión guionizadas del Mock y una decisión de ejemplo están en `tests/fixtures/mvp/`. Los tres `requerimiento-<n>-*.md` son también los de la medición con Copilot real (seis preguntas), que queda pendiente del merge del proveedor de Copilot.
+- **Test:** `tests/integration/test_mvp_flow.py` recorre el flujo con la CLI: `session create`, `memory context`, `skill status` y `history` en procesos separados, y los dos Skills en proceso con un proveedor guionizado que guarda en memoria lo que recibe (para comprobar que la memoria del proyecto, el requerimiento y tu decisión llegan a la pregunta) y la terminal de prueba del motor para aprobar. También comprueba que repetir `architecture-memory` con el mismo fichero de decisión se rechaza con `duplicate_decision` antes de preguntar al modelo (ningún envío más), que otro texto de la misma decisión del que el modelo saca el mismo título se rechaza después de su respuesta, y que un modelo que obedece las órdenes de un requerimiento no aprueba, no elige carpeta ni proyecto. No dice nada de si Copilot real cumple los formatos.
 
 ## Herramientas MCP
 
@@ -328,7 +419,7 @@ El plazo de arranque cubre la negociación y la lista de herramientas. El plazo 
 
 Una respuesta que pasa de `max_result_bytes` se corta mientras llega: el error es `result_too_large` y no se imprime nada del resultado. Una línea que no es JSON-RPC termina la sesión con `protocol_error`.
 
-Un servidor que escribe en stderr más de 64 MiB antes de terminar de contestar se detiene con `stderr_too_large`; si la respuesta ya había llegado, vale, el servidor se detiene igual y el comando avisa. Si el servidor escribe más de 1 MiB, el comando avisa de que solo se guardó el primer MiB. Un error JSON-RPC que el propio servidor envía es `server_error`; una conexión que se cierra es `server_exited`.
+Un servidor que escribe en stderr más de 64 MiB antes de terminar de contestar se detiene con `stderr_too_large`; si la respuesta ya había llegado, vale, el servidor se detiene igual y el comando avisa. Si algo del stderr del servidor no llegó a su log, el comando avisa de cuántos bytes faltan; la última línea del log dice por qué. Un error JSON-RPC que el propio servidor envía es `server_error`; una conexión que se cierra es `server_exited`.
 
 El harness no abre ningún socket que acepte conexiones de otros: habla con el servidor por los tubos que él mismo crea. En Windows, al arrancar, el bucle de eventos de Python crea su par de sockets interno escuchando un instante en `127.0.0.1` con un puerto efímero; acepta una sola conexión, comprueba que es la suya y cierra esa escucha. Los tests lo distinguen de cualquier otro socket por la pila de llamadas, no por la dirección; el detalle y lo que no prueban está en `SECURITY.md` (revisado el 2026-11-25).
 
@@ -339,12 +430,12 @@ Límite: un proceso que el servidor lance en **otra sesión o grupo** (`setsid`,
 - La tabla `tool_calls` de SQLite guarda:
   - servidor, herramienta y operación;
   - decisión y motivo;
-  - un HMAC-SHA-256 de los argumentos, con una clave aleatoria local (`HARNESS_DATA_DIR/keys/mcp-args.key`, solo legible por su dueño, nunca se imprime), y su tamaño;
+  - un HMAC-SHA-256 de los argumentos, con una clave aleatoria local (`HARNESS_DATA_DIR/keys/mcp-args.key`, nunca se imprime; en macOS y Linux el fichero es `0600` y su carpeta `0700`; en Windows el harness no fija ninguna ACL y el fichero hereda los permisos de la carpeta donde esté `HARNESS_DATA_DIR`), y su tamaño;
   - estado, código de error y si el servidor quedó parado;
   - bytes del resultado y duración.
 
   **Nunca** guarda los argumentos ni el resultado.
-- El stderr del servidor va a `HARNESS_DATA_DIR/logs/mcp/<servidor>.stderr.log`, nunca a la terminal. Se guarda sin sanear, porque es lo que escribió el servidor. Cada sesión guarda como mucho 1 MiB; del resto solo se anota cuántos bytes se descartaron. Antes de cada sesión, un fichero de más de 1 MiB pasa a `.1` (que sustituye al anterior), así que los dos ficheros de un servidor no pasan de unos 4 MiB. En macOS y Linux la carpeta es `0700` y los ficheros `0600`.
+- El stderr del servidor va a `HARNESS_DATA_DIR/logs/mcp/<servidor>.stderr.log`, nunca a la terminal. Se guarda línea a línea, con las credenciales de formato conocido sustituidas por `[REDACTED:<tipo>]` antes de escribirse (revisado el 2026-11-25), aunque un token llegue partido en varias lecturas. Una línea termina en LF, CRLF o un CR suelto (una barra de progreso). Una línea de más de 16 KiB no se redacta por partes: se descarta entera y en su lugar queda una marca que lo dice, así que una credencial en ella no llega al log, pero el resto de la línea tampoco. Una clave privada PEM se sustituye por una marca y se descartan las líneas siguientes hasta su línea END; si END no llega en 32 KiB, una marca lo dice y el log sigue en la línea siguiente. Lo que **no** cubre: una credencial de formato desconocido; una clave de más de 32 KiB; una credencial cuyo comienzo se tragó otra (una clave de Anthropic o de Slack que acaba en la cabecera de un JWT deja en claro el resto del JWT); y si el harness mata el proceso de sesión al vencer su plazo, la última línea sin final y el recuento se pierden. Cada sesión escribe como mucho 1 MiB, entrega al log como mucho 65 536 líneas (un CRLF es una) y pasa a la redacción como mucho 4 MiB; la primera línea que pasaría cualquiera de los tres no se escribe, ni nada después, y una línea final anota cuántos bytes del stderr no están en el log de ninguna forma y por qué. Así, una ráfaga de líneas vacías o de CR (64 KiB de saltos) termina el log para el resto de la sesión. Un fallo del propio registro no corta la sesión ni escribe nada sin redactar: el log dice dónde se paró, salvo si lo que falla es escribir en el log. Una cadena hecha a mano de más de cuatro credenciales pegadas puede dejar las primeras en claro. Antes de cada sesión, un fichero de más de 1 MiB pasa a `.1` (que sustituye al anterior), así que los dos ficheros de un servidor no pasan de unos 4 MiB. En macOS y Linux la carpeta es `0700` y los ficheros `0600`.
 - Una llamada `running` cuyo comando ya no existe (se cortó la luz, se mató el proceso) se marca `failed`/`interrupted` en el siguiente `mcp call`. "Ya no existe" lo dice un bloqueo que el comando mantiene mientras vive, no la antigüedad de la fila.
 - Todo lo que se imprime (resultado, descripciones, nombres y errores del servidor) sale sin caracteres de control, de formato ni secuencias de escape. Las credenciales conocidas salen como `[REDACTED:<tipo>]`. Imágenes y audio se sustituyen por `[<tipo> withheld: N bytes of base64]`, y los recursos por `[<tipo> withheld]`.
 
@@ -384,6 +475,8 @@ Solo una pregunta a la vez por sesión: una segunda pregunta mientras la primera
 - SQLite en `HARNESS_DATA_DIR/harness.sqlite3`, sin cifrar.
 - El texto de prompts y respuestas se guarda solo si el proveedor declara que su contenido es sintético (el Mock). Con cualquier otro proveedor se guardan la solicitud, su estado y sus fechas, sin el texto.
 - La auditoría registra qué pasó y cuándo, nunca el texto.
+- De cada decisión que `architecture-memory` escribe de verdad, SQLite (tabla `effect_sources`) guarda su identificador, el resumen SHA-256 de la raíz del vault, el proyecto y el SHA-256 del texto fuente normalizado; la ejecución guarda esos mismos hashes desde que empieza. Nunca el texto, el título ni la ruta (ver [Skills de arquitectura](#skills-de-arquitectura)).
+- El stderr de cada servidor MCP, redactado, en `HARNESS_DATA_DIR/logs/mcp/` (ver [Herramientas MCP](#herramientas-mcp)).
 
 ## Desarrollo
 
@@ -392,4 +485,4 @@ Solo una pregunta a la vez por sesión: una segunda pregunta mientras la primera
 - El repositorio es público: lee [`SECURITY.md`](SECURITY.md) y activa el hook una vez por clon con `git config core.hooksPath .githooks`.
 - Sin código condicionado por plataforma fuera de Enterprise Architect: lo que pasa en macOS es lo que corre en Windows.
 - Puerta local antes de un merge: `scripts/verify.sh` sobre el árbol limpio.
-- Demos, iguales en macOS y Windows (PowerShell incluido): `uv run python scripts/demo_session_core.py` (Corte 1), `uv run python scripts/demo_project_memory.py` (Corte 3), `uv run python scripts/demo_skill_engine.py` (Corte 4, motor de Skills) y `uv run python scripts/demo_mcp_gateway.py` (Corte 5, pasarela MCP). Terminan en `demo: PASS`.
+- Demos, iguales en macOS y Windows (PowerShell incluido): `uv run python scripts/demo_session_core.py` (Corte 1), `uv run python scripts/demo_project_memory.py` (Corte 3), `uv run python scripts/demo_skill_engine.py` (Corte 4, motor de Skills), `uv run python scripts/demo_architecture_skills.py` (Corte 4, Skills de arquitectura), `uv run python scripts/demo_mcp_gateway.py` (Corte 5, pasarela MCP), `uv run python scripts/demo_mvp_without_ea.py` (Puerta MVP sin EA) y `uv run python scripts/demo_interactive_shell.py` (Corte 9, conversación). Terminan en `demo: PASS`.

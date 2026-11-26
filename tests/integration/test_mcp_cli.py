@@ -126,6 +126,34 @@ def test_the_servers_stderr_goes_to_its_log_not_to_the_terminal(mcp, ws, data_di
     assert server.stopped()
 
 
+def test_a_credential_split_across_two_stderr_writes_is_redacted_in_the_log(mcp, ws, data_dir):
+    """SEC-01 on the server's log (revised 2026-11-25): the token arrives in two writes."""
+    server = ws.server("stderr-split-secret")
+    code, _, err, _ = mcp("tools", "synthetic")
+    assert code == 0, err
+    log = (data_dir / "logs" / "mcp" / "synthetic.stderr.log").read_text(encoding="utf-8")
+    assert "CANARIO-STDERR-SINTETICO" in log  # the line was logged at all
+    assert "[REDACTED:github]" in log
+    assert "S" * 18 not in log  # neither half of the token
+    assert server.stopped()
+
+
+def test_a_burst_of_utf8_continuation_bytes_on_stderr_does_not_end_the_session(mcp, ws,
+                                                                               data_dir):
+    """Second review of 2026-11-25, finding 1: this input made the redactor raise and the
+    session die with an ExceptionGroup. Now it is one line over the limit: dropped, marked."""
+    server = ws.server("stderr-continuation-bytes")
+    code, out, err, _ = mcp("tools", "synthetic")
+    assert code == 0, err
+    assert "get_project_metadata" in out
+    log = (data_dir / "logs" / "mcp" / "synthetic.stderr.log").read_bytes()
+    assert log == (b"[ai-harness: a line of 70000 bytes was dropped: too long to redact]\n"
+                   b"\n[ai-harness: 70000 more bytes of stderr were dropped; lines too long to "
+                   b"redact or private key blocks, marked above]\n")
+    assert "warning: 70000 of the 70000 bytes the server wrote on stderr are not in its log" in err
+    assert server.stopped()
+
+
 def test_a_declared_tool_the_server_lacks_is_denied_without_sending(mcp, ws, data_dir):
     server = ws.server()
     code, _, err, _ = mcp("call", "synthetic", "archive_project", "--args", ALPHA)
