@@ -188,3 +188,30 @@ def test_the_server_log_keeps_exact_bytes_in_text_mode(tmp_path, text_mode):
     finally:
         os.close(descriptor)
     assert path.read_bytes() == b"line one\nline two\n"
+
+
+@pytest.mark.parametrize("held_open", [False, True])
+def test_a_log_held_open_by_another_session_is_appended_to_not_discarded(
+        tmp_path, monkeypatch, capsys, held_open):
+    """Revised on 2026-11-26: where the system refuses to replace a file another handle has
+    open (Windows, WinError 32), a log still written by a concurrent session is not rotated
+    now: this session appends to it (rotated by the next one), instead of losing its log."""
+    from harness.mcp import commands
+
+    directory = tmp_path / "logs" / "mcp"
+    directory.mkdir(parents=True)
+    path = directory / "synthetic.stderr.log"
+    path.write_bytes(b"x" * (commands.LOG_ROTATE_BYTES + 1))
+    if held_open:
+        def refused(source, target):
+            raise PermissionError(13, "The process cannot access the file because it is "
+                                      "being used by another process", str(source))
+
+        monkeypatch.setattr(commands.os, "replace", refused)
+    assert commands._server_log(tmp_path, "synthetic") == path
+    assert capsys.readouterr().err == ""
+    rotated = path.with_name(path.name + ".1")
+    if held_open:
+        assert path.stat().st_size == commands.LOG_ROTATE_BYTES + 1 and not rotated.exists()
+    else:
+        assert rotated.stat().st_size == commands.LOG_ROTATE_BYTES + 1 and not path.exists()
