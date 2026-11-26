@@ -81,15 +81,20 @@ EDITOR_LENGTH_JS = (
 # The reply as a sighted reader sees it, capped in the page: what crosses to Python is never
 # larger than the cap. Text of visually hidden elements (a box of at most 1 px or clipped
 # away, as screen-reader labels are: on the real page a hidden heading before every reply) is
-# taken out, in document order. Read only; nothing is changed in the page.
+# taken out, in document order. So is the text of controls (buttons, toolbars, menus): they are
+# never the provider's words. On the real page the turn ends with a toolbar of follow-up
+# suggestion buttons (2026-11-26); a copy button inside a code block goes the same way. Read
+# only; nothing is changed in the page.
 REPLY_TEXT_JS = r"""
 (el, max) => {
+  const CONTROLS = "button,[role=button],[role=toolbar],[role=menu],[role=menubar],[role=menuitem]";
   const all = el.innerText || "";
   const hidden = [];
   for (const d of el.querySelectorAll("*")) {
     if (!d.textContent.trim() || hidden.some((h) => h.contains(d))) continue;
     const r = d.getBoundingClientRect(); const s = getComputedStyle(d);
-    if (r.width <= 1 || r.height <= 1 || s.clipPath === "inset(50%)" || s.clip.startsWith("rect(0")) {
+    if (d.matches(CONTROLS) || r.width <= 1 || r.height <= 1 || s.clipPath === "inset(50%)" ||
+        s.clip.startsWith("rect(0")) {
       hidden.push(d);
     }
   }

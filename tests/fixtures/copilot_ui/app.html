@@ -12,6 +12,8 @@
     id_never=1          the id never reaches the address
     start_ms=N          the reply starts N ms after the server answers
     ready_ms=N          the composer appears N ms after the page loads
+    chips=1             once the reply ends, a toolbar of follow-up suggestion buttons
+                        appears inside the turn, after the reply (as on the real page)
 -->
 <html lang="en">
 <head>
@@ -50,6 +52,7 @@
   const idNever = params.get("id_never") === "1";
   const startMs = Number(params.get("start_ms") || 0);
   const readyMs = Number(params.get("ready_ms") || 0);
+  const chips = params.get("chips") === "1";
   const thread = document.getElementById("synthetic-thread");
   const composer = document.getElementById("synthetic-composer");
   const send = document.getElementById("synthetic-send");
@@ -133,6 +136,18 @@
     }
     turn.setAttribute("aria-busy", "false");
     addDone(turn);
+    if (chips) {
+      const bar = document.createElement("div");
+      bar.setAttribute("role", "toolbar");
+      for (const n of [1, 2, 3]) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "synthetic-suggestion";
+        chip.textContent = "ZZ-CHIP-" + n + " follow-up suggestion";
+        bar.appendChild(chip);
+      }
+      turn.appendChild(bar);
+    }
     stop.hidden = true;
     send.hidden = false;
     if (idDelay !== null && !idNever) {

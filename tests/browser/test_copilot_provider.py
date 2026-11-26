@@ -203,6 +203,19 @@ def test_prompt_at_the_limit_arrives_whole(cli, env, app):
     assert [p.prompt for p in app.prompts] == [prompt]
 
 
+
+def test_suggestion_buttons_after_the_reply_are_not_part_of_it(cli, env, app):
+    """Seen on the real page on 2026-11-26: three follow-up suggestions, rendered as buttons in
+    a toolbar inside the answer's turn, came out as three lines of the answer. Controls are
+    never the provider's words: buttons and toolbars are left out by structure, whatever
+    their text or language."""
+    session_id = new_session(cli, env)
+    url = app.url("/app", chips="1")
+    code, out, err = cli("ask", session_id, "sugerencias ZQX-END-5", **env | {"HARNESS_COPILOT_URL": url})
+    assert code == 0, err
+    assert "ZZ-CHIP" not in out and "Copy" not in out
+    assert out.rstrip().endswith("ZQX-END-5"), out[-80:]
+
 # -- 5.1: one remote conversation per session ---------------------------------------------------
 
 
@@ -383,8 +396,8 @@ def test_reply_written_in_parts_is_returned_whole(cli, env, data_dir, app):
     url = app.url("/app", early="done_control", pause_ms="300")
     code, out, err = cli("ask", session_id, "partes ZQX-END-7", **env | {"HARNESS_COPILOT_URL": url})
     assert code == 0, err
-    # The second half of the reply arrived (the synthetic turn also holds its "Copy" button).
-    assert "word12 ZQX-END-7" in out and CANARY_REPLY in out
+    # The second half of the reply arrived, and it is the end of the answer.
+    assert out.rstrip().endswith("word12 ZQX-END-7") and CANARY_REPLY in out
 
 
 def test_an_earlier_reply_does_not_count(cli, env, data_dir, app):
