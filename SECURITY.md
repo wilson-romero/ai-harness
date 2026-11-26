@@ -54,6 +54,7 @@ Se garantiza:
 - El código, o cualquier parte del hash, solo aparece dentro de la pregunta interactiva, junto al contenido. El mensaje de espera (código 3) y `skill status` muestran el identificador de la aprobación, su estado y su caducidad.
 - No se aprueba con stdin redirigido, con el fin de la entrada, con Enter, con una opción de la CLI ni con una variable de entorno; ningún texto de un modelo, nota o fichero aprueba.
 - Una aprobación está ligada a una propuesta, caduca (una respuesta después de la caducidad no la concede) y se usa una vez. Un efecto interrumpido se reconcilia antes de seguir y nunca se aplica dos veces.
+- En la conversación (`chat`, desde el 2026-11-25) el aviso es el mismo y se contesta en la misma terminal. Una línea escrita en el indicador normal es una pregunta o un comando, nunca una aprobación, aunque sea el código; no hay comando `/approve`, y Ctrl+C en el aviso lo deja sin decidir. Lo prueban `tests/unit/test_shell_skills.py` (con su control negativo) y la terminal real se cubre con la demo manual: no hay pseudoterminal portable para probarla en Windows.
 
 **No** se garantiza que haya una persona delante. Un proceso que corre con tu misma cuenta y maneja una pseudoterminal puede leer la propuesta y escribir el código: puede hacerse pasar por ti. Si alguien o algo controla tu cuenta, las aprobaciones no lo detienen. Decidido el 2026-11-24: se acepta este límite para el MVP, también para el efecto que escribe en el vault; un canal más fuerte (un diálogo del sistema operativo, un segundo dispositivo) se abriría con un change propio.
 
@@ -80,9 +81,12 @@ Lo que el harness garantiza con un servidor MCP:
 - El servidor recibe solo las variables de entorno nombradas en la lista y las básicas para arrancar un proceso.
 - El servidor recibe solo los argumentos declarados.
 - Toda herramienta que escribe se deniega en este corte.
-- El harness no tiene ninguna superficie de entrada: no abre puertos ni sockets de escucha, y solo habla con sus servidores por los tubos que él mismo crea. Lo comprueban dos tests:
-  - uno con un audit hook sobre la creación de cada socket (`socket.__new__`) y cada `socket.bind`, en el proceso del harness y en su proceso de sesión, durante un `mcp call`;
+- El harness no tiene ninguna superficie de entrada: no abre ningún socket que acepte conexiones de otros, y solo habla con sus servidores por los tubos que él mismo crea. Lo que sí pasa en Windows (revisado el 2026-11-25): al arrancar, el bucle de eventos de la biblioteca estándar crea su par de sockets interno con la emulación de `socketpair` de Python, que escucha un instante en `127.0.0.1` con un puerto efímero, acepta una sola conexión, comprueba que es la suya (las direcciones de los dos extremos) y cierra esa escucha antes de devolver el par. En macOS y Linux ese par es un `socketpair` nativo, sin puerto. Lo comprueban estos tests:
+  - un audit hook sobre la creación de cada socket (`socket.__new__`) y cada `socket.bind`, en el proceso del harness y en su proceso de sesión, durante un `mcp call`. Solo acepta los sockets cuya pila de llamadas es la del bucle (`_make_self_pipe` de asyncio llamando a `socketpair` o a `_fallback_socketpair` de `socket.py`); la dirección sola no basta: la misma emulación llamada desde otro sitio cuenta como socket ajeno. Corre también con la emulación forzada en macOS, que reproduce la condición de Windows;
+  - controles que el oráculo tiene que señalar: un socket atado a `127.0.0.1:0` que escucha, la emulación llamada fuera del bucle y, donde el sistema lo permite, un `listen()` sin `bind` (Windows lo rechaza);
   - uno estructural sobre `harness/mcp/`.
+
+  Lo que no prueban: sockets creados por código nativo que no pase por el módulo `socket` de Python (ninguna dependencia del harness lo hace hoy, pero el hook no lo vería), ni lo que hagan los servidores MCP, que son otros procesos. Durante ese instante de escucha en Windows otro proceso local podría conectarse antes que el bucle; la biblioteca estándar lo detecta al comparar direcciones y falla, así que el comando termina con error y esa conexión nunca llega al harness.
 
   La autorización de clientes (SEC-09) llegará con el servidor MCP propio, en un corte posterior. Hoy no hay ningún cliente que autorizar.
 - Lo que devuelve un servidor (resultados, descripciones, nombres, errores) se trata como datos no confiables:

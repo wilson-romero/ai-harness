@@ -837,7 +837,8 @@ def _utf8_output() -> None:
 
 def main(
     argv: list[str] | None = None,
-    backend: ComBackend | None = None,
+    *,
+    backend: ComBackend,
     counter: ProcessCounter = count_ea_processes,
     hard_exit: Callable[[int], Any] = os._exit,
 ) -> int:
@@ -863,7 +864,7 @@ def main(
 
     settings = Settings(data_dir, args.create_timeout, args.step_timeout, args.settle_timeout,
                         keep_model=args.keep_model)
-    run = ProbeRun(backend or Pywin32Backend(), counter, settings)
+    run = ProbeRun(backend, counter, settings)
     print("ea probe: running; it can take a few minutes. Do not use the EA windows it opens.",
           file=sys.stderr, flush=True)
     code = EXIT_OK
@@ -886,4 +887,6 @@ def main(
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # The only place the real COM backend is built (hotfix 0.2.1): importing this module and
+    # calling `main` never reaches COM, and the tests start the script with no site-packages.
+    sys.exit(main(backend=Pywin32Backend()))

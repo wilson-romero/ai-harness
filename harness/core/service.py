@@ -245,6 +245,44 @@ class SessionService:
     def requests(self, session: Session) -> list[tuple[str, str, str]]:
         return repo.session_requests(self._conn, session.session_id)
 
+    def take_session(self, raw_session_id: str) -> tuple[Session, SessionLock]:
+        """Hold a session for a caller that asks several questions (interactive-shell D4).
+
+        The caller keeps the returned lock until it is done and releases it; while it is held,
+        `ask`, a skill run and another conversation on this session are refused as busy. The
+        lock is the operating system's: it is released if the process dies.
+        """
+        session = self._require_session(raw_session_id)
+        lock = SessionLock(self._data_dir, session.session_id)
+        if not lock.acquire():
+            raise SessionBusy(f"session {session.session_id} is in use by another process")
+        return session, lock
+
+    async def ask_taken(
+        self,
+        session_id: UUID,
+        provider: LLMProvider,
+        prompt: str,
+        context: ProjectContext | None = None,
+        *,
+        attachment: str | None = None,
+    ) -> LLMResponse:
+        """`ask` for a caller that holds the session (`take_session`), with the same checks,
+        states, deadline and no-resend rules. `attachment` goes to the provider between the
+        memory block and the question and, like the memory block, is never stored."""
+        session = self._require_session(str(session_id))
+        if not prompt.strip():
+            raise InvalidInput("the prompt must not be empty")
+        if not is_valid_unicode(prompt) or (
+            attachment is not None and not is_valid_unicode(attachment)
+        ):
+            raise InvalidInput("the prompt is not valid Unicode text (it has a lone surrogate)")
+        if context is not None:
+            self._check_project(session, context.project)
+        sent = prompt if attachment is None else f"{attachment}\n\n{prompt}"
+        return await self._ask_locked(session.session_id, provider, sent, context,
+                                      stored_text=prompt)
+
     def require_session(self, raw_session_id: str) -> Session:
         return self._require_session(raw_session_id)
 

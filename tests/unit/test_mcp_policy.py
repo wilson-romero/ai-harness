@@ -14,12 +14,12 @@ from harness.mcp.policy import (
     decide_offered,
     parse_arguments,
 )
-from tests.mcp_support import DEFAULT_TOOLS
+from tests.mcp_support import ABSOLUTE_PROGRAM, DEFAULT_TOOLS
 
 CONFIG = LoadedConfig(McpConfig.model_validate({
     "format": "ai-harness/mcp/1",
     "servers": {"synthetic": {
-        "command": ["/opt/synthetic/bin/server"],
+        "command": [ABSOLUTE_PROGRAM],
         "tools": {
             **DEFAULT_TOOLS,
             "count_items": {"operation": "read", "arguments": {

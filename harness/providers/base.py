@@ -60,3 +60,31 @@ class LLMProvider(Protocol):
         anything is recorded. Both are optional: the Mock has neither.
         """
         ...
+
+
+class ConversationResources(Protocol):
+    """Optional (interactive-shell D5): resources a provider keeps for a whole conversation.
+
+    A conversation calls `open_resources()` once when it starts and `close_resources()` once
+    when it ends, also after a failed or uncertain question. Single commands never call them:
+    a provider that has them still manages its resources per question when they are not
+    called. Every question between the two keeps its own states and the no-resend rule.
+    """
+
+    async def open_resources(self) -> None: ...
+
+    async def close_resources(self) -> None: ...
+
+
+async def open_resources(provider: object) -> None:
+    """Open the provider's conversation resources, if it has any; a no-op otherwise."""
+    operation = getattr(provider, "open_resources", None)
+    if operation is not None:
+        await operation()
+
+
+async def close_resources(provider: object) -> None:
+    """Close what `open_resources` opened, if the provider has anything to close."""
+    operation = getattr(provider, "close_resources", None)
+    if operation is not None:
+        await operation()

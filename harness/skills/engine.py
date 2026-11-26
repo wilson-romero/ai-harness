@@ -165,6 +165,13 @@ def step_marker(skill: str, step: str, attempt: int) -> str:
     return f"[skill {skill}/{step} intento {attempt}]"
 
 
+class _HeldLock:
+    """The session lock held by the caller (a conversation): releasing it is the caller's job."""
+
+    def release(self) -> None:
+        pass
+
+
 class SkillEngine:
     def __init__(
         self,
@@ -183,7 +190,17 @@ class SkillEngine:
         progress: Callable[[str], None] | None = None,
         run_time_limit_s: float = MAX_RUN_TIME_S,
         busy_retry_s: float = BUSY_RETRY_S,
+        held_session: UUID | None = None,
+        render_approval: Callable[[Proposal, str, str, int], str] | None = None,
+        confirm_rejection: bool = False,
     ) -> None:
+        # The conversation asks for the word `reject` after `n` (interactive-shell D8, decided
+        # by Wilson on 2026-11-25); `skill run` and `skill resume` keep `n` alone.
+        self._confirm_rejection = confirm_rejection
+        # How the approval notice is printed: `render_for_terminal` unless a conversation shows
+        # it with its own marks (interactive-shell D9, 2026-11-25). What is hashed never depends
+        # on it: the hash is the proposal's.
+        self._render_approval = render_approval or render_for_terminal
         self._busy_retry_s = busy_retry_s
         self._conn = conn
         self._data_dir = data_dir
@@ -198,6 +215,9 @@ class SkillEngine:
         self._context_builder = context_builder
         self._progress = progress or (lambda _message: None)
         self._run_time_limit_s = run_time_limit_s
+        # A conversation that already holds this session's lock (interactive-shell D4, D8):
+        # its runs use that lock instead of taking a second one, which would be refused.
+        self._held_session = held_session
 
     # -- commands -------------------------------------------------------------------------------
 
@@ -252,7 +272,7 @@ class SkillEngine:
                 ) from None
             self._progress(f"run {run_id}: {skill.name} {skill.version}")
             state = _Run(run_id, session, provider, skill, inputs, started=self._monotonic())
-            return await self._advance(state)
+            return await self._advance_or_recover(state)
         finally:
             lock.release()
 
@@ -325,7 +345,7 @@ class SkillEngine:
                     self._audit("skill.step.reconciled", "retry", session, run_id,
                                 f"step={retry_step};attempt={attempt + 1}")
             self._set_run(run_id, "running")
-            return await self._advance(state)
+            return await self._advance_or_recover(state)
         finally:
             lock.release()
 
@@ -466,6 +486,19 @@ class SkillEngine:
             lock.release()
 
     # -- the loop -------------------------------------------------------------------------------
+
+    async def _advance_or_recover(self, state: _Run) -> RunOutcome:
+        """`_advance`; if the task is cancelled (Ctrl+C in a conversation, interactive-shell
+        2026-11-25), the run is left as `recover_runs` leaves the run of a dead process, now,
+        while the lock is still held: an LLM step that was in flight becomes `uncertain`
+        (never resent), and the run can be resumed or cancelled. Then the cancellation goes on."""
+        try:
+            return await self._advance(state)
+        except asyncio.CancelledError:
+            with transaction(self._conn):
+                if _needs_recovery(self._conn, state.run_id):
+                    _recover_run(self._conn, state.run_id, str(state.session.session_id))
+            raise
 
     async def _advance(self, state: _Run) -> RunOutcome:
         skill = state.skill
@@ -665,9 +698,10 @@ class SkillEngine:
                 return waiting
             decision = decide(
                 self._terminal,
-                render_for_terminal(proposal, proposal_hash, live["expires_at"],
-                                    proposed.redactions),
+                self._render_approval(proposal, proposal_hash, live["expires_at"],
+                                      proposed.redactions),
                 proposal_hash,
+                confirm_rejection=self._confirm_rejection,
             )
             decided = utc_iso(self._clock())
             if decision == "undecided":
@@ -1207,7 +1241,9 @@ class SkillEngine:
 
     # -- storage helpers ------------------------------------------------------------------------
 
-    def _lock(self, session: Session) -> SessionLock:
+    def _lock(self, session: Session) -> SessionLock | _HeldLock:
+        if self._held_session is not None and session.session_id == self._held_session:
+            return _HeldLock()
         lock = SessionLock(self._data_dir, session.session_id)
         if not lock.acquire():
             raise SessionBusy(f"session {session.session_id} is busy in another process")
@@ -1291,6 +1327,20 @@ class SkillEngine:
                           session_id=session.session_id, run_id=run_id, detail=detail)
 
 
+# A run left half done: not finished, and running or with a step running or applying.
+_HALF_DONE = (
+    "r.status NOT IN ('completed', 'failed', 'cancelled') AND (r.status = 'running' OR EXISTS ("
+    "SELECT 1 FROM skill_steps s WHERE s.run_id = r.run_id AND s.status IN "
+    "('running', 'applying')))"
+)
+
+
+def _needs_recovery(conn: sqlite3.Connection, run_id: str) -> bool:
+    return conn.execute(
+        f"SELECT 1 FROM skill_runs r WHERE r.run_id = ? AND {_HALF_DONE}", (run_id,)  # noqa: S608
+    ).fetchone() is not None
+
+
 def recover_runs(conn: sqlite3.Connection, data_dir: Path) -> list[str]:
     """Runs left by a dead process (D10). A run whose session is locked is alive.
 
@@ -1299,12 +1349,7 @@ def recover_runs(conn: sqlite3.Connection, data_dir: Path) -> list[str]:
     becomes `uncertain`, so that its effect is reconciled and never simply applied again.
     """
     recovered = []
-    rows = conn.execute(
-        "SELECT run_id, session_id FROM skill_runs r WHERE r.status NOT IN "
-        "('completed', 'failed', 'cancelled') AND (r.status = 'running' OR EXISTS ("
-        "SELECT 1 FROM skill_steps s WHERE s.run_id = r.run_id AND s.status IN "
-        "('running', 'applying')))"
-    ).fetchall()
+    rows = conn.execute(f"SELECT run_id, session_id FROM skill_runs r WHERE {_HALF_DONE}").fetchall()
     for run in rows:
         lock = SessionLock(data_dir, UUID(run["session_id"]))
         if not lock.acquire():

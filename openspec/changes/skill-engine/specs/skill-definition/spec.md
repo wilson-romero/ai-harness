@@ -95,6 +95,11 @@ Cada Skill válido SHALL tener una versión declarada en `workflow.json` y un ha
 - **WHEN** los ficheros de un Skill se guardan con `\r\n` en lugar de `\n`
 - **THEN** el hash del Skill es el mismo
 
+#### Scenario: Retorno de carro suelto
+Revisada el 2026-11-25.
+- **WHEN** los ficheros de un Skill se guardan con `\r` solo como fin de línea, o una línea acaba en `\r\r\n`
+- **THEN** el Skill es válido; `\r` solo da el mismo hash que `\n`, y `\r\r\n` cuenta como dos finales de línea (primero `\r\n` pasa a `\n`, después cada `\r` que quede)
+
 ### Requirement: Mostrar un Skill sin ejecutarlo
 `skill show NAME` SHALL imprimir la descripción, la versión, el hash, las entradas declaradas y la lista de pasos con su tipo y sus referencias, sin llamar a ningún proveedor ni crear ninguna ejecución. Un Skill inválido SHALL mostrarse con todos sus motivos y código distinto de 0.
 
