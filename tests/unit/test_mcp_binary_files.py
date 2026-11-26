@@ -2,9 +2,14 @@
 
 On Windows a descriptor opened without O_BINARY translates b"\\n" into b"\\r\\n". v0.2.0 wrote
 the key that way, so a key with a 0x0A byte came out longer than 32 bytes and every later
-call in that data dir failed with "the MCP argument key is damaged". These tests simulate that
-text mode on any platform: a fake O_BINARY bit, and an `os.write` that translates on every
-descriptor opened without it.
+call in that data dir failed with "the MCP argument key is damaged".
+
+Where the system has text-mode descriptors (it defines `os.O_BINARY`), these tests use the
+real thing. Where it has not, they simulate it: a fake O_BINARY bit, and an `os.write` that
+translates on every descriptor opened without it. Revised on 2026-11-26: v0.2.1's first cut
+always simulated, and on Windows replacing the real O_BINARY with the fake one opened every
+descriptor in real text mode underneath the double, so the double and the C runtime both
+translated.
 """
 
 from __future__ import annotations
@@ -25,6 +30,9 @@ NEWLINE_KEY = bytes(range(KEY_BYTES))  # contains 0x0A, like one random key in a
 @pytest.fixture
 def text_mode(monkeypatch):
     """Descriptors behave like Windows ones: text mode unless opened with O_BINARY."""
+    monkeypatch.setattr(audit.secrets, "token_bytes", lambda n: NEWLINE_KEY[:n])
+    if hasattr(os, "O_BINARY"):
+        return "real"  # the system translates by itself: never stack a double on top
     assert not os.O_WRONLY & FAKE_O_BINARY and not os.O_CREAT & FAKE_O_BINARY
     monkeypatch.setattr(os, "O_BINARY", FAKE_O_BINARY, raising=False)
     text_descriptors: set[int] = set()
@@ -49,8 +57,7 @@ def text_mode(monkeypatch):
     monkeypatch.setattr(os, "open", fake_open)
     monkeypatch.setattr(os, "write", fake_write)
     monkeypatch.setattr(os, "close", fake_close)
-    monkeypatch.setattr(audit.secrets, "token_bytes", lambda n: NEWLINE_KEY[:n])
-    return text_descriptors
+    return "simulated"
 
 
 def test_a_key_with_a_newline_byte_is_written_exactly_in_text_mode(tmp_path, text_mode):
@@ -61,7 +68,8 @@ def test_a_key_with_a_newline_byte_is_written_exactly_in_text_mode(tmp_path, tex
 
 
 def test_the_simulation_really_translates_without_the_flag(tmp_path, text_mode):
-    """Control: the double damages a write made without O_BINARY, as Windows does."""
+    """Control: a write made without O_BINARY is damaged, by the system where it has text
+    mode, by the double elsewhere."""
     path = tmp_path / "plain"
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
     try:
