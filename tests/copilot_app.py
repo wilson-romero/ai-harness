@@ -179,7 +179,12 @@ def _handler(app: SyntheticCopilot) -> type[BaseHTTPRequestHandler]:
                 if app.require_login and not signed_in:
                     self._send(302, b"", "text/plain", {"Location": app.login_url(app.base + self.path)})
                     return
-                variant = parse_qs(parts.query).get("ui", [""])[0]
+                query = parse_qs(parts.query)
+                if path == "/app" and query.get("restore") == ["1"] and app.conversations:
+                    last = list(app.conversations)[-1]  # the new-chat address restores it
+                    self._send(302, b"", "text/plain", {"Location": f"/c/{last}?{parts.query}"})
+                    return
+                variant = query.get("ui", [""])[0]
                 name = f"app-{variant}.html" if re.fullmatch(r"[a-z]+", variant) else "app.html"
                 if path.startswith("/feed"):
                     name = "app-feed.html"  # the shape that lives under its own path

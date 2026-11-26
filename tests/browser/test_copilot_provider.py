@@ -441,7 +441,7 @@ def test_huge_reply_is_read_up_to_the_cap(cli, env, app):
     assert code == 0, err
     assert HUGE_REPLY_CHARS > REPLY_MAX_CHARS
     assert REPLY_MAX_CHARS - 10 <= len(out.strip()) <= REPLY_MAX_CHARS
-    assert f"longer than {REPLY_MAX_CHARS}" in err
+    assert f"longer than what is read from the page (at most {REPLY_MAX_CHARS} characters" in err
 
 
 def test_feed_shape_with_a_lost_key_press_sends_once(cli, env, data_dir, app):

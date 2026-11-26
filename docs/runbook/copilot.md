@@ -181,6 +181,8 @@ Qué significa cada resultado:
 | `the harness browser is in use by another command` | Otro `ask` tiene Edge abierto: espera y repite. |
 | `did not finish … the harness stopped itself` (código 124) | Último recurso: algo bloqueó el proceso más allá del plazo y de su limpieza. El comando siguiente deja esa pregunta en `uncertain`; nada se reenvía. |
 
-`history` de una sesión de Copilot muestra el identificador de su conversación y, por solicitud, su estado y su hora (UTC), **sin texto**: el harness no guarda preguntas ni respuestas de Copilot.
+`history` de una sesión de Copilot muestra el identificador de su conversación y, por solicitud, su estado y su hora (UTC), **sin texto**: la base de datos del harness no guarda preguntas ni respuestas de Copilot. El perfil dedicado es un perfil de navegador: Edge guarda en él caché, IndexedDB, historial y cookies, y ahí puede quedar texto de las conversaciones (ver `SECURITY.md`, «Qué queda en disco»).
+
+Desde el 2026-11-26, `ui.json` admite `locators.code_language` (`css` o `test_id`): el elemento de la cabecera de un bloque de código que lleva la etiqueta del lenguaje. Sin él, los bloques de código salen sin lenguaje y un Skill que espera un bloque `json` no lo encuentra. Mídelo por estructura (sin copiar texto) y añádelo a mano a tu `ui.json`.
 
 Pruebas reales (opcional, 5 envíos de prompts sintéticos fijos, con ventana): con las variables del paso 0, `uv run pytest -m copilot -p no:cacheprovider`. Sin esas variables se omiten con su motivo.

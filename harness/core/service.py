@@ -37,6 +37,7 @@ from harness.providers.base import (
     ProviderError,
     ProviderUncertain,
     RemoteConversationLost,
+    RemoteConversationTaken,
 )
 from harness.providers.registry import ProviderFactory
 from harness.storage import repositories as repo
@@ -337,6 +338,7 @@ class SessionService:
             check(sent_text)  # configuration, measurement, size: before anything is recorded
         with_events = accepts_events(provider)
         warnings: list[str] = []
+        cut: list[bool] = []
         if session.status is SessionStatus.UNCERTAIN:
             warnings.append(
                 "this session has an earlier uncertain request; it was not resent "
@@ -354,7 +356,10 @@ class SessionService:
             prompt=sent_text,
             timeout_s=deadline_s,
             remote_ref=session.remote_ref,
-            completed_turns=repo.completed_requests(self._conn, session_id),
+            # Turns the remote conversation must show: those completed in it (none without one).
+            completed_turns=(repo.completed_in_remote(self._conn, session_id)
+                             if session.remote_ref is not None
+                             else repo.completed_requests(self._conn, session_id)),
         )
         store_content = provider.synthetic_content
         question = prompt if stored_text is None else stored_text
@@ -411,20 +416,44 @@ class SessionService:
                         "it was not stored"
                     )
                     return
-                with transaction(self._conn):
-                    if repo.bind_remote_ref(self._conn, session_id, remote_ref):
+                try:
+                    with transaction(self._conn):
+                        if repo.bind_remote_ref(self._conn, session_id, remote_ref):
+                            repo.insert_audit(
+                                self._conn,
+                                event_type="session.bound",
+                                outcome="ok",
+                                actor=provider_name,
+                                session_id=session_id,
+                                request_id=request.request_id,
+                            )
+                except repo.RemoteRefTaken:
+                    # The prompt went into a conversation another session owns (SEC-02): its
+                    # answer mixes both contexts, so it is neither bound nor shown.
+                    with transaction(self._conn):
                         repo.insert_audit(
                             self._conn,
                             event_type="session.bound",
-                            outcome="ok",
+                            outcome="refused_taken",
                             actor=provider_name,
                             session_id=session_id,
                             request_id=request.request_id,
                         )
+                    warnings.append(
+                        "the provider reported a remote conversation that belongs to another "
+                        "session; this session was not bound to it and its answer is not shown"
+                    )
+                    raise RemoteConversationTaken(
+                        "the remote conversation belongs to another session"
+                    ) from None
 
             @staticmethod
             def warn(text: str) -> None:
                 warnings.append(safe_foreign_line(text).text)
+
+            @staticmethod
+            def truncated() -> None:
+                cut.append(True)
 
         started = time.monotonic()
 
@@ -471,6 +500,7 @@ class SessionService:
                 duration_ms=duration_ms,
                 detail=detail,
                 warnings=tuple(warnings),
+                truncated=bool(cut) and text is not None,
             )
 
         try:

@@ -28,6 +28,14 @@ Una pregunta en una sesión que aún no tiene referencia remota SHALL abrir una 
 - **WHEN** el usuario pregunta por segunda vez en una sesión que ya tiene referencia remota
 - **THEN** la pregunta llega a la conversación de esa referencia y la referencia de la sesión no cambia
 
+#### Scenario: La dirección de chat nuevo muestra otra conversación
+- **WHEN** una sesión sin referencia abre la dirección de chat nuevo y la página muestra una conversación existente (un identificador en la URL o turnos ya visibles)
+- **THEN** no se escribe nada, la solicitud queda `failed`, la sesión sigue sin referencia y la otra conversación no recibe ningún prompt
+
+#### Scenario: Referencia que ya tiene otra sesión
+- **WHEN** el proveedor informa de una referencia que ya está guardada en otra sesión
+- **THEN** la referencia no se guarda en la segunda sesión, su solicitud queda `uncertain` sin mostrar la respuesta y la auditoría registra el rechazo; SQLite no admite dos sesiones con la misma referencia
+
 ### Requirement: La referencia es el identificador que asigna la plataforma
 El sistema SHALL NOT inventar ni preasignar el identificador de una conversación: SHALL aprenderlo de la URL cuando la plataforma lo asigne, según la forma medida, y SHALL guardar en la sesión solo ese identificador, sin host ni consulta. Si la pregunta falla después de enviar el prompt y antes de conocer el identificador, la solicitud SHALL quedar `uncertain` y la sesión sin referencia.
 
@@ -49,6 +57,10 @@ Tras cerrar y volver a abrir el navegador o el proceso, el sistema SHALL reabrir
 #### Scenario: Conversación remota desaparecida
 - **WHEN** la conversación de la sesión ya no existe y el usuario ejecuta `ask` en esa sesión
 - **THEN** la solicitud queda en `failed` sin que se envíe nada, la sesión queda en `closed` y el mensaje indica que hay que crear una sesión nueva
+
+#### Scenario: Conversación vacía que conserva su dirección
+- **WHEN** la conversación de una sesión con preguntas completadas se reabre con su identificador en la URL pero sin ningún turno visible
+- **THEN** no se escribe nada, la solicitud queda en `failed` y la sesión queda en `closed`
 
 #### Scenario: Pregunta en una sesión cerrada
 - **WHEN** el usuario ejecuta `ask` en una sesión en estado `closed`

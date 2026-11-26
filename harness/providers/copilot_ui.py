@@ -72,6 +72,15 @@ class LocatorSpec(_Strict):
             raise ValueError("`name` is only valid together with `role`")
         return self
 
+    def css_selector(self) -> str | None:
+        """The same element as a CSS selector, for a read inside the page: only `css` and
+        `test_id` have one."""
+        if self.css:
+            return self.css
+        if self.test_id:
+            return f"[data-testid={json.dumps(self.test_id)}]"
+        return None
+
     def resolve(self, root: Page | Locator) -> Locator:
         if self.css:
             return root.locator(self.css)
@@ -106,11 +115,16 @@ class Locators(_Strict):
     response_done_control: LocatorSpec | None = None
     busy_region: LocatorSpec | None = None
     login_indicator: LocatorSpec | None = None
+    # The element of a code block that holds its language label, looked up inside the block:
+    # the language of a fenced block comes only from it (css or test_id).
+    code_language: LocatorSpec | None = None
 
     @model_validator(mode="after")
     def _button_needs_a_locator(self) -> Self:
         if self.send_with == "button" and self.send is None:
             raise ValueError("send_with `button` needs a `send` locator")
+        if self.code_language is not None and self.code_language.css_selector() is None:
+            raise ValueError("`code_language` needs a css or test_id locator")
         return self
 
 

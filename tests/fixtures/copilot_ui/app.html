@@ -14,6 +14,17 @@
     ready_ms=N          the composer appears N ms after the page loads
     chips=1             once the reply ends, a toolbar of follow-up suggestion buttons
                         appears inside the turn, after the reply (as on the real page)
+    restore=1           the new-chat address goes to the last conversation (server redirect)
+    keepurl=1           a conversation that no longer exists shows an empty chat but keeps
+                        its id in the address; the next send opens another conversation
+    slowhist=1          an existing conversation's turns arrive 3.5 s after the page loads,
+                        inserted above anything already shown
+    deaf=1              the send button does nothing: the prompt stays in the editor
+    maxlength=N         the editor takes at most N characters
+    window=N            a reopened conversation shows only its last N questions and answers,
+                        as a virtualized list does
+    bounce=1            the server receives the prompt, the page shows an error notice as a
+                        turn and keeps the prompt in the editor (no user turn, never emptied)
   A reply the server sends with `html` (a prompt with ZQX-RICH-<name>) streams as text, then
   is replaced by that HTML, as a page renders the Markdown it received.
 -->
@@ -55,11 +66,18 @@
   const startMs = Number(params.get("start_ms") || 0);
   const readyMs = Number(params.get("ready_ms") || 0);
   const chips = params.get("chips") === "1";
+  const keepUrl = params.get("keepurl") === "1";
+  const slowHist = params.get("slowhist") === "1";
+  const deaf = params.get("deaf") === "1";
+  const bounce = params.get("bounce") === "1";
+  const shownPairs = Number(params.get("window") || 0);
   const thread = document.getElementById("synthetic-thread");
   const composer = document.getElementById("synthetic-composer");
   const send = document.getElementById("synthetic-send");
   const stop = document.getElementById("synthetic-stop");
   let conversation = null;
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  if (params.has("maxlength")) composer.maxLength = Number(params.get("maxlength"));
 
   function addTurn(role, text) {
     const turn = document.createElement("div");
@@ -96,20 +114,34 @@
     const match = location.pathname.match(/^\/c\/([^/]+)$/);
     if (!match) return;
     const response = forget ? null : await fetch("/api/conversation/" + match[1]);
-    if (!response || !response.ok) { newChat(); return; }
+    if (!response || !response.ok) {
+      if (keepUrl) { conversation = null; thread.replaceChildren(); return; }  // the id stays
+      newChat();
+      return;
+    }
     const data = await response.json();
     conversation = match[1];
-    for (const turn of data.turns) {
+    if (slowHist) await sleep(3500);
+    const first = thread.firstChild;
+    for (const turn of shownPairs ? data.turns.slice(-2 * shownPairs) : data.turns) {
       const element = addTurn(turn.role, turn.html ? "" : turn.text);
       if (turn.html) renderRich(element, turn.html);
       if (turn.role === "assistant") addDone(element);
+      if (first) thread.insertBefore(element, first);  // history goes above what is shown
     }
   }
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
   async function submit() {
     const prompt = composer.value;
     if (!prompt) return;
+    if (bounce) {
+      await fetch("/api/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversation, prompt }),
+      });
+      addTurn("assistant notice", "ZZ-ERROR-NOTICE");
+      return;
+    }
     composer.value = "";
     send.disabled = true;
     addTurn("user", prompt);
@@ -170,7 +202,7 @@
   // Like many chat pages, sending is possible only once something is typed.
   send.disabled = true;
   composer.addEventListener("input", () => { send.disabled = !composer.value; });
-  send.addEventListener("click", submit);
+  send.addEventListener("click", () => { if (!deaf) submit(); });
   document.getElementById("synthetic-new-chat").addEventListener("click", newChat);
   if (readyMs) {
     composer.hidden = true;

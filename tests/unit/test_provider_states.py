@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from uuid import UUID
+
 import pytest
 
 from harness.core.errors import SessionClosed
@@ -12,6 +14,7 @@ from harness.providers.base import (
     ProviderUncertain,
     RemoteConversationLost,
 )
+from harness.storage import repositories as repo
 
 
 class ScriptedProvider:
@@ -126,6 +129,44 @@ async def test_reference_survives_a_deadline_after_binding(conn, make_service):
     service, _, sid = scripted(make_service, bind="conv-0003", raise_after=ProviderUncertain("x"))
     assert (await service.ask(sid, "q")).status == "uncertain"
     assert states(conn) == (["uncertain"], ("uncertain", "conv-0003"))
+
+
+async def test_a_reference_held_by_another_session_is_refused(conn, make_service):
+    """Review 2026-11-26 (SEC-02): a second session that reports the first one's remote
+    conversation is not bound to it, and its answer, which mixes both, is not shown."""
+    provider = ScriptedProvider(bind="conv-0001")
+    service = make_service({"scripted": provider}, default="scripted")
+    first = str(service.create_session("A").session_id)
+    second = str(service.create_session("B").session_id)
+    assert (await service.ask(first, "q")).status == "completed"
+    response = await service.ask(second, "q")
+    assert response.status == "uncertain" and response.text is None
+    refs = dict(conn.execute("SELECT name, remote_ref FROM sessions").fetchall())
+    assert refs == {"A": "conv-0001", "B": None}
+    assert conn.execute(
+        "SELECT count(*) FROM audit_events WHERE event_type = 'session.bound'"
+        " AND outcome = 'refused_taken' AND session_id = ?", (second,)).fetchone()[0] == 1
+    assert any("belongs to another session" in w for w in response.warnings)
+    # Control: another reference binds the second session as usual.
+    third = str(service.create_session("C").session_id)
+    provider.bind = "conv-0002"
+    assert (await service.ask(third, "q")).status == "completed"
+    assert conn.execute("SELECT remote_ref FROM sessions WHERE name = 'C'").fetchone()[0] == "conv-0002"
+
+
+async def test_turns_expected_are_those_completed_in_the_bound_conversation(conn, make_service):
+    """A question answered before the identifier arrived went into another remote
+    conversation: the bound one does not show it, so it is not expected there."""
+    service, provider, sid = scripted(make_service)
+    assert (await service.ask(sid, "q1")).status == "completed"  # no identifier yet
+    provider.bind = "conv-0004"
+    assert (await service.ask(sid, "q2")).status == "completed"  # binds here
+    await service.ask(sid, "q3")
+    # Without a reference: all completed questions (0, then 1). With it: only q2, not q1.
+    assert [r.completed_turns for r in provider.requests] == [0, 1, 1]
+    assert provider.requests[2].remote_ref == "conv-0004"
+    # Control: the session as a whole has three completed questions.
+    assert repo.completed_requests(conn, UUID(sid)) == 3
 
 
 @pytest.mark.parametrize("ref", ["a/b", "x" * 129, "id?q=1", "\x1b[2J", ""])

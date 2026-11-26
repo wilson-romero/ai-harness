@@ -31,7 +31,7 @@ from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 
-from playwright.async_api import BrowserContext, Locator, Page
+from playwright.async_api import BrowserContext, ElementHandle, Locator, Page
 from playwright.async_api import Error as PlaywrightError
 
 from harness.browser.edge import SHUTDOWN_S, EdgeLauncher
@@ -65,6 +65,8 @@ from harness.providers.copilot_ui import (
 
 PROVIDER_NAME = "copilot_web"
 REPLY_MAX_CHARS = 200_000  # read at most this much of a reply from the page
+REPLY_MAX_NODES = 20_000  # and walk at most this many elements of it
+REPLY_MAX_DEPTH = 64  # and this many levels
 POLL_S = 0.1
 STATE_POLL_S = 0.25
 STATE_PERSIST_S = 3.0  # a sign-in or guest page must stay that long (redirects pass through)
@@ -76,6 +78,7 @@ CLOSE_RESERVE_S = SHUTDOWN_S  # of the request deadline, kept for putting the br
 # reserve only covers handing the answer back.
 HELD_RESERVE_S = 2.0
 PAGE_CLOSE_S = 5.0  # bound on closing a tab that is no longer trusted
+HISTORY_WAIT_S = 15.0  # a reopened conversation shows none of its turns that long: it is gone
 RETRY_MIN_S = 10.0  # a lost tab is tried again only with at least this much of the deadline left
 
 # Characters in the editor: a field's value, else the text content. Zero-width characters do
@@ -96,15 +99,21 @@ EDITOR_LENGTH_JS = (
 #   rows with a separator after the first; STRONG/B -> **x**, EM/I -> *x* around inline text
 #   only (each line on its own; an empty one gives nothing; one holding blocks is a plain
 #   container, as on the real page on 2026-11-26), CODE -> `x`;
-#   PRE, or an element holding one role=textbox whose only other text is a language label
-#   (letters, digits, + # . - _, at most 20) -> a fenced block with that language (or the
-#   language-* class of a PRE); BR -> line break; HR -> ---.
+#   PRE, a role=textbox, or an element holding one role=textbox whose only other text is
+#   the measured language label (`code_language` in ui.json) -> a fenced block. The language
+#   is taken only from that label element (or the language-* class of a PRE) and only if it
+#   matches LANGUAGE (review 2026-11-26: a prose word next to a code box is not a language;
+#   it stays as prose, before the block); BR -> line break; HR -> ---.
+# Meaning is kept (review 2026-11-26): a fence is longer than the longest run of backticks in
+# the code, and so is an inline code span; a line of plain text that would read as a
+# heading, list item, quote, rule or fence (`# x`, `- x`, `1. x`, `> x`, `---`, ```) gets a
+# backslash before its marker.
 # Anything else gives its text. Left out: visually hidden elements (a box of at most 1 px or
 # clipped away, as the screen-reader heading before every real reply) and controls (buttons,
 # toolbars, menus: the follow-up suggestions under a real reply, a code block's copy button).
 # Bounded: at most 20 000 elements and 64 levels are walked.
 REPLY_TEXT_JS = r"""
-(root, max) => {
+(root, [max, labelSelector]) => {
   const CONTROLS = "button,[role=button],[role=toolbar],[role=menu],[role=menubar],[role=menuitem]";
   const BLOCKS = new Set(["ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "CAPTION", "DD",
     "DETAILS", "DIV", "DL", "DT", "FIELDSET", "SUMMARY", "FIGCAPTION", "FIGURE", "FOOTER", "FORM", "HEADER", "LI", "MAIN", "NAV", "P",
@@ -113,7 +122,7 @@ REPLY_TEXT_JS = r"""
   const BLOCK_SELECTOR = "address,article,aside,blockquote,dd,details,div,dl,dt,fieldset,figure," +
     "footer,form,h1,h2,h3,h4,h5,h6,header,hr,li,main,nav,ol,p,pre,section,table,ul,[role=textbox]";
   const MAX_NODES = 20000, MAX_DEPTH = 64;
-  let nodes = 0;
+  let nodes = 0, cut = false;
   const hidden = (e) => {
     if (!e.textContent.trim()) return false;
     const s = getComputedStyle(e);
@@ -129,11 +138,11 @@ REPLY_TEXT_JS = r"""
     if (ws === "pre-line") return n.textContent.replace(/[ \t]+/g, " ");
     return n.textContent.replace(/\s+/g, " ");
   };
-  // Text of `e` outside `except`, controls and hidden elements: a code block's label.
-  const labelOf = (e, except) => {
+  // Text of `e` outside `except` and `also`, controls and hidden elements.
+  const labelOf = (e, except, also) => {
     let s = "";
     const go = (n) => {
-      if (n === except) return;
+      if (n === except || n === also) return;
       if (n.nodeType === 3) { s += n.textContent; return; }
       if (n.nodeType !== 1 || skip(n)) return;
       for (const c of n.childNodes) go(c);
@@ -141,9 +150,25 @@ REPLY_TEXT_JS = r"""
     go(e);
     return s.trim();
   };
+  const LANGUAGE = /^[A-Za-z0-9][A-Za-z0-9+#._-]{0,19}$/;
+  const longestRun = (s) => Math.max(0, ...(s.match(/`+/g) || []).map((r) => r.length));
   const fence = (lang, code) => {
     const body = code.replace(/^\n+|\s+$/g, "");
-    return "```" + lang + "\n" + body + "\n```";
+    const ticks = "`".repeat(Math.max(3, longestRun(body) + 1));
+    return ticks + (LANGUAGE.test(lang) ? lang : "") + "\n" + body + "\n" + ticks;
+  };
+  const inlineCode = (s) => {
+    const ticks = "`".repeat(longestRun(s) + 1);
+    const pad = /^[` ]|[` ]$/.test(s) ? " " : "";
+    return ticks + pad + s + pad + ticks;
+  };
+  // A line of plain text that Markdown would read as a block marker gets a backslash.
+  const escapeLine = (l) => {
+    const n = l.match(/^(\s*)(\d{1,9})([.)])(\s|$)/);
+    if (n) return n[1] + n[2] + "\\" + l.slice(n[1].length + n[2].length);
+    if (/^\s*(#{1,6}(\s|$)|>|[-+*](\s|$)|=+\s*$|-+\s*$|(\*\s*){3,}$|(_\s*){3,}$|`{3,}[^`]*$|~{3,})/.test(l))
+      return l.replace(/^(\s*)/, "$1\\");
+    return l;
   };
   const codeBlock = (e) => {
     if (e.tagName === "PRE") {
@@ -151,22 +176,34 @@ REPLY_TEXT_JS = r"""
       const cls = [...code.classList, ...e.classList].find((c) => /^lang(uage)?-/.test(c)) || "";
       return fence(cls.replace(/^lang(uage)?-/, ""), code.textContent);
     }
+    if (e.matches("[role=textbox]")) return fence("", e.innerText || "");
     const boxes = e.querySelectorAll("[role=textbox]");
     if (boxes.length !== 1) return null;
-    const label = labelOf(e, boxes[0]);
-    // Only a language label (or nothing) around the code: anything more is prose that holds
-    // the block, and is walked instead, so no text is lost.
-    if (!/^[\w+#.-]{0,20}$/.test(label)) return null;
-    return fence(label, boxes[0].innerText || "");
+    const box = boxes[0];
+    let label = null;
+    if (labelSelector) {
+      for (const l of e.querySelectorAll(labelSelector)) {
+        if (!box.contains(l) && !l.contains(box)) { label = l; break; }
+      }
+    }
+    // Only the measured label (or nothing) around the code: any other text is prose that
+    // holds the block, and is walked instead, so no text is lost and no word becomes a
+    // language.
+    if (labelOf(e, box, label)) return null;
+    return fence(label ? labelOf(label, null, null) : "", box.innerText || "");
   };
   const line = (s) => s.replace(/\s*\n\s*/g, " ").trim();
   // Markdown of the children of `e`: blocks separated by `sep`.
   const render = (e, depth, sep) => {
     const out = [];
     let para = "";
-    const flush = () => { const t = para.trim(); if (t) out.push(t); para = ""; };
+    const flush = () => {
+      const t = para.trim();
+      if (t) out.push(t.split("\n").map(escapeLine).join("\n"));
+      para = "";
+    };
     const walk = (n, d) => {
-      if (++nodes > MAX_NODES || d > MAX_DEPTH) return;
+      if (++nodes > MAX_NODES || d > MAX_DEPTH) { cut = true; return; }
       if (n.nodeType === 3) { para += textOf(n); return; }
       if (n.nodeType !== 1 || skip(n)) return;
       const tag = n.tagName;
@@ -223,7 +260,7 @@ REPLY_TEXT_JS = r"""
         if (/\s$/.test(n.textContent)) para += " ";
         return;
       }
-      if (tag === "CODE") { if (n.textContent) para += "`" + n.textContent + "`"; return; }
+      if (tag === "CODE") { if (n.textContent) para += inlineCode(n.textContent); return; }
       if (tag === "BLOCKQUOTE") {
         flush();
         out.push(render(n, d + 1, "\n\n").split("\n").map((l) => (l ? "> " + l : ">")).join("\n"));
@@ -239,7 +276,7 @@ REPLY_TEXT_JS = r"""
     return out.join(sep);
   };
   const text = render(root, 0, "\n\n").replace(/\n{3,}/g, "\n\n").trim();
-  return [text.length, text.length > max ? text.slice(0, max) : text];
+  return [text.length, text.length > max ? text.slice(0, max) : text, cut];
 }
 """
 
@@ -273,6 +310,9 @@ class _NoEvents:
         pass
 
     def warn(self, text: str) -> None:
+        pass
+
+    def truncated(self) -> None:
         pass
 
 
@@ -481,6 +521,9 @@ class _Turn:
         self.deadline = deadline
         self.host = host_of(plan.url)
         self.locators: Locators = plan.measurement.locators
+        label = self.locators.code_language
+        self.code_label = label.css_selector() if label is not None else None
+        self.assistants_at_send = 0
         self.sent = False
         self.bound = request.remote_ref is not None
         self.stage = "before sending"
@@ -499,22 +542,40 @@ class _Turn:
         users = self.locators.user_turn.resolve(page)
         assistants = self.locators.assistant_turn.resolve(page)
         users_before = await users.count()
-        before = await assistants.count()
         self.compare_turns(users_before)
+        # The last user turn before sending: the new one comes after it, and the answer after
+        # the new one. Indices computed before sending are not used: a history that arrives
+        # late is inserted above and moves them (review 2026-11-26, defect 2).
+        last_user = await users.last.element_handle() if users_before else None
+        self.assistants_at_send = await assistants.count()
         composer = self.locators.composer.resolve(page).first
         expected = editor_length(self.request.prompt)
         await self.put_prompt(page, composer, expected)
         await self.send(composer)
         self.stage = "while waiting for the answer"
-        text, truncated = await self.await_reply(page, composer, users, users_before, assistants, before)
+        text, cut = await self.await_reply(page, composer, users, last_user, assistants)
         self.stage = "while waiting for the conversation identifier"
         await self.await_identifier(page)
-        if truncated:
+        self.still_this_conversation(page)
+        if cut:
+            self.events.truncated()
             self.events.warn(
-                f"the answer was longer than {REPLY_MAX_CHARS} characters; only the first "
-                f"{REPLY_MAX_CHARS} were read. The whole answer is in Edge"
+                f"the answer was longer than what is read from the page (at most "
+                f"{REPLY_MAX_CHARS} characters, {REPLY_MAX_NODES} elements and "
+                f"{REPLY_MAX_DEPTH} levels); only the first part was read. The whole answer "
+                "is in Edge"
             )
         return clean_reply(text)
+
+    def still_this_conversation(self, page: Page) -> None:
+        """When the answer ends, the address must still name the session's conversation: if
+        the platform filed the prompt in another one, the answer belongs to that one."""
+        remote = self.request.remote_ref
+        if remote is not None and self.plan.ref.identifier_in(page.url) != remote:
+            raise ProviderUncertain(
+                "the answer ended in another remote conversation than this session's, so it "
+                "is not shown and the session keeps its own; the prompt was not resent"
+            )
 
     # -- before sending ---------------------------------------------------------------------
 
@@ -531,7 +592,30 @@ class _Turn:
             # A slow or failed load is judged below, by what the page shows in time.
         await self.wait_ready(page, ready_by)
         await self.settle(page, ready_by)
+        await self.wait_history(page, ready_by)
         await self.guard(page)
+
+    async def wait_history(self, page: Page, ready_by: float) -> None:
+        """When reopening, wait (at most HISTORY_WAIT_S) until the conversation shows the
+        turns this session completed in it: a history can arrive after the page stopped
+        changing (review 2026-11-26, defect 2). It may show fewer and stay so (the real list
+        is virtualized, D6): some turns, unchanged for SETTLE_S, are enough. None at all is a
+        conversation that is gone, even if the address kept its identifier (defect 3)."""
+        need = self.request.completed_turns if self.request.remote_ref is not None else 0
+        if need == 0:
+            return
+        users = self.locators.user_turn.resolve(page)
+        until = min(ready_by, time.monotonic() + HISTORY_WAIT_S)
+        seen, changed = await users.count(), time.monotonic()
+        while seen < need and time.monotonic() < until:
+            if seen > 0 and time.monotonic() - changed >= SETTLE_S:
+                break  # a part of a long conversation, shown and stable
+            await asyncio.sleep(STATE_POLL_S)
+            now = await users.count()
+            if now != seen:
+                seen, changed = now, time.monotonic()
+        if seen == 0:
+            raise _lost()
 
     async def wait_ready(self, page: Page, ready_by: float) -> None:
         measurement = self.plan.measurement
@@ -585,11 +669,21 @@ class _Turn:
         if state is not PageState.READY or host_of(page.url) != self.host:
             raise ProviderError("the Copilot page stopped being ready before sending; nothing was sent")
         remote = self.request.remote_ref
-        if remote is not None and self.plan.ref.identifier_in(page.url) != remote:
-            raise RemoteConversationLost(
-                "the remote conversation of this session could not be found again, so nothing "
-                "was sent and the session is now closed. Create a new session to go on"
-            )
+        users = await self.locators.user_turn.resolve(page).count()
+        if remote is None:
+            # A new conversation only: an address with an identifier, or turns already on the
+            # page, is some other conversation (the new-chat address can restore the last
+            # one), and typing there would mix two sessions (review 2026-11-26, SEC-02).
+            if self.plan.ref.identifier_in(page.url) is not None or users:
+                raise ProviderError(
+                    "the new-chat address showed an existing conversation instead of a new "
+                    "one, so nothing was typed; open a new chat in the Edge window and ask again"
+                )
+            return
+        if self.plan.ref.identifier_in(page.url) != remote:
+            raise _lost()
+        if users == 0 and self.request.completed_turns > 0:
+            raise _lost()  # an empty chat that kept the address (review 2026-11-26, defect 3)
 
     def compare_turns(self, users_visible: int) -> None:
         completed = self.request.completed_turns
@@ -640,12 +734,13 @@ class _Turn:
         page: Page,
         composer: Locator,
         users: Locator,
-        users_before: int,
+        last_user: ElementHandle | None,
         assistants: Locator,
-        before: int,
     ) -> tuple[str, bool]:
-        """The new reply (index `before`), once the measured signal holds and its text has
-        not changed for the stability window (D8)."""
+        """The new reply, once the measured signal holds and its text has not changed for the
+        stability window (D8). The new reply is the first assistant turn after the new user
+        turn, which is the last user turn and comes after `last_user` (the last one before
+        sending), in document order."""
         signal = self.plan.measurement.end_signal
         assert signal is not None
         window_s = max(
@@ -661,25 +756,33 @@ class _Turn:
                     "the answer did not finish before the deadline (HARNESS_REQUEST_TIMEOUT_S)"
                 )
             self.try_bind(page)
+            new_user = await _new_user_turn(users, last_user)
+            answer = await _answer_after(assistants, new_user) if new_user is not None else None
             if not confirmed:
-                confirmed = await users.count() > users_before or await _editor_length(composer) == 0
+                confirmed = new_user is not None or await _editor_length(composer) == 0
                 if (
                     not confirmed
                     and not resubmitted
+                    and answer is None
+                    # The thread did not change at all: a page that shows an error or a usage
+                    # notice as a turn and puts the prompt back is never sent to twice.
+                    and await assistants.count() == self.assistants_at_send
                     and time.monotonic() - sent_at >= RESUBMIT_AFTER_S
                     and await _editor_length(composer) == expected
                 ):
                     resubmitted = True  # the prompt never left: press once more, never again
                     await self.submit(composer)
-            if await assistants.count() > before:
-                turn = assistants.nth(before)
-                length, text = await turn.evaluate(REPLY_TEXT_JS, REPLY_MAX_CHARS)
+            if answer is not None:
+                turn = assistants.nth(answer)
+                length, text, walk_cut = await turn.evaluate(
+                    REPLY_TEXT_JS, [REPLY_MAX_CHARS, self.code_label]
+                )
                 now = _digest(text)
                 if now != digest:
                     digest, since = now, time.monotonic()
                 stable = time.monotonic() - since >= window_s
                 if text.strip() and stable and await self.signal_met(page, composer, turn):
-                    return text, int(length) > REPLY_MAX_CHARS
+                    return text, int(length) > REPLY_MAX_CHARS or bool(walk_cut)
             await asyncio.sleep(POLL_S)
 
     async def signal_met(self, page: Page, composer: Locator, turn: Locator) -> bool:
@@ -722,11 +825,42 @@ class _Turn:
             )
 
 
+def _lost() -> RemoteConversationLost:
+    return RemoteConversationLost(
+        "the remote conversation of this session could not be found again, so nothing "
+        "was sent and the session is now closed. Create a new session to go on"
+    )
+
+
 def _sign_in_needed() -> AuthenticationRequired:
     return AuthenticationRequired(
         "Copilot asks to sign in again; nothing was sent. Run `main.py copilot login`, sign in "
         "in the Edge window, and ask again"
     )
+
+
+# Index of the last user turn if it comes after `previous` (or `previous` is None and there is
+# one): the user turn of the prompt just sent. -1 otherwise.
+NEW_USER_JS = """(turns, previous) => {
+  const last = turns.length - 1;
+  if (last < 0) return -1;
+  if (previous === null) return last;
+  if (turns[last] === previous) return -1;
+  return previous.compareDocumentPosition(turns[last]) & Node.DOCUMENT_POSITION_FOLLOWING ? last : -1;
+}"""
+# Index of the first assistant turn after `user` in document order; -1 if none yet.
+ANSWER_AFTER_JS = """(turns, user) => turns.findIndex(
+  (t) => user.compareDocumentPosition(t) & Node.DOCUMENT_POSITION_FOLLOWING)"""
+
+
+async def _new_user_turn(users: Locator, previous: ElementHandle | None) -> ElementHandle | None:
+    index = await users.evaluate_all(NEW_USER_JS, previous)
+    return None if index < 0 else await users.nth(index).element_handle()
+
+
+async def _answer_after(assistants: Locator, user: ElementHandle) -> int | None:
+    index = await assistants.evaluate_all(ANSWER_AFTER_JS, user)
+    return None if index < 0 else int(index)
 
 
 async def _editor_length(composer: Locator) -> int:

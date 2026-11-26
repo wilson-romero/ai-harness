@@ -28,6 +28,11 @@ class ProviderUncertain(ProviderError):
     """Something failed after the prompt may have left: it may have reached the provider."""
 
 
+class RemoteConversationTaken(ProviderUncertain):
+    """The prompt went into a remote conversation that another session owns (SEC-02): the
+    answer mixes two sessions, so it is neither shown nor bound."""
+
+
 class ProviderTimeout(ProviderError, TimeoutError):
     """The provider gave up waiting before sending (for example, a page that never loads)."""
 
@@ -41,6 +46,10 @@ class ProviderEvents(Protocol):
 
     def warn(self, text: str) -> None:
         """A fixed-text warning for the person; it is printed on stderr."""
+        ...
+
+    def truncated(self) -> None:
+        """Only part of the answer was read (a size or structure bound was hit)."""
         ...
 
 

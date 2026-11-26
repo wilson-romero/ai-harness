@@ -70,6 +70,9 @@ class LLMResponse(_Contract):
     duration_ms: int = Field(ge=0)
     detail: str | None = None
     warnings: tuple[str, ...] = ()
+    # The provider read only part of the answer (a size or structure bound): a person gets it
+    # with a warning; a Skill never takes it as a step's output.
+    truncated: bool = False
 
 
 class HistoryEntry(_Contract):

@@ -13,7 +13,8 @@
     "assistant_turn": {"css": "#synthetic-thread .turn.assistant"},
     "stop": {"role": "button", "name": "Stop synthetic reply", "exact": true},
     "response_done_control": {"css": ".synthetic-copy"},
-    "login_indicator": {"css": "#synthetic-login-form"}
+    "login_indicator": {"css": "#synthetic-login-form"},
+    "code_language": {"test_id": "synthetic-code-identity"}
   },
   "conversation_ref": {"kind": "path_segment", "index": 1, "prefix": ["c"]},
   "identity_recoverable": true,

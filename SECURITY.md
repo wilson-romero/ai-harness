@@ -112,6 +112,8 @@ El harness lanza Edge con su sandbox activado y sin las opciones de Playwright q
 - El harness crea el directorio del perfil con permisos solo para su dueño (0700) y estrecha a 0700 uno suyo que ya existiera. Eso no protege de otro proceso que corra con tu mismo usuario.
 - En Windows no aplica la clave fija: el cifrado usa DPAPI, y el directorio hereda las ACL de su carpeta padre.
 
+**Qué queda en disco (precisión del 2026-11-26).** La base de datos del harness no guarda preguntas ni respuestas de Copilot, y sus logs tampoco. **El perfil dedicado es un perfil de navegador**: Edge guarda en él su caché, IndexedDB, almacenamiento local, historial y cookies, y la página de Copilot puede dejar ahí el texto de las conversaciones. El harness no lo lee ni lo borra. Protege la carpeta del perfil como protegerías el perfil de tu navegador, y bórrala entera (con Edge cerrado) si quieres quitar lo que contiene; después hará falta `copilot login` otra vez.
+
 La decisión se puede revisar cuando la sesión caduque y haya que iniciar sesión de nuevo de todas formas.
 
 ## Si algo se filtra
