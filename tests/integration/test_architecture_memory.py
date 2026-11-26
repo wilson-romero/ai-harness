@@ -17,7 +17,9 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 
 from harness.memory.context import build_context
+from harness.skills.checks import check
 from harness.skills.config import DEFAULT_SKILLS_DIR
+from harness.skills.definition import load_skill
 from harness.skills.commands import _report
 from harness.skills.decision_effect import DecisionEffect
 from harness.skills.effects import EffectBusy
@@ -118,6 +120,42 @@ def test_valid_extraction_reaches_the_approval_with_the_note_prepared(conn, data
     assert note.startswith("---\ntype: decision\n") and f"# {TITLE}\n" in note
     assert one(conn, "SELECT status FROM approvals") == ("pending",)
     assert fingerprint(vault) == before
+
+
+def test_the_extract_prompt_asks_for_minified_json_on_one_line(conn, data_dir, vault):
+    # prompt-economy D1: the reply costs 16-21 % fewer tokens minified than indented.
+    engine, sessions, provider = engine_for(conn, data_dir, vault)
+    run(engine, sessions.create_session("Demo", "demo-alpha"))
+    (prompt,) = provider.prompts
+    assert "objeto JSON minificado en una sola línea" in " ".join(prompt.split())
+
+
+MVP = REPO_ROOT / "tests" / "fixtures" / "mvp"
+MINIFIED = (MVP / "decision-mock-min.json").read_text(encoding="utf-8").strip()
+INDENTED = (MVP / "decision-mock.json").read_text(encoding="utf-8")
+
+
+def test_the_minified_fixture_is_the_indented_one_on_one_line():
+    assert "\n" not in MINIFIED and ": " not in MINIFIED.replace('": "', "")
+    assert json.loads(MINIFIED) == json.loads(INDENTED)
+
+
+@pytest.mark.parametrize("reply", [MINIFIED, INDENTED, "```json\n" + INDENTED + "\n```"],
+                         ids=["minified", "indented", "one-fenced-block"])
+def test_minified_indented_or_fenced_reply_prepares_the_same_note(conn, data_dir, vault, reply):
+    # The strict validator is not loosened: the forms asked for before still pass, and all of
+    # them canonicalise to the same validated output, so the same note.
+    skill = load_skill(DEFAULT_SKILLS_DIR, "architecture-memory", (DecisionEffect.scope,))
+    step = next(s for s in skill.workflow.steps if s.id == "check")
+    canonical = check(step, MINIFIED).output
+    assert canonical is not None
+    terminal = FakeTerminal([None])
+    engine, sessions, _ = engine_for(conn, data_dir, vault, reply, terminal=terminal)
+    outcome = run(engine, sessions.create_session("Demo", "demo-alpha"))
+    assert outcome.status == "awaiting_approval", outcome.message
+    assert one(conn, "SELECT output_sha256 FROM skill_steps WHERE step_key = 'check'") == (
+        hashlib.sha256(canonical.encode("utf-8")).hexdigest(),)
+    assert "# Cola gestionada para avisar de los pedidos aceptados\n" in shown_note(terminal)
 
 
 @pytest.mark.parametrize("extra", [{"path": "../Memoria/personas.md"},

@@ -9,7 +9,8 @@ Reglas:
   eliges dónde se guarda nada ni para qué proyecto.
 - No inventes hechos, cifras ni nombres. Lo que el texto da por hecho sin evidencia va en
   `assumptions`, no en `context` ni en `decision`.
-- Devuelve solo un objeto JSON, sin texto antes ni después, con exactamente estos campos:
+- Devuelve solo un objeto JSON minificado en una sola línea, sin texto antes ni después, con
+  exactamente estos campos:
   - `title`: una línea, entre 8 y 120 caracteres.
   - `context`: el problema y las fuerzas en juego, como mucho 2000 caracteres.
   - `decision`: lo que se decide, como mucho 2000 caracteres.
