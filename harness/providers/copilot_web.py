@@ -76,6 +76,7 @@ CLOSE_RESERVE_S = SHUTDOWN_S  # of the request deadline, kept for putting the br
 # reserve only covers handing the answer back.
 HELD_RESERVE_S = 2.0
 PAGE_CLOSE_S = 5.0  # bound on closing a tab that is no longer trusted
+RETRY_MIN_S = 10.0  # a lost tab is tried again only with at least this much of the deadline left
 
 # Characters in the editor: a field's value, else the text content. Zero-width characters do
 # not count (a rich editor keeps some as cursor anchors) and neither do line breaks, which a
@@ -263,6 +264,10 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
+class _TabGone(ProviderError):
+    """The question's tab or window was gone before anything was typed."""
+
+
 class _NoEvents:
     def bound(self, remote_ref: str) -> None:
         pass
@@ -433,15 +438,27 @@ class CopilotWebProvider:
         """One question in the conversation's browser. Only a question that ends with an
         answer leaves its tab trusted; any other end (an error, a deadline, Ctrl+C, which
         arrives here as a cancellation) marks it, and the next question gets a new tab."""
-        page = await self._held_page(deadline)
-        answered = False
-        try:
-            text = await turn.run(page)
-            answered = True
-            return text
-        finally:
-            if not answered and self._held is not None:
-                self._held.untrusted = True
+        for attempt in (1, 2):
+            page = await self._held_page(deadline)
+            answered = False
+            try:
+                text = await turn.run(page)
+                answered = True
+                return text
+            except (_TabGone, PlaywrightError) as exc:
+                # Seen once on the real page (2026-11-26, not reproduced): the first question
+                # of a conversation ended with the window reported closed before typing.
+                # Nothing was typed, so one more try in a new tab (or a new Edge, if the
+                # whole browser went) cannot send anything twice. After the send, never.
+                lost = isinstance(exc, _TabGone) or is_target_gone(exc)
+                if turn.sent or not lost or attempt == 2 or turn.remaining() < RETRY_MIN_S:
+                    raise
+                turn.events.warn("the Edge tab was lost before anything was typed; "
+                                 "trying once more in a new tab")
+            finally:
+                if not answered and self._held is not None:
+                    self._held.untrusted = True
+        raise AssertionError("unreachable")
 
 
 class _Turn:
@@ -527,7 +544,7 @@ class _Turn:
             if state is PageState.READY:
                 return
             if state is PageState.CLOSED:
-                raise ProviderError("the Edge window was closed before the prompt was sent")
+                raise _TabGone("the Edge window was closed before the prompt was sent")
             if state is PageState.LOGIN and held >= STATE_PERSIST_S:
                 raise _sign_in_needed()
             if time.monotonic() >= ready_by:
@@ -562,7 +579,7 @@ class _Turn:
         and when reopening, the session's own conversation (D6, D7)."""
         state = await classify(page, self.plan.measurement, self.host)
         if state is PageState.CLOSED:
-            raise ProviderError("the Edge window was closed before the prompt was sent")
+            raise _TabGone("the Edge window was closed before the prompt was sent")
         if state is PageState.LOGIN:
             raise _sign_in_needed()
         if state is not PageState.READY or host_of(page.url) != self.host:

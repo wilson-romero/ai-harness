@@ -300,3 +300,66 @@ async def test_signed_out_the_conversation_opens_and_the_question_asks_to_sign_i
     c2 = chat(["hola ZQX-END-2", "/exit"])
     assert await c2.conversation.run() == 0
     assert c2.statuses()[-1] == "completed" and app.prompt_count == 1
+
+
+async def test_first_question_after_new_on_a_fresh_conversation(chat, app, launches):
+    """The sequence the coordinator ran on the real page on 2026-11-26: the conversation opens
+    with an automatic session, `/new` switches before anything is asked, then two questions."""
+    c = chat(['/new "Prueba de conversación"', "uno ZQX-END-1", "dos ZQX-END-2", "/status", "/exit"])
+    assert await c.conversation.run() == 0
+    assert c.statuses() == ["completed", "completed"], c.terminal.text[-600:]
+    assert len(launches) == 1 and app.prompt_count == 2
+
+
+# -- a tab lost before typing (seen once on the real page, 2026-11-26) ------------------------
+
+
+def _lose_on(monkeypatch, method: str, what: str, times: int | None = 1) -> list:
+    """Close the question's tab (or the whole browser) when `_Turn.<method>` starts, the
+    first `times` times (None: every time). Returns the pages it closed."""
+    original = getattr(copilot_web._Turn, method)
+    lost: list = []
+
+    async def losing(self, page, *args, **kwargs):
+        if times is None or len(lost) < times:
+            lost.append(page)
+            await (page.close() if what == "tab" else page.context.close())
+        return await original(self, page, *args, **kwargs)
+
+    monkeypatch.setattr(copilot_web._Turn, method, losing)
+    return lost
+
+
+async def test_a_tab_lost_before_typing_is_tried_again_in_a_new_tab(chat, app, launches, monkeypatch):
+    lost = _lose_on(monkeypatch, "wait_ready", "tab")
+    c = chat(["uno ZQX-END-1", "dos ZQX-END-2", "/exit"])
+    assert await c.conversation.run() == 0
+    assert c.statuses() == ["completed", "completed"], c.terminal.text[-400:]
+    assert len(lost) == 1 and app.prompt_count == 2 and len(launches) == 1
+    assert "trying once more in a new tab" in c.terminal.text
+    assert c.closed()
+
+
+async def test_a_browser_lost_before_typing_is_launched_again(chat, app, launches, monkeypatch):
+    _lose_on(monkeypatch, "wait_ready", "browser")
+    c = chat(["uno ZQX-END-1", "/exit"])
+    assert await c.conversation.run() == 0
+    assert c.statuses() == ["completed"] and app.prompt_count == 1
+    assert len(launches) == 2 and c.closed()
+
+
+async def test_a_tab_lost_every_time_is_tried_only_once_more(chat, app, monkeypatch):
+    lost = _lose_on(monkeypatch, "wait_ready", "tab", times=None)
+    c = chat(["uno ZQX-END-1", "/exit"])
+    assert await c.conversation.run() == 0
+    assert c.statuses() == ["failed"] and len(lost) == 2 and app.prompt_count == 0
+    assert c.closed()
+
+
+async def test_a_tab_lost_after_sending_is_uncertain_and_never_retried(chat, app, monkeypatch):
+    lost = _lose_on(monkeypatch, "await_reply", "tab")
+    c = chat(["uno ZQX-END-1", "dos ZQX-END-2", "/exit"])
+    assert await c.conversation.run() == 0
+    assert c.statuses() == ["uncertain", "completed"]
+    assert len(lost) == 1 and app.prompt_count == 2  # the first prompt was not sent again
+    assert "trying once more" not in c.terminal.text
