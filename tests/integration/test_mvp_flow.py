@@ -263,14 +263,36 @@ def test_the_gate_flow_from_the_requirement_to_the_decision_in_memory(
     title = json.loads(fixture("decision-mock.json"))["title"]
     assert f"# {title}" in block
 
-    # 8. The same title again is refused as a duplicate, before any approval; the new note was
-    # in the memory block of the prompt of that extraction.
-    code, _, err = skill_cli(provider, ApprovingTerminal(), "run", "architecture-memory",
+    # 8a. The same decision file again is refused as a duplicate BEFORE the model is asked
+    # (architecture-skills-llm D8, revised 2026-11-25): no send is spent, no approval asked.
+    terminal = ApprovingTerminal()
+    code, _, err = skill_cli(provider, terminal, "run", "architecture-memory",
                              "--session", session, "--input-file", f"source={decision}")
     assert code == 1
-    assert target in err
+    assert target in err and "nothing was sent to the provider" in err
+    assert provider.calls == 2 and len(provider.prompts) == 2
+    assert terminal.shown == []
+    same = harness.last_run()
+    status = harness("skill", "status", same)
+    assert "error: duplicate_decision" in status.stdout
+    assert harness.context_of(same, "extract") == set()
+    assert harness.sql("SELECT count(*) FROM approvals WHERE run_id = ?", same) == [(0,)]
+    assert fingerprint(vault) == after
+
+    # 8b. Another text of the same decision passes that check; the model gives the same title
+    # and the title check refuses it after the model, before any approval. The new note was in
+    # the memory block of the prompt of that extraction.
+    reworded = copy_lf("decision-persona-reformulada.md", work)
+    terminal = ApprovingTerminal()
+    code, _, err = skill_cli(provider, terminal, "run", "architecture-memory",
+                             "--session", session, "--input-file", f"source={reworded}")
+    assert code == 1
+    assert target in err and "nothing was sent to the provider" not in err
+    assert provider.calls == 3
+    assert "Repaso la revisión" in data_block(provider.prompts[2], "inputs.source")
     assert any(line.startswith(f"--- nota: {target} (decision, ")
                for line in memory_block(provider.prompts[2]))
+    assert terminal.shown == []
     duplicate = harness.last_run()
     status = harness("skill", "status", duplicate)
     assert "error: duplicate_decision" in status.stdout
