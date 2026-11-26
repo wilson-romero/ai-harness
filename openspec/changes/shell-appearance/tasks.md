@@ -37,7 +37,8 @@ Cada `[x]` lleva su recibo debajo, con fecha y plataforma. Los oráculos se nomb
   - Recibo (2026-11-26, macOS arm64): `uv run pytest -q tests/unit/test_shell_*.py tests/security/test_shell_output.py tests/integration/test_chat_*.py tests/unit/test_portability.py tests/unit/test_skill_approval.py` → 343 passed en 23,2 s; `scripts/check_public_safety.py` → PASS; `openspec validate --all --strict --no-interactive` → 17 passed.
 - [x] 4.3 README, sección «Conversación › Aspecto»: captura real (pseudoterminal emulada, contenido sintético), teclas, qué hace el formato y cómo quitarlo. Hecho: la sección existe y «Qué no hace esta versión» ya no dice «sin colores ni barra de estado».
   - Recibo (2026-11-26, macOS arm64): captura con `uv run --with pyte` (solo para capturar; `pyte` no entra en el proyecto) sobre `main.py chat --project demo-alpha` en 90 columnas.
-- [ ] 4.4 `scripts/verify.sh` sobre el árbol limpio. Oráculo: código 0 y la línea `verify: PASS on <sha>`.
+- [x] 4.4 `scripts/verify.sh` sobre el árbol limpio. Oráculo: código 0 y la línea `verify: PASS on <sha>`.
+  - Recibo (2026-11-26, macOS arm64): `bash scripts/verify.sh` → código 0, `verify: PASS on bff4a4d885c0b2fe7e80faf7b5f560aad8502fee` (1467 passed en 235,91 s; public-safety PASS; OpenSpec 17 passed). El SHA es el del commit anterior al que añade este recibo (solo cambia `tasks.md`). Los 10 controles negativos de 2.2–4.1, aplicados uno a uno sobre el mismo árbol, fallan todos (ninguno sobrevive).
 - [ ] 4.5 Windows (opcional, Wilson): en PowerShell sobre Windows Terminal y sobre la consola clásica, `uv run python main.py`, una pregunta con `HARNESS_MOCK_DELAY_MS=5000` (se ve el indicador), Ctrl+C durante ella (queda `uncertain`, la conversación sigue), flecha arriba, `/s` + Tab, y `uv run python main.py chat --plain`. Resultado: PASS, FAIL o NOT RUN con lo que se vio.
 
 ## 5. Demo
