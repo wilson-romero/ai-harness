@@ -13,7 +13,13 @@ import getpass
 import queue
 import sys
 import threading
-from typing import Protocol
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from harness.shell.render import Row
 
 
 class Terminal(Protocol):
@@ -64,6 +70,29 @@ class ConversationTerminal(Terminal, Protocol):
         """Called from the SIGINT handler: True if a line wait (the conversation's or an
         approval prompt's) was waiting and took the interruption."""
         ...
+
+
+@dataclass(frozen=True)
+class ShellState:
+    """What a styled terminal may read from the conversation (shell-appearance D5, D6): each
+    callable reads the harness's own state at the moment it is called, never foreign text."""
+
+    status: Callable[[], str]  # the status line of the session held now
+    resume_count: Callable[[], int]  # how many sessions the last /sessions listed
+    skill_names: Callable[[], list[str]]  # folder names with the shape of a skill name
+
+
+@runtime_checkable
+class StyledTerminal(Protocol):
+    """A conversation terminal that shows styles, a working indicator and a status line
+    (shell-appearance). The conversation uses these only when the terminal has them; any
+    other terminal gets the same characters as plain text."""
+
+    def show_rows(self, rows: list[Row]) -> None: ...
+
+    def working(self, label: str) -> AbstractAsyncContextManager[None]: ...
+
+    def bind(self, state: ShellState) -> None: ...
 
 
 _INTERRUPT = ("interrupt", None)
