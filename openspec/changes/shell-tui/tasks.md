@@ -35,7 +35,21 @@ Cada `[x]` lleva su recibo debajo, con fecha y plataforma. Los oráculos se nomb
   - Recibo (2026-11-26, macOS arm64): hecho con `capture_tui.py` (fuera del repositorio) sobre una copia de `tests/fixtures/vault-synthetic`.
 - [x] 4.5 `scripts/verify.sh` sobre el árbol limpio. Oráculo: código 0 y la línea `verify: PASS on <sha>`.
   - Recibo (2026-11-26, macOS arm64): `bash scripts/verify.sh` → código 0, `verify: PASS on 656a51cdb98e95a93ce1072a85a108bdf2d06384` (1478 passed en 244,95 s; public-safety PASS; OpenSpec 18 passed). El SHA es el del commit anterior al que añade este recibo (solo cambia `tasks.md`).
-- [ ] 4.6 Windows (Wilson): lo que dice «Supuestos de Windows» en `design.md`. Resultado: PASS, FAIL o NOT RUN con lo que se vio.
+- [x] 4.7 Revisión independiente (2026-11-26), hallazgos 1 a 9 y mutantes M6 y M9 (`design.md` D6, D7, D8, riesgos). Oráculo: `tests/unit/test_shell_tui_review.py`, más dos pruebas nuevas en `tests/integration/test_chat_tui_terminal.py`: una sola escritura con dos líneas da una sola petición, y SIGHUP durante una pregunta sale con 0. Controles negativos aplicados con un guion fuera del repositorio (mutación, prueba, restauración, con caché de *bytecode* propia por mutante):
+  - (1) tomar la línea sin cerrar la espera;
+  - (5) conservar respuestas viejas;
+  - (2) tomar el código sin haber visto el final, quitar `pagedown` de la caja, quitar el «N more line(s) below»;
+  - (3) `ctrl+v` y `ctrl+x` sin anular;
+  - (4) `action_screenshot`, `deliver_text`, `deliver_binary`, `open_url` y `copy_to_clipboard` sin anular;
+  - (6) la traza de Textual;
+  - (7) los descriptores sin redirigir tras SIGHUP;
+  - (9) el fallo del *driver* sin capturar;
+  - M6: sin `self._notes = ()` al cambiar de sesión;
+  - M9: `ctrl+q` sin interrumpir la pregunta en curso, con un tiempo límite de 120 s para que no lo tape.
+  - Recibo (2026-11-26, macOS arm64): 17 de 17 controles → `failed` (ninguno sobrevive). Los 12 controles de 4.1 se repitieron sobre el código nuevo: 12 de 12. En la primera pasada sobrevivieron dos mutantes, `action_screenshot` y la traza. La traza era un artefacto del guion: dos mutantes del mismo tamaño escritos en el mismo segundo reutilizaban el `.pyc`; ahora cada mutante usa una caché propia. `action_screenshot` sobrevivía porque la segunda defensa, `deliver_screenshot`, también lo paraba; la prueba ahora comprueba que la acción no llega a entregar nada.
+- [x] 4.8 Receta de PowerShell del README («Paso a paso con el Mock») válida en Windows PowerShell 5.1 y en 7. En 5.1, `ConvertTo-Json` hace un objeto del texto de `Get-Content -Raw`; ahora se lee con `[IO.File]::ReadAllText` y se escribe UTF-8 sin BOM con `[IO.File]::WriteAllText`. Es la única receta de PowerShell que escribe un fichero, en el README y en `docs/runbook/`. El cargador del Mock ya acepta un BOM, como todo fichero UTF-8 que lee el harness (`strict_json.read_text_limited`), y no se cambia. Oráculo: `tests/unit/test_mock_script.py::test_a_responses_file_written_by_windows_powershell_loads`. Control negativo: quitar el `removeprefix("\ufeff")` de `decode_text_limited`.
+  - Recibo (2026-11-26, macOS arm64): pasa; control negativo → `1 failed`. La receta en sí no se ha ejecutado: no hay PowerShell en esta máquina (va en 4.6).
+- [ ] 4.6 Windows (Wilson): lo que dice «Supuestos de Windows» en `design.md`. Además, en Windows PowerShell 5.1 (`powershell.exe`) y en 7 (`pwsh`), las líneas de `respuestas.json` del README: `Get-Content -Raw $w\respuestas.json` debe empezar por `{` y `(Get-Content -Raw $w\respuestas.json | ConvertFrom-Json).'tarea: architecture-memory/extract'.GetType().Name` debe dar `String`; y `/skill architecture-memory` debe llegar a la caja de aprobación. Resultado: PASS, FAIL o NOT RUN con lo que se vio.
 
 ## 5. Archivo
 
