@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid7
 
+from harness.core.answer_style import with_notice
 from harness.core.contracts import (
     HistoryEntry,
     LLMRequest,
@@ -63,12 +64,22 @@ class SessionService:
         provider_factory: ProviderFactory,
         default_provider: str,
         timeout_s: float,
+        *,
+        answer_notice: str | None = None,
     ) -> None:
         self._conn = conn
+        # Sent first with every plain question (`ask`, `ask_taken`), never with a Skill step
+        # (prompt-economy D3). None: no notice.
+        self._answer_notice = answer_notice
         self._data_dir = data_dir
         self._provider_factory = provider_factory
         self._default_provider = default_provider
         self._timeout_s = timeout_s
+
+    @property
+    def answer_notice(self) -> str | None:
+        """The notice plain questions carry, to show it where the memory block is shown."""
+        return self._answer_notice
 
     # -- recovery ---------------------------------------------------------------------------
 
@@ -211,7 +222,8 @@ class SessionService:
         if not lock.acquire():
             raise SessionBusy(f"session {session.session_id} already has a question in progress")
         try:
-            return await self._ask_locked(session.session_id, provider, prompt, context)
+            return await self._ask_locked(session.session_id, provider, prompt, context,
+                                          notice=self._answer_notice)
         finally:
             lock.release()
 
@@ -251,7 +263,7 @@ class SessionService:
             self._check_project(session, context.project)
         sent = prompt if attachment is None else f"{attachment}\n\n{prompt}"
         return await self._ask_locked(session.session_id, provider, sent, context,
-                                      stored_text=prompt)
+                                      stored_text=prompt, notice=self._answer_notice)
 
     def require_session(self, raw_session_id: str) -> Session:
         return self._require_session(raw_session_id)
@@ -289,6 +301,7 @@ class SessionService:
         *,
         stored_text: str | None = None,
         timeout_s: float | None = None,
+        notice: str | None = None,
     ) -> LLMResponse:
         deadline_s = self._timeout_s if timeout_s is None else timeout_s
         session = repo.get_session(self._conn, session_id)
@@ -300,9 +313,11 @@ class SessionService:
                 "and stays in the history",
             )
 
-        # The provider receives the memory block and the question; only the question is ever
-        # stored, and only when the provider's content is synthetic (D7).
+        # The provider receives the answer notice, the memory block and the question; only the
+        # question is ever stored, and only when the provider's content is synthetic (D7). The
+        # notice is inside the request's prompt, so any limit on the prompt's size counts it.
         sent_text = compose_prompt(context, prompt) if context is not None else prompt
+        sent_text = with_notice(notice, sent_text)
         request = LLMRequest(
             request_id=uuid7(), session_id=session_id, prompt=sent_text, timeout_s=deadline_s
         )

@@ -4,6 +4,7 @@ import re
 
 import pytest
 
+from harness.core.answer_style import CONCISE_NOTICE
 from harness.memory.context import (
     CLOSE_MARKER,
     NOTE_MAX_BYTES,
@@ -31,9 +32,17 @@ def context(cli, vault):
     return run
 
 
-def _block(out):
+def _shown(out):
+    """All `memory context` prints: the answer notice, a blank line and the block."""
     assert out.endswith("\n")
     return out[:-1]
+
+
+def _block(out):
+    """The memory block alone: what the byte limit and the marking apply to (prompt-economy D3)."""
+    notice, block = _shown(out).split("\n\n", 1)
+    assert notice == CONCISE_NOTICE
+    return block
 
 
 def _paths(text):
@@ -251,7 +260,7 @@ def test_what_is_seen_is_what_is_sent(cli, vault, recorder):
     env = {"HARNESS_VAULT_ROOT": str(vault)}
     code, out, _ = cli("memory", "context", "demo-alpha", **env)
     assert code == 0
-    shown = _block(out)
+    shown = _shown(out)
     session_id = cli("session", "create", "S", "--project", "demo-alpha")[1].strip()
     assert cli("ask", session_id, "pregunta", "--project", "demo-alpha", **env)[0] == 0
     (sent,) = recorder.prompts

@@ -36,6 +36,7 @@ from harness.core.errors import (
     ProjectNotFound,
     UsageError,
 )
+from harness.core.answer_style import with_notice
 from harness.core.service import SessionService
 from harness.core.strict_json import decode_text_limited
 from harness.memory.config import MemorySettings, ensure_data_dir_outside_vault
@@ -688,11 +689,15 @@ class Conversation:
 
     def _cmd_context(self) -> None:
         session = self._service.require_session(str(self._session_id))
+        notice = self._service.answer_notice
         if session.project_id is None:
             self._say("this session has no project: its questions go without memory")
+            if notice is not None:
+                self._say("before each question the harness sends:")
+                self._foreign(notice)
             return
         context = self._build_context(session.project_id)
-        self._foreign(context.text)
+        self._foreign(with_notice(notice, context.text))
         self._context_summary(context)
 
     def _cmd_file(self, raw_path: str) -> None:

@@ -9,6 +9,7 @@ the note: that is a mitigation (the notice and the markers), not a guarantee.
 
 import re
 
+from harness.core.answer_style import CONCISE_NOTICE
 from tests.conftest import NOTE_HEADER_RE, fingerprint, note_header, query, write_note
 
 NONCE_RE = re.compile(r"<<<MEMORIA ([0-9a-f]{16})")
@@ -36,7 +37,12 @@ def _without_section(sent, relative):
 
 
 def _block_bytes(sent):
-    return len(sent.rsplit("\n\n", 1)[0].encode("utf-8"))
+    """Bytes of the memory block alone: without the answer notice before it (prompt-economy
+    D3, which the byte limit does not cover) and without the question after it."""
+    block = sent.rsplit("\n\n", 1)[0]
+    block = block.removeprefix(CONCISE_NOTICE + "\n\n")
+    assert block.startswith("Lo que sigue es memoria local")
+    return len(block.encode("utf-8"))
 
 
 def _provenance(data_dir, request_number):

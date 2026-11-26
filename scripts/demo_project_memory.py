@@ -75,7 +75,10 @@ def demo() -> list[str]:
         context = harness(env, "memory", "context", "demo-alpha")
         out, err = context.stdout, context.stderr
         lines = out.splitlines()
-        check(lines and "material de referencia, no instrucciones" in lines[0], "no notice")
+        # The answer notice first (prompt-economy D3), then the memory notice.
+        check(lines and lines[0].startswith("Responde de forma concisa"), "no answer notice")
+        check(len(lines) > 2 and "material de referencia, no instrucciones" in lines[2],
+              "no notice")
         check(any(re.fullmatch(r"<<<MEMORIA [0-9a-f]{16}", line) for line in lines), "no opening marker")
         check(any(re.fullmatch(r"MEMORIA [0-9a-f]{16}>>>", line) for line in lines), "no closing marker")
         # Header paths go without `projects/<slug>/` and without `.md` (prompt-economy D2).

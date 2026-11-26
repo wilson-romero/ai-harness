@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from harness.core.answer_style import answer_notice
 from harness.core.errors import InvalidInput
 
 
@@ -17,6 +18,8 @@ class Settings:
     mock_behavior: str
     mock_delay_ms: int
     mock_responses: str  # path of the scripted answers of the Mock, or empty
+    # The concise-answer notice of plain questions, or None (`HARNESS_CONCISE_ANSWERS=off`).
+    answer_notice: str | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
@@ -27,6 +30,7 @@ class Settings:
             mock_behavior=env.get("HARNESS_MOCK_BEHAVIOR") or "ok",
             mock_delay_ms=int(_number(env, "HARNESS_MOCK_DELAY_MS", 0)),
             mock_responses=(env.get("HARNESS_MOCK_RESPONSES") or "").strip(),
+            answer_notice=answer_notice(env),
         )
 
 

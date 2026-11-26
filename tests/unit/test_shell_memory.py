@@ -7,6 +7,7 @@ import re
 
 import pytest
 
+from harness.core.answer_style import CONCISE_NOTICE
 from harness.shell.conversation import FOREIGN_PREFIX, MAX_QUESTION_BYTES
 from tests.conftest import SECRET_SAMPLES, fingerprint, make_symlink, note_header
 from tests.shell_support import CountingProvider, ScriptedTerminal, make_conversation, statuses
@@ -24,10 +25,10 @@ def _stored_text(conn) -> str:
 
 
 async def _run(conn, data_dir, lines, *, vault=None, provider=None, project=None,
-               session=None):
+               session=None, notice=None):
     terminal = ScriptedTerminal(lines)
     conversation, service, provider = make_conversation(conn, data_dir, terminal, provider,
-                                                        vault=vault)
+                                                        vault=vault, answer_notice=notice)
     assert await conversation.run(session, project) == 0
     return terminal, service, provider
 
@@ -62,9 +63,11 @@ async def test_a_session_without_project_sends_only_the_question(conn, data_dir,
 
 async def test_context_shows_the_block_of_memory_context(conn, data_dir, vault, cli):
     """Scenario «Contexto a la vista»: the same block as `memory context`."""
+    # Both with the answer notice, as `chat` and `memory context` show it by default.
     terminal, _, provider = await _run(conn, data_dir, ["/context", "/exit"], vault=vault,
-                                       project="demo-alpha")
+                                       project="demo-alpha", notice=CONCISE_NOTICE)
     code, out, _ = cli("memory", "context", "demo-alpha", HARNESS_VAULT_ROOT=str(vault))
+    assert out.startswith(CONCISE_NOTICE + "\n\nLo que sigue es memoria local")
     assert code == 0
     shown = [line[len(FOREIGN_PREFIX):] for line in terminal.foreign()]
     assert NONCE.sub("N", "\n".join(shown)) == NONCE.sub("N", out.rstrip("\n"))
@@ -74,6 +77,30 @@ async def test_context_shows_the_block_of_memory_context(conn, data_dir, vault, 
 async def test_context_without_project_says_so(conn, data_dir, vault):
     terminal, _, _ = await _run(conn, data_dir, ["/context", "/exit"], vault=vault)
     assert "this session has no project" in terminal.text
+
+
+# -- prompt-economy 3: the concise-answer notice in the conversation -----------------------------
+
+
+async def test_a_question_carries_the_notice_first_and_context_shows_it(conn, data_dir, vault):
+    terminal, _, provider = await _run(conn, data_dir, ["/context", "pregunta", "/exit"],
+                                       vault=vault, project="demo-alpha", notice=CONCISE_NOTICE)
+    (sent,) = provider.prompts
+    assert sent.startswith(CONCISE_NOTICE + "\n\nLo que sigue es memoria local")
+    assert sent.endswith("\n\npregunta") and sent.count(CONCISE_NOTICE) == 1
+    shown = "\n".join(line[len(FOREIGN_PREFIX):] for line in terminal.foreign())
+    shown = shown[:shown.index(">>>") + 3]  # what /context printed; the answer comes after
+    assert NONCE.sub("N", sent) == NONCE.sub("N", shown) + "\n\npregunta"  # seen == sent
+    assert CONCISE_NOTICE not in _stored_text(conn)  # never stored, like the memory block
+
+
+async def test_without_project_the_notice_still_goes_and_context_says_so(conn, data_dir, vault):
+    terminal, _, provider = await _run(conn, data_dir, ["/context", "pregunta", "/exit"],
+                                       vault=vault, notice=CONCISE_NOTICE)
+    assert provider.prompts == [CONCISE_NOTICE + "\n\npregunta"]
+    assert "this session has no project" in terminal.text
+    assert CONCISE_NOTICE in "\n".join(terminal.foreign())
+
 
 
 async def test_memory_search_shows_what_memory_search_shows(conn, data_dir, vault, cli):
