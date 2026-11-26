@@ -78,38 +78,141 @@ EDITOR_LENGTH_JS = (
     "el => (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' ? el.value : el.textContent)"
     ".replace(/[\\u200B-\\u200D\\u2060\\uFEFF\\r\\n]/g, '').length"
 )
-# The reply as a sighted reader sees it, capped in the page: what crosses to Python is never
-# larger than the cap. Text of visually hidden elements (a box of at most 1 px or clipped
-# away, as screen-reader labels are: on the real page a hidden heading before every reply) is
-# taken out, in document order. So is the text of controls (buttons, toolbars, menus): they are
-# never the provider's words. On the real page the turn ends with a toolbar of follow-up
-# suggestion buttons (2026-11-26); a copy button inside a code block goes the same way. Read
-# only; nothing is changed in the page.
+# The reply rebuilt as Markdown from the structure of the page, capped in the page: what
+# crosses to Python is never larger than the cap. Read only; nothing is changed in the page.
+# The page renders the Markdown the model wrote (measured on the real page on 2026-11-26, by
+# structure only): headings are H1-H6, lists UL/OL with LI, tables TABLE, inline marks STRONG,
+# EM and CODE, and a code block is an editor widget: a short label with the language and
+# buttons, then the code inside one `role=textbox`. `innerText` drops what the Skills check
+# (`## ` headings, a ```json block), so the reply is rebuilt instead:
+#   H1-H6 -> "#" x level; UL/OL -> "- " / "N. " (nested lists indented); TABLE -> "| a | b |"
+#   rows with a separator after the first; STRONG/B -> **x**, EM/I -> *x*, CODE -> `x`;
+#   PRE, or an element holding one role=textbox whose only other text is a language label
+#   (letters, digits, + # . - _, at most 20) -> a fenced block with that language (or the
+#   language-* class of a PRE); BR -> line break; HR -> ---.
+# Anything else gives its text. Left out: visually hidden elements (a box of at most 1 px or
+# clipped away, as the screen-reader heading before every real reply) and controls (buttons,
+# toolbars, menus: the follow-up suggestions under a real reply, a code block's copy button).
+# Bounded: at most 20 000 elements and 64 levels are walked.
 REPLY_TEXT_JS = r"""
-(el, max) => {
+(root, max) => {
   const CONTROLS = "button,[role=button],[role=toolbar],[role=menu],[role=menubar],[role=menuitem]";
-  const all = el.innerText || "";
-  const hidden = [];
-  for (const d of el.querySelectorAll("*")) {
-    if (!d.textContent.trim() || hidden.some((h) => h.contains(d))) continue;
-    const r = d.getBoundingClientRect(); const s = getComputedStyle(d);
-    if (d.matches(CONTROLS) || r.width <= 1 || r.height <= 1 || s.clipPath === "inset(50%)" ||
-        s.clip.startsWith("rect(0")) {
-      hidden.push(d);
+  const BLOCKS = new Set(["ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "CAPTION", "DD",
+    "DETAILS", "DIV", "DL", "DT", "FIELDSET", "SUMMARY", "FIGCAPTION", "FIGURE", "FOOTER", "FORM", "HEADER", "LI", "MAIN", "NAV", "P",
+    "SECTION", "TBODY", "THEAD", "TR"]);
+  const MAX_NODES = 20000, MAX_DEPTH = 64;
+  let nodes = 0;
+  const hidden = (e) => {
+    if (!e.textContent.trim()) return false;
+    const s = getComputedStyle(e);
+    if (s.display === "contents") return false;
+    if (s.display === "none" || s.visibility === "hidden") return true;
+    const r = e.getBoundingClientRect();
+    return r.width <= 1 || r.height <= 1 || s.clipPath === "inset(50%)" || s.clip.startsWith("rect(0");
+  };
+  const skip = (e) => e.matches(CONTROLS) || e.tagName.toLowerCase() === "svg" || hidden(e);
+  const textOf = (n) => {
+    const ws = n.parentElement ? getComputedStyle(n.parentElement).whiteSpace : "normal";
+    if (ws === "pre" || ws === "pre-wrap" || ws === "break-spaces") return n.textContent;
+    if (ws === "pre-line") return n.textContent.replace(/[ \t]+/g, " ");
+    return n.textContent.replace(/\s+/g, " ");
+  };
+  // Text of `e` outside `except`, controls and hidden elements: a code block's label.
+  const labelOf = (e, except) => {
+    let s = "";
+    const go = (n) => {
+      if (n === except) return;
+      if (n.nodeType === 3) { s += n.textContent; return; }
+      if (n.nodeType !== 1 || skip(n)) return;
+      for (const c of n.childNodes) go(c);
+    };
+    go(e);
+    return s.trim();
+  };
+  const fence = (lang, code) => {
+    const body = code.replace(/^\n+|\s+$/g, "");
+    return "```" + lang + "\n" + body + "\n```";
+  };
+  const codeBlock = (e) => {
+    if (e.tagName === "PRE") {
+      const code = e.querySelector("code") || e;
+      const cls = [...code.classList, ...e.classList].find((c) => /^lang(uage)?-/.test(c)) || "";
+      return fence(cls.replace(/^lang(uage)?-/, ""), code.textContent);
     }
-  }
-  let cursor = 0, out = "";
-  for (const d of hidden) {
-    const t = d.innerText;
-    if (!t) continue;
-    const at = all.indexOf(t, cursor);
-    if (at < 0) continue;
-    out += all.slice(cursor, at);
-    cursor = at + t.length;
-    if (all[cursor] === "\n") cursor += 1;
-  }
-  out += all.slice(cursor);
-  return [out.length, out.length > max ? out.slice(0, max) : out];
+    const boxes = e.querySelectorAll("[role=textbox]");
+    if (boxes.length !== 1) return null;
+    const label = labelOf(e, boxes[0]);
+    // Only a language label (or nothing) around the code: anything more is prose that holds
+    // the block, and is walked instead, so no text is lost.
+    if (!/^[\w+#.-]{0,20}$/.test(label)) return null;
+    return fence(label, boxes[0].innerText || "");
+  };
+  const line = (s) => s.replace(/\s*\n\s*/g, " ").trim();
+  // Markdown of the children of `e`: blocks separated by `sep`.
+  const render = (e, depth, sep) => {
+    const out = [];
+    let para = "";
+    const flush = () => { const t = para.trim(); if (t) out.push(t); para = ""; };
+    const walk = (n, d) => {
+      if (++nodes > MAX_NODES || d > MAX_DEPTH) return;
+      if (n.nodeType === 3) { para += textOf(n); return; }
+      if (n.nodeType !== 1 || skip(n)) return;
+      const tag = n.tagName;
+      const code = codeBlock(n);
+      if (code !== null) { flush(); out.push(code); return; }
+      if (/^H[1-6]$/.test(tag)) {
+        flush();
+        const text = line(render(n, d + 1, " "));
+        if (text) out.push("#".repeat(Number(tag[1])) + " " + text);
+        return;
+      }
+      if (tag === "BR") { para += "\n"; return; }
+      if (tag === "HR") { flush(); out.push("---"); return; }
+      if (tag === "UL" || tag === "OL") {
+        flush();
+        let number = Number(n.getAttribute("start") || 1);
+        const items = [];
+        for (const li of n.children) {
+          if (li.tagName !== "LI" || skip(li)) continue;
+          const marker = tag === "OL" ? (number++) + ". " : "- ";
+          const body = render(li, d + 1, "\n").split("\n");
+          items.push(marker + body[0] + body.slice(1).map((l) => "\n" + " ".repeat(marker.length) + l).join(""));
+        }
+        if (items.length) out.push(items.join("\n"));
+        return;
+      }
+      if (tag === "TABLE") {
+        flush();
+        const rows = [];
+        for (const tr of n.querySelectorAll("tr")) {
+          if (tr.closest("table") !== n) continue;
+          const cells = [...tr.children].filter((c) => c.tagName === "TD" || c.tagName === "TH")
+            .map((c) => line(render(c, d + 1, " ")).replace(/\|/g, "\\|"));
+          rows.push("| " + cells.join(" | ") + " |");
+          if (rows.length === 1) rows.push("|" + cells.map(() => " --- |").join(""));
+        }
+        if (rows.length) out.push(rows.join("\n"));
+        return;
+      }
+      if (tag === "STRONG" || tag === "B") { para += "**" + line(render(n, d + 1, " ")) + "**"; return; }
+      if (tag === "EM" || tag === "I") { para += "*" + line(render(n, d + 1, " ")) + "*"; return; }
+      if (tag === "CODE") { para += "`" + n.textContent + "`"; return; }
+      if (tag === "BLOCKQUOTE") {
+        flush();
+        out.push(render(n, d + 1, "\n\n").split("\n").map((l) => (l ? "> " + l : ">")).join("\n"));
+        return;
+      }
+      const block = BLOCKS.has(tag);
+      if (block) flush();
+      for (const c of n.childNodes) walk(c, d + 1);
+      if (block) flush();
+    };
+    for (const c of e.childNodes) walk(c, depth);
+    flush();
+    return out.join(sep);
+  };
+  const text = render(root, 0, "\n\n").replace(/\n{3,}/g, "\n\n").trim();
+  return [text.length, text.length > max ? text.slice(0, max) : text];
 }
 """
 

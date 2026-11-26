@@ -37,6 +37,9 @@ CANARIES = (
 )
 SESSION_COOKIE = "synthetic_session=ok"
 MARKER = re.compile(r"ZQX-END-\d+")
+# A prompt carrying ZQX-RICH-<name> gets the reply rendered as the HTML of
+# `fixtures/copilot_ui/rich/<name>.html`, in the structure the real page renders Markdown.
+RICH = re.compile(r"ZQX-RICH-([a-z]+)")
 HUGE_REPLY_CHARS = 250_000
 
 
@@ -108,7 +111,7 @@ class SyntheticCopilot:
             reply = make_reply(prompt)
             self.conversations[conversation] += [
                 {"role": "user", "text": prompt},
-                {"role": "assistant", "text": reply},
+                {"role": "assistant", "text": reply, "html": rich_reply(prompt)},
             ]
             return conversation, reply
 
@@ -121,6 +124,11 @@ async def wait_until(condition, timeout_s: float = 60.0, what: str = "condition"
         if time.monotonic() > deadline:
             raise AssertionError(f"timed out waiting for {what}")
         await asyncio.sleep(0.05)
+
+
+def rich_reply(prompt: str) -> str:
+    match = RICH.search(prompt)
+    return (FIXTURES / "rich" / f"{match.group(1)}.html").read_text(encoding="utf-8") if match else ""
 
 
 def make_reply(prompt: str) -> str:
@@ -203,7 +211,8 @@ def _handler(app: SyntheticCopilot) -> type[BaseHTTPRequestHandler]:
             if path == "/api/send":
                 data = json.loads(body)
                 conversation, reply = app.receive(data.get("conversation"), data["prompt"])
-                self._json({"conversation": conversation, "reply": reply})
+                self._json({"conversation": conversation, "reply": reply,
+                            "html": rich_reply(data["prompt"])})
             elif path == "/api/login-event":
                 with app._lock:
                     app.login_events.append(body.decode() or "unknown")

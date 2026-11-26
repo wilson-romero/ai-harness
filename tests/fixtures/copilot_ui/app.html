@@ -14,6 +14,8 @@
     ready_ms=N          the composer appears N ms after the page loads
     chips=1             once the reply ends, a toolbar of follow-up suggestion buttons
                         appears inside the turn, after the reply (as on the real page)
+  A reply the server sends with `html` (a prompt with ZQX-RICH-<name>) streams as text, then
+  is replaced by that HTML, as a page renders the Markdown it received.
 -->
 <html lang="en">
 <head>
@@ -66,6 +68,13 @@
     thread.appendChild(turn);
     return turn;
   }
+  function renderRich(turn, html) {
+    const rich = document.createElement("div");
+    rich.className = "synthetic-rich";
+    rich.style.whiteSpace = "normal";
+    rich.innerHTML = html;  // a test fixture from the local server, never page input
+    turn.appendChild(rich);
+  }
   function addDone(turn) {
     if (turn.querySelector(".synthetic-copy")) return;
     const copy = document.createElement("button");
@@ -91,7 +100,8 @@
     const data = await response.json();
     conversation = match[1];
     for (const turn of data.turns) {
-      const element = addTurn(turn.role, turn.text);
+      const element = addTurn(turn.role, turn.html ? "" : turn.text);
+      if (turn.html) renderRich(element, turn.html);
       if (turn.role === "assistant") addDone(element);
     }
   }
@@ -134,6 +144,7 @@
       body.textContent = reply.slice(0, i + step);
       await sleep(chunkMs);
     }
+    if (data.html) { body.textContent = ""; renderRich(turn, data.html); }
     turn.setAttribute("aria-busy", "false");
     addDone(turn);
     if (chips) {

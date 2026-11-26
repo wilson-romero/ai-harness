@@ -216,6 +216,21 @@ def test_suggestion_buttons_after_the_reply_are_not_part_of_it(cli, env, app):
     assert "ZZ-CHIP" not in out and "Copy" not in out
     assert out.rstrip().endswith("ZQX-END-5"), out[-80:]
 
+
+def test_a_rendered_json_block_reaches_the_skill_check_as_markdown(cli, env, app):
+    """Task 8.14: the page renders the JSON block as an editor widget with a language label
+    and buttons; the answer `ask` prints passes the architecture-memory Skill's own check."""
+    from harness.skills.checks import check
+    from tests.browser.test_reply_markdown import skill_check
+
+    session_id = new_session(cli, env)
+    code, out, err = cli("ask", session_id, "decision ZQX-RICH-decision", **env)
+    assert code == 0, err
+    result = check(skill_check("architecture-memory"), out)
+    assert result.ok, result.error_code
+    assert result.fields["consequences"] == ["Consecuencia A"]
+    assert "ZZ-MORE-BUTTON" not in out and "ZZ-COPY-LABEL" not in out
+
 # -- 5.1: one remote conversation per session ---------------------------------------------------
 
 
