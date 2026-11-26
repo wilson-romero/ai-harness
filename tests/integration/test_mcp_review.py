@@ -38,6 +38,7 @@ from tests.mcp_support import (
     result_lines,
     run_bounded,
     run_main_bounded,
+    unexpected_sockets,
 )
 
 STUCK_WORKER = REPO_ROOT / "tests" / "fixtures" / "mcp" / "stuck_worker.py"
@@ -349,8 +350,10 @@ def test_the_socket_oracle_accepts_the_loops_own_emulated_pair(ws, data_dir, tmp
     assert code == 0, err
     [report] = reports
     binds = [e for e in report["events"] if e["event"] == "socket.bind"]
-    assert binds and {e["address"] for e in binds} <= LOOPBACK_PORT_ZERO, report
-    assert _foreign(report) == [], report
+    assert binds, unexpected_sockets(report, report["events"])
+    outside = [e for e in binds if e["address"] not in LOOPBACK_PORT_ZERO]
+    assert outside == [], unexpected_sockets(report, outside)
+    assert _foreign(report) == [], unexpected_sockets(report, _foreign(report))
 
 
 @pytest.mark.parametrize("socketpair", ["native", "fallback"])
@@ -362,11 +365,13 @@ def test_no_socket_is_created_by_the_harness_or_its_session_process(ws, data_dir
     assert code == 0, err
     assert len(reports) == 2, [r["argv"] for r in reports]  # the CLI and its session process
     for report in reports:
-        assert _foreign(report) == [], report
-        binds = {e["address"] for e in report["events"] if e["event"] == "socket.bind"}
-        assert binds <= LOOPBACK_PORT_ZERO, report
+        assert _foreign(report) == [], unexpected_sockets(report, _foreign(report))
+        binds = [e for e in report["events"] if e["event"] == "socket.bind"]
+        outside = [e for e in binds if e["address"] not in LOOPBACK_PORT_ZERO]
+        assert outside == [], unexpected_sockets(report, outside)
         if socketpair == "fallback":
-            assert binds, report  # the emulation ran in this process and was recognised
+            # the emulation ran in this process and was recognised
+            assert binds, unexpected_sockets(report, report["events"])
     assert server.stopped()
 
 

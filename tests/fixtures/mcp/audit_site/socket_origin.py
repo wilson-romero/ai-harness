@@ -44,22 +44,59 @@ def _file(frame) -> str:
     return os.path.normcase(os.path.abspath(frame.f_code.co_filename))
 
 
+def _frame_line(frame) -> str:
+    """One frame, without any path: base name, function, module, and which of the classifier's
+    file tests it passes (`S`: the standard library's socket.py, `L`: its asyncio loop files)."""
+    where = _file(frame)
+    marks = ("S" if where == _SOCKET_PY else "") + ("L" if where in _LOOP_FILES else "")
+    module = frame.f_globals.get("__name__", "?")
+    return (f"{os.path.basename(frame.f_code.co_filename)}:{frame.f_code.co_name}"
+            f" [{module}]{' ' + marks if marks else ''}")
+
+
 def classify(frame) -> dict:
-    """`{"self_pipe": bool, "stack": [...]}` for the event raised under `frame`. The stack names
-    files by base name only, so a report holds no path of the machine."""
+    """`{"self_pipe": bool, "why": str, "stack": [...]}` for the event raised under `frame`.
+
+    Revised on 2026-11-26: on one Windows machine the loop's own pair was reported as foreign,
+    on another not, with the same CPython code on this path in 3.14.3 and 3.14.10. So a report
+    carries what is needed to tell why without a second run: the reason, and every frame up to
+    24 with its module and the file tests it passed. Files are named by base name only, so a
+    report holds no path of the machine."""
     stack = []
     walk = frame
-    while walk is not None and len(stack) < 8:
-        stack.append(f"{os.path.basename(walk.f_code.co_filename)}:{walk.f_code.co_name}")
+    while walk is not None and len(stack) < 24:
+        stack.append(_frame_line(walk))
         walk = walk.f_back
     names = set()
     while frame is not None and _file(frame) == _SOCKET_PY:
         names.add(frame.f_code.co_name)
         frame = frame.f_back
-    self_pipe = (
-        bool(names & _PAIR)
-        and frame is not None
-        and frame.f_code.co_name == "_make_self_pipe"
-        and _file(frame) in _LOOP_FILES
-    )
-    return {"self_pipe": self_pipe, "stack": stack}
+    if not names & _PAIR:
+        why = "no socketpair frame in the standard library's socket.py"
+    elif frame is None:
+        why = "nothing called socketpair"
+    elif frame.f_code.co_name != "_make_self_pipe":
+        why = f"socketpair called by {frame.f_code.co_name}, not _make_self_pipe"
+    elif _file(frame) not in _LOOP_FILES:
+        why = "_make_self_pipe is not in the standard library's asyncio"
+    else:
+        why = SELF_PIPE
+    return {"self_pipe": why == SELF_PIPE, "why": why, "stack": stack}
+
+
+SELF_PIPE = "the event loop's own pair"
+
+
+def environment() -> dict:
+    """What a report needs to rule in or out something wrapping `socket` in every process."""
+    import sys
+
+    stdlib = set(sys.stdlib_module_names)
+    return {
+        "python": sys.version.split()[0],
+        "socketpair": getattr(socket.socketpair, "__name__", repr(socket.socketpair)),
+        "socket_class_module": socket.socket.__module__,
+        "socket_init_file": os.path.basename(socket.socket.__init__.__code__.co_filename),
+        "outside_stdlib": sorted({m.split(".")[0] for m in list(sys.modules)} - stdlib
+                                 - {"__main__", "sitecustomize", "socket_origin"}),
+    }
