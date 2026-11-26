@@ -152,3 +152,39 @@ def test_the_walk_is_bounded_in_depth_and_size(reader):
     # Control: a shallow page of the same kind is read whole.
     _, small, _ = reader.read("".join(f"<p>p{n}</p>" for n in range(10)))
     assert small.split("\n\n") == [f"p{n}" for n in range(10)]
+
+
+# -- emphasis wraps inline text only (seen on the real page on 2026-11-26) ---------------------
+
+
+def test_emphasis_around_blocks_gives_no_markers(reader):
+    html = "<strong><h2>Resumen</h2><ul><li>alfa</li><li>beta</li></ul></strong>"
+    _, text, _ = reader.read(html)
+    assert text == "## Resumen\n\n- alfa\n- beta"
+
+
+def test_empty_emphasis_gives_nothing(reader):
+    """An empty `i` (an icon) before and after the reply printed a line of `**` each."""
+    html = '<i class="icon"></i><h2>Resumen</h2><ul><li>alfa</li></ul><em> </em><b></b><code></code>'
+    _, text, _ = reader.read(html)
+    assert text == "## Resumen\n\n- alfa"
+    assert "*" not in text and "`" not in text
+
+
+def test_nested_emphasis_and_spaces_around_it(reader):
+    _, text, _ = reader.read("<p>uno<strong> dos <em>tres</em></strong> cuatro</p>")
+    assert text == "uno **dos *tres*** cuatro"
+
+
+def test_emphasis_across_a_line_break_marks_each_line(reader):
+    _, text, _ = reader.read("<p><strong>primera<br>segunda</strong></p>")
+    assert text == "**primera**\n**segunda**"
+
+
+def test_the_skill_checks_still_pass_with_emphasis_and_icons_around(reader):
+    review = '<i></i><strong>' + fixture("review") + '</strong><i></i>'
+    _, text, _ = reader.read(review)
+    assert check(skill_check("hls-review"), text).ok
+    decision = '<i></i>' + fixture("decision") + '<em></em>'
+    _, text, _ = reader.read(decision)
+    assert check(skill_check("architecture-memory"), text).ok

@@ -92,7 +92,9 @@ EDITOR_LENGTH_JS = (
 # buttons, then the code inside one `role=textbox`. `innerText` drops what the Skills check
 # (`## ` headings, a ```json block), so the reply is rebuilt instead:
 #   H1-H6 -> "#" x level; UL/OL -> "- " / "N. " (nested lists indented); TABLE -> "| a | b |"
-#   rows with a separator after the first; STRONG/B -> **x**, EM/I -> *x*, CODE -> `x`;
+#   rows with a separator after the first; STRONG/B -> **x**, EM/I -> *x* around inline text
+#   only (each line on its own; an empty one gives nothing; one holding blocks is a plain
+#   container, as on the real page on 2026-11-26), CODE -> `x`;
 #   PRE, or an element holding one role=textbox whose only other text is a language label
 #   (letters, digits, + # . - _, at most 20) -> a fenced block with that language (or the
 #   language-* class of a PRE); BR -> line break; HR -> ---.
@@ -106,6 +108,9 @@ REPLY_TEXT_JS = r"""
   const BLOCKS = new Set(["ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "CAPTION", "DD",
     "DETAILS", "DIV", "DL", "DT", "FIELDSET", "SUMMARY", "FIGCAPTION", "FIGURE", "FOOTER", "FORM", "HEADER", "LI", "MAIN", "NAV", "P",
     "SECTION", "TBODY", "THEAD", "TR"]);
+  const MARKS = { STRONG: "**", B: "**", EM: "*", I: "*" };
+  const BLOCK_SELECTOR = "address,article,aside,blockquote,dd,details,div,dl,dt,fieldset,figure," +
+    "footer,form,h1,h2,h3,h4,h5,h6,header,hr,li,main,nav,ol,p,pre,section,table,ul,[role=textbox]";
   const MAX_NODES = 20000, MAX_DEPTH = 64;
   let nodes = 0;
   const hidden = (e) => {
@@ -200,9 +205,24 @@ REPLY_TEXT_JS = r"""
         if (rows.length) out.push(rows.join("\n"));
         return;
       }
-      if (tag === "STRONG" || tag === "B") { para += "**" + line(render(n, d + 1, " ")) + "**"; return; }
-      if (tag === "EM" || tag === "I") { para += "*" + line(render(n, d + 1, " ")) + "*"; return; }
-      if (tag === "CODE") { para += "`" + n.textContent + "`"; return; }
+      const mark = MARKS[tag];
+      if (mark !== undefined) {
+        // Emphasis wraps inline text only. Around blocks (seen on the real page: a STRONG
+        // holding a heading and a list) it is a plain container; empty, it gives nothing.
+        if (n.querySelector(BLOCK_SELECTOR)) {
+          flush();
+          for (const c of n.childNodes) walk(c, d + 1);
+          flush();
+          return;
+        }
+        const lines = render(n, d + 1, "\n").split("\n").map((l) => l.trim());
+        if (!lines.some((l) => l)) return;
+        if (/^\s/.test(n.textContent) && para && !/\s$/.test(para)) para += " ";
+        para += lines.map((l) => (l ? mark + l + mark : "")).join("\n");
+        if (/\s$/.test(n.textContent)) para += " ";
+        return;
+      }
+      if (tag === "CODE") { if (n.textContent) para += "`" + n.textContent + "`"; return; }
       if (tag === "BLOCKQUOTE") {
         flush();
         out.push(render(n, d + 1, "\n\n").split("\n").map((l) => (l ? "> " + l : ">")).join("\n"));
