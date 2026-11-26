@@ -58,41 +58,51 @@ Al entrar se ve el proveedor, la sesión y el proyecto. Una línea normal es una
 | `/exit` | Sale. El fin de entrada (Ctrl+D; en Windows, Ctrl+Z e Intro) también. |
 
 - **Ctrl+C** durante una pregunta la interrumpe: queda `uncertain` si el prompt ya había salido, `failed` si no, nunca se reenvía y la conversación sigue. Ctrl+C mientras se espera una línea solo recuerda cómo salir. Ctrl+C durante `/skill` lo detiene: si el paso del modelo estaba en curso, queda `uncertain` (no se reenvía) y la conversación escribe los dos comandos que lo continúan o lo cancelan, que se usan tras dejar la sesión. Ctrl+C en el aviso de aprobación lo deja sin decidir: no se aplica nada. Ctrl+C mientras el proveedor abre sus recursos, al entrar, termina la conversación (código 130) sin preguntar nada; mientras los cierra, al salir, deja de esperar y avisa de que algo puede haber quedado abierto.
-- **Lo que se escribe mientras nadie lee se queda en la terminal** y es la primera línea que recibe la lectura siguiente, también el aviso de aprobación. No puede aprobar (el código sale de un hash que aún no se había mostrado). Tampoco rechaza sola: en la conversación, tras `n` el aviso pide la palabra `reject` completa, y cualquier otra respuesta deja la aprobación pendiente (sin cancelar la ejecución; se continúa con `skill resume` tras dejar la sesión) y no se envía ni se ejecuta. En texto plano (`--plain`), un pegado que contenga `n` y `reject` rechaza; con la terminal con estilo, un pegado es una sola respuesta y no rechaza. `skill run` desde la línea de órdenes sigue rechazando con `n`.
+- **Lo que se escribe mientras nadie lee se queda en la terminal** y es la primera línea que recibe la lectura siguiente, también el aviso de aprobación. No puede aprobar (el código sale de un hash que aún no se había mostrado). Tampoco rechaza sola: en la conversación, tras `n` el aviso pide la palabra `reject` completa, y cualquier otra respuesta deja la aprobación pendiente (sin cancelar la ejecución; se continúa con `skill resume` tras dejar la sesión) y no se envía ni se ejecuta. En texto plano (`--plain`), un pegado que contenga `n` y `reject` rechaza; en la pantalla completa, la caja de aprobación no admite pegar, y lo escrito mientras el núcleo trabaja no se envía. `skill run` desde la línea de órdenes sigue rechazando con `n`.
 - **La conversación ocupa su sesión** mientras está abierta: otro `chat` o un `ask` sobre esa sesión reciben «in use by another process» / «question in progress». Si el proceso muere, la sesión queda libre sola. Una ejecución de Skill que quede esperando aprobación se continúa con `skill resume` cuando la conversación ya no tiene esa sesión (`/new`, `/resume` o `/exit`).
 - **Lo que no es del harness lleva `| ` delante**: respuestas del proveedor, historial, notas de memoria y salida de Skills salen saneadas (sin secuencias de escape ni caracteres de control o invisibles, con las credenciales conocidas enmascaradas) y con ese prefijo, que ninguna línea del propio harness usa. Una pregunta de más de 64 KiB se rechaza sin registrar nada. El contenido dentro del aviso de aprobación también lleva `| ` (la cabecera, las reglas y la pregunta no). Una línea más ancha que la terminal se corta en filas, y cada fila que continúa la anterior empieza por `|+`: así la terminal nunca parte por su cuenta una línea ajena en una fila sin marca.
-- **Qué no hace esta versión:** ni paneles ni pantalla completa; la respuesta aparece entera, no poco a poco; el modelo no ejecuta herramientas por su cuenta ni hay llamadas MCP desde la conversación (`mcp call` sigue siendo una orden suelta); el historial de lo escrito no se guarda entre ejecuciones.
+- **Qué no hace esta versión:** la respuesta aparece entera, no poco a poco; el modelo no ejecuta herramientas por su cuenta ni hay llamadas MCP desde la conversación (`mcp call` sigue siendo una orden suelta); el historial de lo escrito no se guarda entre ejecuciones.
 
 ### Aspecto
 
-En una consola, la conversación usa colores, edición de línea, historial y completado ([`prompt_toolkit`](https://python-prompt-toolkit.readthedocs.io/), la única librería de terminal del proyecto). Así se ve en una terminal de 90 columnas, con el Mock, una respuesta sintética y Tab tras `/s` (captura de una pseudoterminal, sin los colores: la barra de estado y las líneas del harness salen en cian, la marca `| ` en gris, los títulos en negrita, la entrada en verde):
+En una consola, la conversación ocupa la pantalla completa ([Textual](https://textual.textualize.io/), la única librería de terminal del proyecto): la conversación con su propio desplazamiento, un panel con la sesión a la derecha, la entrada fija abajo y los atajos al pie. Así se ve en 100 × 30, con el Mock, el vault sintético y una respuesta sintética (captura de texto de la pantalla tomada con el `Pilot` de Textual, sin colores):
 
 ```text
-ai-harness  demo-alpha  mock  session 01a21989
-----------------------------------------------
-Enter sends a question. /help lists the commands; Tab completes them.
-Ctrl+C interrupts a question (never resent). /exit or end of input leaves.
-> revisa este requerimiento
-context: demo-alpha, 7 note(s) included, 0 truncated, 0 omitted, 1556 of 8192 bytes, 1
-|+entry skipped, 0 credential(s) redacted
-| ## Resumen
-| El requerimiento pide **avisar** de pedidos con `order.created`.
-|
-| ## Preguntas pendientes
-| - ¿Qué pasa con un evento que no se publica?
-> /s
-     /status
-     /sessions
-     /skill
- ai-harness  demo-alpha  mock  session 01a21989
+ ai-harness  -  mock  session 01a219d9                            │ Session
+ -------------------------------------                            │  Demo
+ Enter sends a question. /help lists the commands; Tab completes  │  01a219d9-d8d0-708a-922b-854b44
+ them.                                                            │ 3d1ba5
+ Ctrl+C interrupts a question (never resent). /exit or end of     │ Project
+ input leaves.                                                    │  demo-alpha
+                                                                  │ Provider
+ █ /new --project demo-alpha Demo                                 │  mock
+ new session 01a219d9-d8d0-708a-922b-854b443d1ba5 (Demo), project │ Sends
+ demo-alpha                                                       │  1
+                                                                  │ Last request
+ █ revisa este requerimiento                                      │  completed
+ context: demo-alpha, 7 note(s) included, 0 truncated, 0 omitted, │ Memory
+ 1556 of 8192 bytes, 1 entry skipped, 0 credential(s) redacted    │  7 note(s) in the last question
+                                                                  │   projects/demo-alpha/_project.
+ ╭─ mock ───────────────────────────────────────────────────────╮ │ md
+ │ ## Resumen                                                   │ │   Decisiones/alpha-mensajeria.m
+ │ El requerimiento pide **avisar** de pedidos con              │ │ d
+ │ `order.created`.                                             │ │   Lecciones/2026-11-10-reintent
+ │                                                              │ │ os-idempotentes.md
+ │ ## Preguntas pendientes                                      │ │   Memoria-CC/project_alpha-inte
+ │ - ¿Qué pasa con un evento que no se publica?                 │ │ graciones.md
+ │ [@click=app.quit]esto no es un enlace[/]                     │ │   projects/demo-alpha/sessions/
+ ╰──────────────────────────────────────────────────────────────╯ │ 2026-11-21-121500.md
+▊  Type a question, or / for a command                                                             ▎
+ ctrl+p commands  ctrl+c interrupts  ctrl+n new session  ctrl+q leaves
 ```
 
-Mientras el proveedor trabaja se ve `mock … thinking (4 s), Ctrl+C interrupts` en una sola línea, que se borra al llegar la respuesta. La barra de abajo (proyecto, proveedor y los 8 primeros caracteres de la sesión) solo aparece mientras se escribe, y siempre nombra la sesión tomada en ese momento.
-
-- **Teclas:** flechas arriba y abajo para las líneas ya escritas en esta ejecución (solo en memoria: nunca se escriben a disco, y lo escrito en un aviso de aprobación no entra); Tab completa los comandos `/`, el número de `/resume`, el nombre de `/skill` y la ruta de `/file`; Ctrl+C borra la línea a medias y la conversación sigue; Ctrl+D en una línea vacía sale.
-- **El formato solo colorea**: títulos, listas, citas, reglas, bloques de código, `código`, **negrita**, *cursiva* y enlaces se resaltan sin quitar ni añadir un carácter. Lo que se copia es lo que dijo el proveedor, con la marca `| ` de siempre; un enlace o una imagen se ven como texto y nunca se abren. `_cursiva_`, tablas y HTML se ven tal cual.
-- **Un pegado de varias líneas es una sola línea** (también en el aviso de aprobación: `n` y `reject` pegados de una vez no rechazan).
-- **Para quitarlo:** `main.py chat --plain`, o `HARNESS_PLAIN=1`, `NO_COLOR=1` o `TERM=dumb` en el entorno. Entonces la conversación es la de texto plano de siempre, sin colores, edición ni completado (la que usan los tests y las demos). También se usa sola si la consola no se puede manejar.
+- **Bloques:** lo que escribes (con una barra a la izquierda), las líneas del harness (en gris) y el texto ajeno, siempre dentro de un recuadro cuyo título pone el harness (el nombre del proveedor). Lo de dentro del recuadro se muestra como caracteres: `[@click=…]`, `[link=…]` o una secuencia de escape no hacen nada. El resaltado de Markdown es el de siempre: colorea sin quitar ni añadir un carácter.
+- **Panel:** sesión (nombre e identificador completo), proyecto, proveedor, peticiones enviadas en esta sesión, estado de la última y las notas de memoria que llevó la última pregunta. Sale solo del estado del harness y siempre describe la sesión tomada.
+- **Teclas:** `ctrl+p` abre la paleta de órdenes (solo órdenes del harness: estado, sesión nueva, cambiar de sesión, historial, contexto, elegir Skill, adjuntar fichero, buscar en la memoria…). «Switch session...» lista las sesiones y elige con el teclado; «Choose a skill...» rellena `/skill NOMBRE `; «Attach a file...» lista los ficheros de la carpeta de trabajo. `ctrl+n` sesión nueva. Flechas arriba y abajo: lo escrito en esta ejecución (solo en memoria). Tab completa los comandos `/`. `ctrl+c` interrumpe la pregunta en curso; sin nada en curso no sale. `ctrl+q`, `ctrl+d` con la entrada vacía o `/exit` salen: se cierra el proveedor y la terminal vuelve a como estaba.
+- **Mientras el proveedor trabaja** se ve `mock: thinking (N s), ctrl+c interrupts` y la entrada no envía (lo escrito se queda en ella).
+- **La aprobación** se abre en su propia caja: la cabecera del motor (destino, hash, caducidad), el contenido propuesto en un recuadro de texto ajeno y una entrada solo para el código. Esa entrada no guarda historial, no admite pegar y no acepta una respuesta en el primer medio segundo. `n` pide escribir `reject`, como en texto plano; `ctrl+c` la deja sin decidir.
+- **Un pegado de varias líneas** en la entrada se queda con la primera.
+- **Para quitarlo:** `main.py chat --plain`, o `HARNESS_PLAIN=1`, `NO_COLOR=1` o `TERM=dumb` en el entorno: la conversación de texto plano de siempre (la que usan los tests y las demos). También se usa sola sin consola, si Textual no carga o si hay puesta una variable de depuración de Textual (`TEXTUAL`, `TEXTUAL_LOG`, `TEXTUAL_SCREENSHOT`…), que guardaría o enviaría lo que se ve.
 
 ### Paso a paso con el Mock
 
@@ -140,7 +150,7 @@ $env:HARNESS_MOCK_DELAY_MS = "60000"
 uv run python main.py chat --session SESSION_ID
 ```
 
-(en zsh: `HARNESS_MOCK_DELAY_MS=60000 uv run python main.py chat --session SESSION_ID`). Se escribe una pregunta, se pulsa Ctrl+C mientras se ve `mock … thinking` (en texto plano, `waiting for the provider`) y se ve `interrupted: request … is uncertain: the prompt may have reached the provider; it was not resent`; la conversación sigue. `/history` muestra las preguntas anteriores, el marcador del Skill y la pregunta interrumpida como `[uncertain]`. `/exit` sale con código 0.
+(en zsh: `HARNESS_MOCK_DELAY_MS=60000 uv run python main.py chat --session SESSION_ID`). Se escribe una pregunta, se pulsa Ctrl+C mientras se ve `mock: thinking` (en texto plano, `waiting for the provider`) y se ve `interrupted: request … is uncertain: the prompt may have reached the provider; it was not resent`; la conversación sigue. `/history` muestra las preguntas anteriores, el marcador del Skill y la pregunta interrumpida como `[uncertain]`. `/exit` sale con código 0.
 
 ## Memoria del proyecto
 

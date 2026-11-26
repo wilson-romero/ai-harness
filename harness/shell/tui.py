@@ -59,7 +59,6 @@ from harness.shell.render import (
     MD_QUOTE,
     MD_RULE,
     MD_STRONG,
-    MIN_COLUMNS,
     STATUS,
     Row,
     harness_rows,
@@ -75,7 +74,9 @@ FOOTER = "ctrl+p commands  ctrl+c interrupts  ctrl+n new session  ctrl+q leaves"
 ARM_S = 0.5  # an approval answer submitted sooner than this after the box opened is refused
 HISTORY_MAX = 200  # lines typed at the conversation input, kept in memory only
 TICK_S = 1.0
-SIDE_COLUMNS = 30
+SIDE_COLUMNS = 34
+PANEL_NOTES = 12
+UNCUT = 10_000  # columns the core is told: it cuts no row (D3)
 FILE_PICKER_MAX = 500
 FOREIGN_TITLE = "text from outside the harness"
 APPROVAL_TITLE = "Approval requested"
@@ -185,16 +186,13 @@ class TuiTerminal:
         """Run `body` (the conversation) behind the screen; see `run_full_screen`."""
         return run_full_screen(self, body)
 
-    @property
-    def columns(self) -> int:
-        """The width the core cuts its rows to: the conversation pane's, read when the core
-        shows something (the screen's size is a value the main thread replaces whole)."""
-        app = self.app
-        width = app.size.width if app is not None and app.is_running else 80
-        return max(MIN_COLUMNS, width - SIDE_COLUMNS - 6)  # the panel, the padding, a border
+    columns = UNCUT
 
     def pane_columns(self) -> int:
-        return self.columns
+        """The width the core cuts its rows to: none here (D3). The cut keeps a scrolling
+        terminal's own wrapping from starting a row with foreign text; on this screen every
+        block is its own region and Textual wraps inside it, so the rows stay whole."""
+        return UNCUT
 
     def attach(self, conversation: Any) -> None:
         """The conversation whose `interrupt` Ctrl+C calls (D8)."""
@@ -431,13 +429,13 @@ class SidePanel(Static):
             lines.extend([(f" {panel.session_id}", "dim"), "\n"])
             entry("Project", panel.project)
             entry("Provider", panel.provider)
-            entry("Memory", f"{len(panel.notes)} note(s) in the last question")
-            for note in panel.notes[:20]:
-                lines.extend([(f"  {note}", "dim"), "\n"])
-            if len(panel.notes) > 20:
-                lines.extend([(f"  ... {len(panel.notes) - 20} more", "dim"), "\n"])
             entry("Sends", str(panel.sends))
             entry("Last request", self.working or panel.last_request)
+            entry("Memory", f"{len(panel.notes)} note(s) in the last question")
+            for note in panel.notes[:PANEL_NOTES]:
+                lines.extend([(f"  {note}", "dim"), "\n"])
+            if len(panel.notes) > PANEL_NOTES:
+                lines.extend([(f"  ... {len(panel.notes) - PANEL_NOTES} more", "dim"), "\n"])
         self.update(Content.assemble(*lines))
 
 

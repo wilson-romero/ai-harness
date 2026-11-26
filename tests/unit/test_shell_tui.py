@@ -160,13 +160,14 @@ async def test_a_resize_keeps_blocks_inside_the_conversation_pane(tmp_path):
     async with tui.app.run_test(size=SIZE) as pilot:
         await tui.send(pilot, "pregunta")
         await tui.until(pilot, lambda: tui.blocks("foreign"))
-        wide = tui.terminal.columns
+        before = tui.app.query_one(ForeignBlock).region
         await pilot.resize_terminal(70, 24)
         await pilot.pause(0.1)
-        assert tui.terminal.columns < wide  # the next rows are cut to the new width
+        assert "|+" not in tui.blocks("foreign")[0]  # Textual wraps inside the block
         block = tui.app.query_one(ForeignBlock)
         log, side = tui.app.query_one("#log").region, tui.app.query_one("#side").region
         assert block.region.right <= log.right and not block.region.overlaps(side)
+        assert block.region.width < before.width and block.region.height > before.height
         await tui.send(pilot, "/exit")
 
 
