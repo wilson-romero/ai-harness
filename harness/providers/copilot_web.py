@@ -24,13 +24,15 @@ Rules this module keeps:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import time
 from collections.abc import Callable
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 
+from playwright.async_api import BrowserContext, Locator, Page
 from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import Locator, Page
 
 from harness.browser.edge import SHUTDOWN_S, EdgeLauncher
 from harness.browser.login import recorded_ready_path
@@ -70,6 +72,10 @@ SETTLE_S = 2.0  # the page's element count unchanged that long before typing
 RESUBMIT_AFTER_S = 4.0  # nothing left the editor and no turn was added: the key press was lost
 ID_WAIT_AFTER_END_S = 10.0  # the identifier arrives about 2 s after the reply ends (D6)
 CLOSE_RESERVE_S = SHUTDOWN_S  # of the request deadline, kept for putting the browser away
+# With the browser held for a conversation a question closes nothing on its way out; the
+# reserve only covers handing the answer back.
+HELD_RESERVE_S = 2.0
+PAGE_CLOSE_S = 5.0  # bound on closing a tab that is no longer trusted
 
 # Characters in the editor: a field's value, else the text content. Zero-width characters do
 # not count (a rich editor keeps some as cursor anchors) and neither do line breaks, which a
@@ -253,6 +259,38 @@ class _Plan:
     limit: int
 
 
+class _Held:
+    """The browser a conversation keeps open between its questions (design D3, revised
+    2026-11-26). The `browser` lock is held as long as this lives."""
+
+    def __init__(self, stack: AsyncExitStack, context: BrowserContext) -> None:
+        self.stack = stack
+        self.context = context
+        self.page: Page | None = None
+        # True after a question that did not end with an answer (an error, a deadline,
+        # Ctrl+C): the tab may still be typing, sending or rendering, so it is not used again.
+        self.untrusted = False
+        self.gone = False
+        context.on("close", lambda _context: self._lost())
+
+    def _lost(self) -> None:
+        self.gone = True
+
+    async def page_for_question(self) -> Page:
+        """The tab the next question uses. An untrusted tab is replaced by a new one in the
+        same browser (opened first, so the window never loses its last tab) and closed without
+        running the page's unload handlers. The question then loads its own conversation, as
+        every question does."""
+        old = self.page
+        if old is None or old.is_closed() or self.untrusted:
+            self.page = await self.context.new_page()
+            self.untrusted = False
+            if old is not None and not old.is_closed():
+                with contextlib.suppress(PlaywrightError, asyncio.TimeoutError):
+                    await asyncio.wait_for(old.close(run_before_unload=False), PAGE_CLOSE_S)
+        return self.page
+
+
 class CopilotWebProvider:
     name = PROVIDER_NAME
     synthetic_content = False  # D11: nothing of what is asked or answered is stored
@@ -260,6 +298,41 @@ class CopilotWebProvider:
     def __init__(self, settings: Settings, launcher: EdgeLauncher | None = None) -> None:
         self._settings = settings
         self._launcher = launcher
+        self._held: _Held | None = None
+
+    # -- resources for a conversation (interactive-shell D5; this change's D3) --------------
+
+    async def open_resources(self) -> None:
+        """Launch Edge on the dedicated profile once for a whole conversation and keep it,
+        with the `browser` lock, until `close_resources`. Nothing is loaded yet: the sign-in
+        state is judged by the first question, which never types into a sign-in page. A
+        browser that is busy fails at once with the usual message."""
+        if self._held is None:
+            self._held = await self._launch_held(None)
+
+    async def close_resources(self) -> None:
+        held, self._held = self._held, None
+        if held is not None:
+            await held.stack.aclose()
+
+    async def _launch_held(self, wait_s: float | None) -> _Held:
+        launcher = self._launcher or EdgeLauncher.from_settings(self._settings)
+        stack = AsyncExitStack()
+        try:
+            context = await stack.enter_async_context(launcher.open(wait_s=wait_s))
+        except BaseException:
+            await stack.aclose()
+            raise
+        return _Held(stack, context)
+
+    async def _held_page(self, deadline: float) -> Page:
+        held = self._held
+        assert held is not None
+        if held.gone:  # the window was closed by hand: put it away and launch again
+            self._held = None
+            await held.stack.aclose()
+            held = self._held = await self._launch_held(max(0.0, deadline - time.monotonic()))
+        return await held.page_for_question()
 
     # -- before anything is recorded --------------------------------------------------------
 
@@ -300,11 +373,14 @@ class CopilotWebProvider:
         plan = self._plan()
         if len(request.prompt) > plan.limit:  # the service checked; never type an over-long one
             raise PromptTooLong(f"the prompt is longer than {plan.limit} characters")
-        reserve = min(CLOSE_RESERVE_S, request.timeout_s * 0.25)
+        held = self._held is not None
+        reserve = min(HELD_RESERVE_S if held else CLOSE_RESERVE_S, request.timeout_s * 0.25)
         deadline = time.monotonic() + request.timeout_s - reserve
-        launcher = self._launcher or EdgeLauncher.from_settings(self._settings)
         turn = _Turn(self._settings, plan, request, on_sent, events or _NoEvents(), deadline)
         try:
+            if held:
+                return await self._ask_held(turn, deadline)
+            launcher = self._launcher or EdgeLauncher.from_settings(self._settings)
             # Session lock (held by the service) first, then the browser lock: same order in
             # every command, and a bounded wait.
             async with launcher.open(wait_s=max(0.0, deadline - time.monotonic())) as context:
@@ -331,6 +407,21 @@ class CopilotWebProvider:
             raise ProviderError(
                 f"the Copilot provider failed before the prompt was sent ({type(exc).__name__})"
             ) from None
+
+
+    async def _ask_held(self, turn: _Turn, deadline: float) -> str:
+        """One question in the conversation's browser. Only a question that ends with an
+        answer leaves its tab trusted; any other end (an error, a deadline, Ctrl+C, which
+        arrives here as a cancellation) marks it, and the next question gets a new tab."""
+        page = await self._held_page(deadline)
+        answered = False
+        try:
+            text = await turn.run(page)
+            answered = True
+            return text
+        finally:
+            if not answered and self._held is not None:
+                self._held.untrusted = True
 
 
 class _Turn:
