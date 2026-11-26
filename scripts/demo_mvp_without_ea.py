@@ -5,8 +5,10 @@
 Everything runs on a temporary copy of the synthetic vault and a temporary data directory.
 Granting the approval needs a person at a terminal: the demo never simulates it. It prints the
 exact commands to approve this very run (PowerShell and a POSIX shell); the approval itself, the
-note coming back through `memory context`, the duplicate and the check that the project memory
-is in the prompt run in `tests/integration/test_mvp_flow.py`, which the demo runs. Every other
+note coming back through `memory context`, the duplicates (the same decision file, refused
+before the model is asked; another text with the same title, refused after it) and the check
+that the project memory is in the prompt run in `tests/integration/test_mvp_flow.py`, which the
+demo runs. Every other
 step runs the real CLI in a separate process and checks the vault's fingerprint around it.
 
 The Mock answers by the first key (alphabetical) contained in the prompt. Here the keys are the
@@ -214,7 +216,8 @@ def _demo(work: Path, keep: bool) -> list[str]:
     else:
         print("Rerun with --keep to leave this directory and approve this very run. Here the")
         print("demo cancels it and runs the end-to-end test that approves with the test")
-        print("terminal (note written once, back in memory context, duplicate refused).")
+        print("terminal (note written once, back in memory context; the same decision again is")
+        print("refused before asking the model, another text with the same title after it).")
         cancelled = harness(env, "skill", "cancel", run_id)
         check(cancelled.returncode == 0, "the run could not be cancelled")
         untouched("the cancellation")

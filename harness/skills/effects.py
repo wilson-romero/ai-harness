@@ -7,7 +7,7 @@ point to a module or a path. Tests inject their own effects through the engine's
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -109,6 +109,26 @@ class Effect(Protocol):
     def reconcile(
         self, context: EffectContext, effect_ref: str | None, content_sha256: str
     ) -> Reconciled: ...
+
+    # Optional (an effect without them has no early check): the source an effect is applied
+    # from, so that the same source can be refused before the model is asked (2026-11-25).
+
+    def source_key(
+        self, context: EffectContext, inputs: Mapping[str, str]
+    ) -> tuple[str, str] | None:
+        """(partition, SHA-256) of the run's source, or None: no early check for this run.
+        Called once, when the run is created, after `bind` (its result is in
+        `context.binding`); the engine keeps it with the run's binding, and stores it with
+        `effect_ref` in `effect_sources` only once the effect is really applied (by `apply`,
+        or by `reconcile` in `resume` or `cancel`)."""
+        ...
+
+    def early_refusal(
+        self, context: EffectContext, effect_refs: Sequence[str]
+    ) -> EffectRefused | None:
+        """Given what was already applied from the same source, the refusal to fail the run
+        with before any model call, or None if none of it is still in place."""
+        ...
 
 
 class NoEffect:
