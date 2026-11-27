@@ -85,7 +85,9 @@ async def _ask(tui, pilot, answer: str, line: str = "pregunta sintética") -> No
 # -- defaults on arrival (D1) ------------------------------------------------------------------
 
 
-async def test_a_short_reply_is_whole_and_a_long_one_folds_with_its_exact_count(tmp_path):
+async def test_a_short_reply_is_whole_and_a_folded_one_says_its_exact_count(tmp_path):
+    """Since reply-rendering D5 a long reply also arrives whole; the preview is what a reply
+    over ARRIVE_WHOLE_MAX_CHARS and other foreign text arrive as, set here directly."""
     tui = Tui(tmp_path)
     async with tui.app.run_test(size=SIZE) as pilot:
         await _ask(tui, pilot, "Respuesta corta.\nSegunda línea.")
@@ -95,6 +97,10 @@ async def test_a_short_reply_is_whole_and_a_long_one_folds_with_its_exact_count(
         text = long_reply(60)
         await _ask(tui, pilot, text)
         block = _replies(tui)[-1]
+        assert block.fold is Fold.EXPANDED
+        block.set_fold(Fold.PREVIEW, manual=False)
+        tui.app._log().scroll_to_widget(block, animate=False, top=True, immediate=True)
+        await pilot.pause(0.1)
         total = len(text.split("\n"))
         expected = preview_lines(tui.app._log().size.height)
         assert block.fold is Fold.PREVIEW and block.total == total
@@ -118,6 +124,9 @@ async def test_the_footer_always_says_what_is_hidden_after_line_n(tmp_path):
     async with tui.app.run_test(size=SIZE) as pilot:
         await _ask(tui, pilot, "\n".join(lines))
         block = _replies(tui)[-1]
+        block.set_fold(Fold.PREVIEW, manual=False)  # how it would arrive over the bound (D5)
+        tui.app._log().scroll_to_widget(block, animate=False, top=True, immediate=True)
+        await pilot.pause(0.1)
         assert harmful not in str(block.render())
         hidden = len(lines) - block.shown_rows()
         assert hidden == block.hidden_rows() > 0
@@ -150,16 +159,17 @@ async def test_older_turns_fold_to_one_line_and_a_manual_choice_sticks(tmp_path)
         await _ask(tui, pilot, long_reply(50), "segunda pregunta")
         first, second = _turns(tui)[1:3]
         assert not first.closed and not second.closed  # the turn before the newest stays
-        second.items[-1].toggle()  # opened by hand
+        assert second.items[-1].fold is Fold.EXPANDED  # whole on arrival (reply-rendering D5)
+        second.items[-1].toggle()  # closed by hand
         await _ask(tui, pilot, "Tercera.", "tercera pregunta")
         assert first.closed and not first.manual
-        assert not second.closed  # a block of it was opened by hand: it does not fold
-        assert second.items[-1].fold is Fold.EXPANDED
+        assert not second.closed  # a block of it was folded by hand: the turn does not fold
+        assert second.items[-1].fold is Fold.COLLAPSED
         summary = str(first.summary_line.render())
         assert summary.startswith("▸ you → mock · 2 lines · completed ")
         assert summary.endswith("› primera pregunta")
         await _ask(tui, pilot, "Cuarta.", "cuarta pregunta")
-        assert not second.closed and second.items[-1].fold is Fold.EXPANDED
+        assert not second.closed and second.items[-1].fold is Fold.COLLAPSED
         await tui.send(pilot, "/exit")
 
 
@@ -204,11 +214,11 @@ async def test_browsing_moves_and_toggles_and_a_letter_types_again(tmp_path):
         assert tui.app.selected is newest  # browsing starts at the newest block
         await pilot.press("up")
         assert tui.app.selected is _turns(tui)[-1]
-        await pilot.press("up", "enter")  # the reply of the first question: opened
+        await pilot.press("up", "enter")  # the reply of the first question: closed
         older = _replies(tui)[-2]
-        assert tui.app.selected is older and older.fold is Fold.EXPANDED
+        assert tui.app.selected is older and older.fold is Fold.COLLAPSED
         await pilot.press("space")
-        assert older.fold is Fold.COLLAPSED
+        assert older.fold is Fold.EXPANDED
         await pilot.press("end")
         assert tui.app.selected is newest
         await pilot.press("h", "o")  # a letter: back to typing, and it is typed
@@ -218,7 +228,7 @@ async def test_browsing_moves_and_toggles_and_a_letter_types_again(tmp_path):
         await pilot.press("alt+up")  # from the input, without browsing
         assert tui.app.selected is newest and not prompt.browsing
         await pilot.press("ctrl+o")
-        assert newest.fold is Fold.EXPANDED and tui.app.focused is prompt
+        assert newest.fold is Fold.COLLAPSED and tui.app.focused is prompt
         await tui.send(pilot, "/exit")
 
 
@@ -230,13 +240,10 @@ async def test_a_click_on_the_header_toggles_and_on_the_text_does_nothing(tmp_pa
         prompt = tui.app.query_one(PromptInput)
         await pilot.click(block, offset=(4, 3))  # inside the foreign text
         await pilot.pause(0.05)
-        assert block.fold is Fold.PREVIEW and tui.app.focused is prompt
+        assert block.fold is Fold.EXPANDED and tui.app.focused is prompt
         await pilot.click(block, offset=(4, 0))  # its header (the border with the title)
         await pilot.pause(0.05)
-        assert block.fold is Fold.EXPANDED and tui.app.focused is prompt
-        await pilot.click(block, offset=(4, 0))
-        await pilot.pause(0.05)
-        assert block.fold is Fold.COLLAPSED
+        assert block.fold is Fold.COLLAPSED and tui.app.focused is prompt
         await pilot.click(block)  # the collapsed line opens again
         await pilot.pause(0.05)
         assert block.fold is Fold.EXPANDED
@@ -251,7 +258,9 @@ async def test_a_click_on_the_header_toggles_and_on_the_text_does_nothing(tmp_pa
 async def test_toggling_while_the_core_works_sends_nothing_typed_ahead(tmp_path):
     tui = Tui(tmp_path)
     async with tui.app.run_test(size=SIZE) as pilot:
-        await _ask(tui, pilot, long_reply(50), "primera")
+        # Whole on arrival (reply-rendering D5): short enough for its header to stay in the
+        # pane once the next line is sent and the pane goes to its end.
+        await _ask(tui, pilot, long_reply(12), "primera")
         tui.provider.hang = True
         await tui.send(pilot, "lenta")
         await tui.until(pilot, lambda: tui.provider.calls == 2)
@@ -302,7 +311,9 @@ async def test_the_block_being_read_does_not_jump(tmp_path):
     tui = Tui(tmp_path)
     async with tui.app.run_test(size=SIZE) as pilot:
         await tui.ready(pilot)
-        _fill(tui, 30, long_reply(40))
+        # Replies that fit the pane: whole since they arrived (reply-rendering D5), a turn's
+        # line and its reply are on the screen together.
+        _fill(tui, 30, long_reply(12))
         await pilot.pause(0.3)
         log = tui.app._log()
 
@@ -318,7 +329,7 @@ async def test_the_block_being_read_does_not_jump(tmp_path):
         await pilot.press("enter")  # opened: it grows below its line
         await pilot.pause(0.2)
         assert not turn.closed and row(turn) == before
-        await pilot.press("down", "enter")  # its reply, opened whole
+        await pilot.press("down")  # its reply, whole since it arrived (reply-rendering D5)
         await pilot.pause(0.2)
         reply = tui.app.selected
         assert isinstance(reply, ForeignBlock) and reply.fold is Fold.EXPANDED
@@ -352,15 +363,16 @@ async def test_opening_the_newest_reply_at_the_end_keeps_its_header(tmp_path):
         await _ask(tui, pilot, long_reply(80), "segunda")
         block = _replies(tui)[-1]
         log = tui.app._log()
-        before = block.region.y - log.region.y
-        assert 0 <= before < log.size.height and block.fold is Fold.PREVIEW
-        await pilot.press("ctrl+o")
-        await pilot.pause(0.2)
-        assert block.fold is Fold.EXPANDED and block.region.y - log.region.y == before
-        await pilot.press("ctrl+o")  # closed: one line, on the same row
+        await pilot.press("ctrl+o")  # closed: one line
         await pilot.pause(0.2)
         assert block.fold is Fold.COLLAPSED
-        assert block.region.y - log.region.y == before or log.scroll_y == log.max_scroll_y
+        log.scroll_end(animate=False, immediate=True)  # the pane at its end
+        await pilot.pause(0.2)
+        before = block.region.y - log.region.y
+        assert 0 <= before < log.size.height
+        await pilot.press("ctrl+o")  # opened whole: its header stays on its row
+        await pilot.pause(0.2)
+        assert block.fold is Fold.EXPANDED and block.region.y - log.region.y == before
         await tui.send(pilot, "/exit")
 
 
@@ -392,9 +404,9 @@ async def test_switching_session_shows_that_sessions_blocks(tmp_path):
         await tui.ready(pilot)
         await pilot.pause(0.1)
         assert first_log.display
-        assert "Punto sintético número 45" in tui.screen()
+        assert "pregunta en la primera" in tui.screen()
         assert "Respuesta en la segunda" not in tui.screen()
-        assert first_block.fold is Fold.EXPANDED  # its state, kept in memory
+        assert first_block.fold is Fold.COLLAPSED  # folded by hand: its state, kept in memory
         assert first_block.parent in first_log.turns
         assert len(tui.app.session_logs) == 2 and first in tui.app.session_logs
         await tui.send(pilot, "/exit")
@@ -511,10 +523,12 @@ def test_default_folds():
     assert blocks.default_fold(blocks.CONTEXT, _rows(3), 20) is Fold.COLLAPSED
     assert blocks.default_fold(blocks.CONTEXT, _rows(1), 20) is Fold.EXPANDED
     assert blocks.default_fold(blocks.ALERT, _rows(500), 20) is Fold.EXPANDED
-    assert blocks.default_fold(blocks.REPLY, _rows(24), 20) is Fold.EXPANDED  # the grace
-    assert blocks.default_fold(blocks.REPLY, _rows(25), 20) is Fold.PREVIEW
+    # Other foreign text folds past the preview; a reply arrives whole (reply-rendering D5).
+    assert blocks.default_fold(blocks.FOREIGN, _rows(24), 20) is Fold.EXPANDED  # the grace
+    assert blocks.default_fold(blocks.FOREIGN, _rows(25), 20) is Fold.PREVIEW
+    assert blocks.default_fold(blocks.REPLY, _rows(25), 20) is Fold.EXPANDED
     # Wrapped rows count by the screen rows they take: 12 rows of 3 screen rows each fold.
-    assert blocks.default_fold(blocks.REPLY, _rows(12), 20, lambda row: 3) is Fold.PREVIEW
+    assert blocks.default_fold(blocks.FOREIGN, _rows(12), 20, lambda row: 3) is Fold.PREVIEW
     assert rows_in_preview(_rows(12), 20, lambda row: 3) == 6
     assert blocks.category("context: demo", foreign=False, label=None) == blocks.CONTEXT
     assert blocks.category("error: x", foreign=False, label=None) == blocks.ALERT
@@ -588,7 +602,7 @@ async def test_the_palette_starts_browsing_and_jumps_to_the_latest(tmp_path):
         assert tui.app.selected is _replies(tui)[-1]
         await pilot.press("escape")
         await _palette(tui, pilot, "open or close")
-        await tui.until(pilot, lambda: _replies(tui)[-1].fold is Fold.EXPANDED)
+        await tui.until(pilot, lambda: _replies(tui)[-1].fold is Fold.COLLAPSED)
         await _palette(tui, pilot, "jump to latest")
         await pilot.pause(0.2)
         log = tui.app._log()
@@ -605,14 +619,18 @@ def test_the_folding_module_is_standard_library_and_writes_nothing():
     assert "open(" not in source and "write" not in source
 
 
-async def test_a_folded_reply_of_wrapped_lines_fits_the_pane_as_it_arrives(tmp_path):
+async def test_folded_foreign_text_of_wrapped_lines_fits_the_pane_as_it_arrives(tmp_path):
     """The preview is measured in screen rows: lines that wrap take more than one. Negative
-    control: counting each line as one row makes the preview taller than the pane."""
+    control: counting each line as one row makes the preview taller than the pane. (Foreign
+    text other than a reply, which arrives whole since reply-rendering D5.)"""
     tui = Tui(tmp_path)
     wide = "\n".join(["## Resumen", *[f"- Riesgo sintético {n}: " + "palabra " * 14
                                       for n in range(40)]])
     async with tui.app.run_test(size=(100, 30)) as pilot:
-        await _ask(tui, pilot, wide)
+        await tui.ready(pilot)
+        tui.app.start_turn("/history")
+        tui.app.show_rows(foreign_rows(wide, UNCUT, markdown=True)[0], None)
+        await pilot.pause(0.2)
         block = _replies(tui)[-1]
         log = tui.app._log()
         assert block.fold is Fold.PREVIEW
@@ -732,7 +750,7 @@ async def test_a_box_or_the_palette_ends_browsing(tmp_path):
         block = _replies(tui)[-1]
         await tui.send(pilot, "/status")
         await tui.until(pilot, lambda: any("last request:" in t for t in tui.blocks("harness")))
-        assert block.fold is Fold.PREVIEW  # Enter sent the line; it toggled nothing
+        assert block.fold is Fold.EXPANDED  # Enter sent the line; it toggled nothing
         await tui.send(pilot, "/exit")
 
 

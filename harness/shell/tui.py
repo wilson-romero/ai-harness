@@ -88,6 +88,7 @@ from harness.shell.render import (
     MD_QUOTE,
     MD_RULE,
     MD_STRONG,
+    MD_TABLE,
     MIN_COLUMNS,
     STATUS,
     Row,
@@ -114,11 +115,18 @@ BROWSE_HINT = "browsing the blocks: esc or any letter goes back to typing"
 FOOTER = ("ctrl+p commands  ctrl+c interrupts  ctrl+q leaves  ctrl+n new  esc blocks  "
           "ctrl+o open/close")
 BROWSE_FOOTER = "up/down move  enter open/close  +/- all  end latest  esc back to typing"
+
+
+def below_hint(rows: int) -> str:
+    """The start of the footer while the pane has rows below what it shows (reply-rendering
+    D6): harness words and a count, never foreign text."""
+    return f"↓ {rows} more {'row' if rows == 1 else 'rows'} below  "
 ARM_S = 0.5  # the approval buttons stay disabled this long after the box opens
 HISTORY_MAX = 200  # lines typed at the conversation input, kept in memory only
 TICK_S = 1.0
 PANEL_NOTES = 12
 UNCUT = 10_000  # columns the core is told: it cuts no row (D3)
+FOREIGN_FRAME = 2 + 2 * spacing.BLOCK_INSET  # a foreign block's border and padding, in columns
 FILE_PICKER_MAX = 500
 FOREIGN_TITLE = "text from outside the harness"
 APPROVAL_TITLE = "Approval requested"
@@ -138,6 +146,7 @@ STYLES: dict[str, str] = {
     MD_QUOTE: "italic dim",
     MD_RULE: "dim",
     MD_FENCE: "dim",
+    MD_TABLE: "dim",  # the rules of a table or a code block: harness-drawn, no colour, no fill
     # A theme colour no harness status uses: inline code written by the model, such as
     # `warning: ...`, must not look like the harness's own warning (approval-buttons D8).
     MD_CODE: ROLES["code-text"],
@@ -251,6 +260,13 @@ class TuiTerminal:
         terminal's own wrapping from starting a row with foreign text; on this screen every
         block is its own region and Textual wraps inside it, so the rows stay whole."""
         return UNCUT
+
+    def layout_columns(self) -> int | None:
+        """The text width inside a foreign block now (reply-rendering D1): what a reply's
+        tables and code blocks are laid out in. Kept by the screen on every resize; read here
+        as one int, so the core never measures a widget."""
+        app = self.app
+        return app.foreign_width if app is not None else None
 
     def attach(self, conversation: Any) -> None:
         """The conversation whose `interrupt` Ctrl+C calls (D8)."""
@@ -761,6 +777,14 @@ class SessionLog(Vertical):
     def __init__(self) -> None:
         super().__init__(classes="session-log")
         self.turns: list[Turn] = []
+
+
+class ConversationPane(VerticalScroll):
+    """The pane of the conversation: on every change of its size the screen measures again
+    the width a reply's tables are laid out in (reply-rendering D1)."""
+
+    def on_resize(self) -> None:
+        self.app.call_after_refresh(self.app._measure)  # type: ignore[attr-defined]
 
 
 class SidePanel(Static):
@@ -1306,13 +1330,16 @@ class HarnessApp(App[int]):
         self._session_key: str | None = None
         self._session_log: SessionLog | None = None
         self.selected: Turn | FoldBlock | None = None
+        # The text width inside a foreign block (reply-rendering D1), measured on every resize;
+        # until the first, that of an 80-column terminal.
+        self.foreign_width = 80 - 2 * spacing.EDGE - FOREIGN_FRAME
         terminal.app = self
 
     # -- layout -----------------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="main"):
-            yield VerticalScroll(id="log", can_focus=False)
+            yield ConversationPane(id="log", can_focus=False)
             yield SidePanel()
         yield Static(plain(FOOTER), markup=False, id="footer")
         yield PromptInput()
@@ -1380,10 +1407,20 @@ class HarnessApp(App[int]):
         conversation.mount(self._session_log)
         conversation.mount(Static(plain(""), markup=False, id="working"))
         log.anchor()  # the end stays in view as blocks arrive (collapsible-blocks D3)
+        self.call_after_refresh(self._measure)
+        # The footer says how much is below whenever the pane moves (reply-rendering D6).
+        self.watch(log, "scroll_y", lambda: self._show_below(), init=False)
+        self.watch(log, "max_scroll_y", lambda: self._show_below(), init=False)
         self.query_one(PromptInput).focus()
         self.set_interval(TICK_S, self._tick)
         self.core = threading.Thread(target=self._run_core, name="conversation", daemon=True)
         self.core.start()
+
+    def _measure(self) -> None:
+        """The text width inside a foreign block, for the tables of the next reply."""
+        width = self._log().scrollable_content_region.width
+        if width:
+            self.foreign_width = max(MIN_COLUMNS, width - FOREIGN_FRAME)
 
     def _run_core(self) -> None:
         code = 1
@@ -1418,10 +1455,36 @@ class HarnessApp(App[int]):
         if force:  # checked first: a line sent while browsing goes to the end too
             log.anchor()
             return
-        if self.query_one(PromptInput).browsing:
-            return
-        if log.scroll_y >= log.max_scroll_y - 1:
+        if self._following():
             log.anchor()
+
+    def _following(self) -> bool:
+        """Whether new output may move the pane: the person is not browsing the blocks and
+        has not scrolled up to read."""
+        log = self._log()
+        return not self.query_one(PromptInput).browsing and log.scroll_y >= log.max_scroll_y - 1
+
+    def _show_start(self, block: FoldBlock) -> None:
+        """A reply just laid out: whole in the pane, the end in view as before; taller than
+        the pane, its first line at the top and the footer says how much is below."""
+        log = self._log()
+        if not block.is_attached:
+            return
+        if block.outer_size.height + spacing.ROW <= log.size.height:
+            log.anchor()
+            log.scroll_end(animate=False, immediate=True)
+        else:
+            log.scroll_to_widget(block, animate=False, top=True, immediate=True)
+        self._show_below()
+
+    def _show_below(self, browsing: bool | None = None) -> None:
+        """The footer, with how many rows of the pane are below what it shows."""
+        log = self._log()
+        below = max(0, round(log.max_scroll_y - log.scroll_y))
+        if browsing is None:
+            browsing = self.query_one(PromptInput).browsing
+        words = BROWSE_FOOTER if browsing else FOOTER
+        self.query_one("#footer", Static).update(plain((below_hint(below) if below else "") + words))
 
     @property
     def session_log(self) -> SessionLog:
@@ -1449,7 +1512,7 @@ class HarnessApp(App[int]):
         """The screen rows a row takes in a block of the pane as wide as it is now (a foreign
         block loses its border and padding): Textual's own wrapping of the row's text."""
         width = max(MIN_COLUMNS, (self._log().scrollable_content_region.width
-                                  or self.size.width or 80) - (4 if foreign else 0))
+                                  or self.size.width or 80) - (FOREIGN_FRAME if foreign else 0))
 
         def height_of(row: Row) -> int:
             return max(1, len(Content(body_text(row)).wrap(width)))
@@ -1475,8 +1538,16 @@ class HarnessApp(App[int]):
         if foreign:
             command = turn.line.split()[0] if turn.line and turn.line.split() else None
             kind = category("", foreign=True, label=label, command=command)
-            turn.add(ForeignBlock(rows, label or FOREIGN_TITLE, kind=kind,
-                                  preview=self._preview(), height_of=self._height_of(True)))
+            block = ForeignBlock(rows, label or FOREIGN_TITLE, kind=kind,
+                                 preview=self._preview(), height_of=self._height_of(True))
+            following = self._following()
+            turn.add(block)
+            if kind == REPLY and following:
+                # The pane stops following the end until the reply is laid out: a reply taller
+                # than the pane is shown from its start (reply-rendering D6).
+                self._log().release_anchor()
+                self.call_after_refresh(self._show_start, block)
+                return
         else:
             first = row_text(rows[0]) if rows else ""
             kind = category(first, foreign=False, label=None)
@@ -1694,7 +1765,7 @@ class HarnessApp(App[int]):
             self.set_all(bool(args[0]))
 
     def browsing_changed(self, browsing: bool) -> None:
-        self.query_one("#footer", Static).update(plain(BROWSE_FOOTER if browsing else FOOTER))
+        self._show_below(browsing)
         if not browsing:
             self._select(None)
 
