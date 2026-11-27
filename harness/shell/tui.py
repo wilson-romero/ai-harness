@@ -822,6 +822,22 @@ class SuggestionList(OptionList, can_focus=False):
     moves to one, so Enter sends what is typed unless a row was chosen. Rows are Content, never
     markup; each one is a candidate as it would be typed and the harness's words about it."""
 
+    # Its own style, apart from the app's: plain cell counts. `margin-bottom` is the rows the
+    # input takes under it (its 3 rows and the 1 row of margin under them), not a gap; the
+    # 8 rows of candidates are Codex's popup height (design D2).
+    DEFAULT_CSS = """
+    SuggestionList {
+        dock: bottom;
+        margin: 0 0 4 0;
+        height: auto;
+        max-height: 10;
+        display: none;
+        border: round $accent;
+        background: $surface;
+        border-title-color: $text-muted;
+    }
+    """
+
     def __init__(self) -> None:
         super().__init__(id="suggestions", markup=False)
         self.items: list[Item] = []
@@ -1447,9 +1463,6 @@ class HarnessApp(App[int]):
     #log { width: 1fr; padding: 0 1; scrollbar-size-vertical: 1; }
     #side { width: %d; padding: 0 1; border-left: solid $panel-lighten-2; }
     #prompt { dock: bottom; margin: 0 0 1 0; border-subtitle-color: $text-muted; }
-    #suggestions { dock: bottom; margin: 0 0 4 0; height: auto; max-height: 10;
-                   display: none; border: round $accent; background: $surface;
-                   border-title-color: $text-muted; }
     #footer { dock: bottom; height: 1; background: $panel; color: $text-muted; padding: 0 1; }
     #working { height: auto; color: $text-muted; display: none; }
     #conversation { height: auto; min-height: 100%%; }

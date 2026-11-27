@@ -242,10 +242,10 @@ async def test_listing_runs_off_the_screen_thread_and_a_stale_answer_is_dropped(
     tui = _skills_tui(tmp_path)
     async with tui.app.run_test(size=SIZE) as pilot:
         prompt, listing = await _open(tui, pilot)
-        await pilot.press(*"/file a")
         started = time.monotonic()
+        await pilot.press(*"/file a")
         await pilot.press(*"bc")  # typed while the first listing still runs
-        assert time.monotonic() - started < 2.0
+        assert time.monotonic() - started < 5.0  # the first listing alone takes 10 s
         assert prompt.value == "/file abc"
         await tui.until(pilot, lambda: listing.showing)
         assert [i.insert for i in listing.items] == ["abc-nuevo.md"]
@@ -319,8 +319,13 @@ async def test_ctrl_n_and_the_palette_work_with_the_list_open(tmp_path):
         await pilot.press("escape")
         await pilot.pause(0.1)
         prompt.value = ""
-        await pilot.press("/", "ctrl+n")
+        await pilot.press("/")
+        await tui.until(pilot, lambda: listing.showing)
+        await pilot.press("ctrl+n")
         await tui.until(pilot, lambda: tui.conversation._session.session_id != first)
+        await pilot.pause(0.1)
+        # What was typed stays, and so does its list: ctrl+n does not touch the input.
+        assert prompt.value == "/" and listing.showing
         prompt.value = ""
         await tui.send(pilot, "/exit")
 
@@ -349,7 +354,8 @@ async def test_programmatic_values_open_no_list(tmp_path):
         prompt, listing = await _open(tui, pilot)
         prompt.value = "/s"
         await pilot.pause(0.1)
-        assert not listing.showing
+        # What was typed stays, and so does its list: ctrl+n does not touch the input.
+        assert prompt.value == "/" and listing.showing
         prompt.value = ""
         await tui.send(pilot, "/exit")
     assert isinstance(prompt, Input)

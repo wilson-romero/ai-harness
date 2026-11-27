@@ -282,8 +282,9 @@ def test_the_approval_buttons_at_a_real_terminal(data_dir, tmp_path):
 
 def test_short_commands_and_completion_at_a_real_terminal(data_dir, tmp_path):
     """command-completion: the owner's two lines, typed short with Tab at the real program and
-    the Mock. Each Tab is waited for on the screen before the next key: completion never sends,
-    and what runs is shown in full (`running: ...`) before it runs."""
+    the Mock. Each Tab goes in the same write as the keys before it, as a fast typist's terminal
+    sends them (task 4.8). Completion never sends, and what runs is shown in full
+    (`running: ...`) before it runs."""
     import shutil
 
     vault = tmp_path / "vault"
