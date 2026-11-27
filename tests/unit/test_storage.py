@@ -52,7 +52,7 @@ def test_migrating_twice_changes_nothing(data_dir):
     assert migrate(second) == []
     after = second.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
     assert [tuple(r) for r in after] == [tuple(r) for r in before]
-    assert [r["version"] for r in after] == [1, 2, 3, 4, 5, 6, 7]
+    assert [r["version"] for r in after] == [1, 2, 3, 4, 5, 6, 7, 8]
     assert repo.get_session(second, session.session_id) == session
     second.close()
 
@@ -246,7 +246,7 @@ def test_migration_007_unbinds_every_session_of_a_shared_reference(data_dir, tmp
         repo.bind_remote_ref(conn, a.session_id, "conv-shared")
         repo.bind_remote_ref(conn, b.session_id, "conv-shared")  # allowed before 007
         repo.bind_remote_ref(conn, c.session_id, "conv-own")
-    assert migrate(conn) == [7]
+    assert migrate(conn) == [7, 8]  # and 008 (response-mode), which keeps every reference
     refs = {r["name"]: r["remote_ref"] for r in conn.execute("SELECT name, remote_ref FROM sessions")}
     assert refs == {"A": None, "B": None, "C": "conv-own"}
     audited = conn.execute(

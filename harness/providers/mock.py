@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from harness.core.contracts import LLMRequest
+from harness.core.response_mode import ResponseMode
 from harness.core.errors import InvalidInput
 from harness.core.strict_json import loads_strict, read_text_limited
 from harness.providers.base import ProviderError
@@ -55,9 +56,22 @@ class MockProvider:
         # Alphabetical order: the first key contained in the prompt wins, whatever the file.
         self._responses = sorted((responses or {}).items())
         self.calls = 0
+        self.modes: list[ResponseMode] = []  # the mode of every question received
 
-    async def ask(self, request: LLMRequest, on_sent: Callable[[], None]) -> str:
+    def check_mode(self, mode: ResponseMode) -> None:
+        """The Mock sets every mode (response-mode D1)."""
+
+    async def ask(
+        self,
+        request: LLMRequest,
+        on_sent: Callable[[], None],
+        *,
+        on_mode: Callable[[ResponseMode], None] | None = None,
+    ) -> str:
         self.calls += 1
+        self.modes.append(request.mode)
+        if on_mode is not None:
+            on_mode(request.mode)  # "set" before sending, as a page would confirm it
         if self._behavior == "timeout_before_send":
             await asyncio.sleep(_FOREVER_S)
         on_sent()
@@ -71,4 +85,7 @@ class MockProvider:
             if key in request.prompt:
                 return answer
         digest = hashlib.sha256(f"{request.session_id}\n{request.prompt}".encode()).hexdigest()
-        return f"[mock {digest[:12]}] Received {len(request.prompt)} characters."
+        # The answers of the default mode stay as they always were; the others say their mode,
+        # so that a test sees the mode reached the provider.
+        mode = "" if request.mode is ResponseMode.AUTO else f" in mode {request.mode}"
+        return f"[mock {digest[:12]}] Received {len(request.prompt)} characters{mode}."

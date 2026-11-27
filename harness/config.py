@@ -10,6 +10,10 @@ from urllib.parse import urlsplit
 from harness.core.answer_style import answer_notice
 from harness.core.errors import InvalidInput
 
+# A deep answer reasons before it writes: without a measured duration (the probe sends nothing
+# in deep mode), it gets three times the normal deadline by default (response-mode D6).
+DEEP_TIMEOUT_FACTOR = 3.0
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -30,15 +34,34 @@ class Settings:
     # The concise-answer notice of plain questions with `HARNESS_CONCISE_ANSWERS=on`; None
     # (the default) otherwise.
     answer_notice: str | None = None
+    # The deadline of a question in `deep` mode (response-mode D6); None: three times the
+    # request timeout.
+    deep_timeout_s: float | None = None
+
+    @property
+    def deep_request_timeout_s(self) -> float:
+        if self.deep_timeout_s is None:
+            return DEEP_TIMEOUT_FACTOR * self.request_timeout_s
+        return self.deep_timeout_s
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
         data_dir = Path(env.get("HARNESS_DATA_DIR") or "./data")
         profile = env.get("HARNESS_EDGE_PROFILE")
+        request_timeout_s = _number(env, "HARNESS_REQUEST_TIMEOUT_S", 120.0)
+        deep_timeout_s: float | None = None
+        if env.get("HARNESS_DEEP_REQUEST_TIMEOUT_S"):
+            deep_timeout_s = _number(env, "HARNESS_DEEP_REQUEST_TIMEOUT_S", 0.0)
+            if deep_timeout_s < request_timeout_s:
+                raise InvalidInput(
+                    "HARNESS_DEEP_REQUEST_TIMEOUT_S must not be lower than "
+                    "HARNESS_REQUEST_TIMEOUT_S: a deep answer never gets less time"
+                )
         return cls(
             data_dir=data_dir,
             provider=env.get("HARNESS_PROVIDER") or "mock",
-            request_timeout_s=_number(env, "HARNESS_REQUEST_TIMEOUT_S", 120.0),
+            request_timeout_s=request_timeout_s,
+            deep_timeout_s=deep_timeout_s,
             mock_behavior=env.get("HARNESS_MOCK_BEHAVIOR") or "ok",
             mock_delay_ms=int(_number(env, "HARNESS_MOCK_DELAY_MS", 0)),
             mock_responses=(env.get("HARNESS_MOCK_RESPONSES") or "").strip(),

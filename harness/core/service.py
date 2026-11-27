@@ -31,10 +31,12 @@ from harness.core.errors import (
 )
 from harness.memory.context import ProjectContext, compose_prompt
 from harness.memory.paths import validate_project_slug
+from harness.core.response_mode import ResponseMode, parse_mode
 from harness.text.safe_text import safe_foreign_line
 from harness.providers.base import (
     AuthenticationRequired,
     LLMProvider,
+    ModeUnavailable,
     PromptTooLong,
     ProviderError,
     ProviderUncertain,
@@ -77,10 +79,27 @@ def _own_share(sent_text: str, prompt: str, context: ProjectContext | None,
 
 def accepts_events(provider: LLMProvider) -> bool:
     """Whether the provider's `ask` takes the optional `events` argument (design D5)."""
+    return _accepts(provider, "events")
+
+
+def _accepts(provider: LLMProvider, keyword: str) -> bool:
     try:
-        return "events" in inspect.signature(provider.ask).parameters
+        return keyword in inspect.signature(provider.ask).parameters
     except TypeError, ValueError:
         return False
+
+
+def check_mode(provider: LLMProvider, mode: ResponseMode) -> None:
+    """Whether the provider can set `mode`, without effects (response-mode D1): `auto` always;
+    the others only through the provider's own `check_mode`."""
+    if mode is ResponseMode.AUTO:
+        return
+    check = getattr(provider, "check_mode", None)
+    if check is None:
+        raise ModeUnavailable(
+            f"provider {provider.name!r} has only the automatic mode; it cannot set {mode}"
+        )
+    check(mode)
 
 
 def parse_session_id(raw: str) -> UUID:
@@ -104,8 +123,12 @@ class SessionService:
         timeout_s: float,
         *,
         answer_notice: str | None = None,
+        deep_timeout_s: float | None = None,
     ) -> None:
         self._conn = conn
+        # The deadline of a question in `deep` mode without one of its own (response-mode D6).
+        self._deep_timeout_s = timeout_s if deep_timeout_s is None else max(deep_timeout_s,
+                                                                            timeout_s)
         # Sent first with every plain question (`ask`, `ask_taken`), never with a Skill step
         # (prompt-economy D3). None: no notice.
         self._answer_notice = answer_notice
@@ -244,10 +267,17 @@ class SessionService:
         )
 
     async def ask(
-        self, raw_session_id: str, prompt: str, context: ProjectContext | None = None
+        self,
+        raw_session_id: str,
+        prompt: str,
+        context: ProjectContext | None = None,
+        *,
+        mode: str | None = None,
     ) -> LLMResponse:
-        """Ask a question. With `context`, the memory block goes before it but is never stored."""
+        """Ask a question. With `context`, the memory block goes before it but is never stored.
+        With `mode`, the session's response mode is set first and kept (response-mode D10)."""
         session = self._require_session(raw_session_id)
+        chosen = parse_mode(mode) if mode is not None else None
         if not prompt.strip():
             raise InvalidInput("the prompt must not be empty")
         if not is_valid_unicode(prompt):
@@ -260,6 +290,8 @@ class SessionService:
         if not lock.acquire():
             raise SessionBusy(f"session {session.session_id} already has a question in progress")
         try:
+            if chosen is not None:
+                self.set_mode(session.session_id, provider, chosen)
             return await self._ask_locked(session.session_id, provider, prompt, context,
                                           notice=self._answer_notice)
         finally:
@@ -268,6 +300,46 @@ class SessionService:
     @property
     def timeout_s(self) -> float:
         return self._timeout_s
+
+    @property
+    def longest_timeout_s(self) -> float:
+        """The longest deadline a question may get: the one of `deep` (response-mode D6)."""
+        return max(self._timeout_s, self._deep_timeout_s)
+
+    def set_mode(
+        self, session_id: UUID, provider: LLMProvider, raw_mode: str | ResponseMode
+    ) -> ResponseMode:
+        """Set the session's response mode, for a caller that holds the session or is about to
+        ask in it (response-mode D1, D5). It only writes the session row and an audit event:
+        nothing is sent and the provider opens nothing. A mode the provider cannot set is
+        refused and nothing changes."""
+        mode = raw_mode if isinstance(raw_mode, ResponseMode) else parse_mode(raw_mode)
+        session = self._require_session(str(session_id))
+        check_mode(provider, mode)
+        with transaction(self._conn):
+            repo.set_session_mode(self._conn, session.session_id, mode)
+            repo.insert_audit(
+                self._conn,
+                event_type="session.mode",
+                outcome=mode.value,
+                actor="cli",
+                session_id=session.session_id,
+            )
+        return mode
+
+    def last_request_modes(
+        self, session_id: UUID
+    ) -> tuple[ResponseMode | None, ResponseMode | None] | None:
+        """(requested, confirmed) mode of the session's last request, or None without one."""
+        requests = repo.session_requests(self._conn, session_id)
+        if not requests:
+            return None
+        return repo.request_modes(self._conn, session_id).get(requests[-1][0])
+
+    def request_modes(
+        self, session: Session
+    ) -> dict[str, tuple[ResponseMode | None, ResponseMode | None]]:
+        return repo.request_modes(self._conn, session.session_id)
 
     def requests(self, session: Session) -> list[tuple[str, str, str]]:
         return repo.session_requests(self._conn, session.session_id)
@@ -348,7 +420,6 @@ class SessionService:
         timeout_s: float | None = None,
         notice: str | None = None,
     ) -> LLMResponse:
-        deadline_s = self._timeout_s if timeout_s is None else timeout_s
         # Read under the session lock: nobody else can change the session until it is released.
         session = repo.get_session(self._conn, session_id)
         assert session is not None
@@ -357,6 +428,11 @@ class SessionService:
                 f"session {session_id} is closed: its remote conversation could not be found "
                 "again. Create a new session"
             )
+        mode = session.response_mode
+        if timeout_s is not None:
+            deadline_s = timeout_s  # a skill step keeps its own (response-mode D6)
+        else:
+            deadline_s = self._deep_timeout_s if mode is ResponseMode.DEEP else self._timeout_s
         # The provider receives the answer notice, the memory block and the question; only the
         # question is ever stored, and only when the provider's content is synthetic (D7). The
         # notice is inside the request's prompt, so the provider's size check counts it.
@@ -368,7 +444,9 @@ class SessionService:
                 check(sent_text)  # configuration, measurement, size: before anything is recorded
             except PromptTooLong as exc:
                 raise PromptTooLong(f"{exc}. {_own_share(sent_text, prompt, context, notice)}") from None
+        check_mode(provider, mode)  # a mode the provider cannot set: refused, nothing recorded
         with_events = accepts_events(provider)
+        with_modes = _accepts(provider, "on_mode")
         warnings: list[str] = []
         cut: list[bool] = []
         if session.status is SessionStatus.UNCERTAIN:
@@ -388,6 +466,7 @@ class SessionService:
             prompt=sent_text,
             timeout_s=deadline_s,
             remote_ref=session.remote_ref,
+            mode=mode,
             # Turns the remote conversation must show: those completed in it (none without one).
             completed_turns=(repo.completed_in_remote(self._conn, session_id)
                              if session.remote_ref is not None
@@ -396,7 +475,7 @@ class SessionService:
         store_content = provider.synthetic_content
         question = prompt if stored_text is None else stored_text
         with transaction(self._conn):
-            repo.insert_request(self._conn, request.request_id, session_id)
+            repo.insert_request(self._conn, request.request_id, session_id, mode)
             repo.insert_message(
                 self._conn,
                 session_id=session_id,
@@ -436,6 +515,26 @@ class SessionService:
                 self._audit(request, RequestStatus.RUNNING)
 
         provider_name = provider.name
+        confirmed: list[ResponseMode] = []
+
+        def on_mode(reported: object) -> None:
+            """The mode the provider confirmed, stored at once (response-mode D5). A later
+            report is the page changing mode during the answer (D4)."""
+            try:
+                value = ResponseMode(reported)
+            except ValueError:
+                warnings.append(
+                    "the provider reported a response mode of an unexpected shape; it was not stored"
+                )
+                return
+            if confirmed and value is not confirmed[-1]:
+                warnings.append(
+                    f"the page switched the response mode to {value} during the answer (this "
+                    f"session asked for {mode}); the record says {value}"
+                )
+            confirmed.append(value)
+            with transaction(self._conn):
+                repo.set_confirmed_mode(self._conn, request.request_id, value)
 
         class Events:
             """What the provider reports while it works, stored at once in its own transaction."""
@@ -537,10 +636,12 @@ class SessionService:
 
         try:
             async with asyncio.timeout(deadline_s):
+                extra: dict[str, object] = {}
                 if with_events:
-                    text = await provider.ask(request, on_sent, events=Events())  # type: ignore[call-arg]
-                else:
-                    text = await provider.ask(request, on_sent)
+                    extra["events"] = Events()
+                if with_modes:
+                    extra["on_mode"] = on_mode
+                text = await provider.ask(request, on_sent, **extra)  # type: ignore[call-arg]
         except TimeoutError as exc:
             if sent:
                 return finish(
@@ -597,6 +698,8 @@ class SessionService:
                 error_code="invalid_text",
                 detail="the provider's answer is not valid Unicode text; it was not kept",
             )
+        if with_modes and mode is not ResponseMode.AUTO and not confirmed:
+            warnings.append(f"the provider did not confirm the response mode {mode}")
         return finish(RequestStatus.COMPLETED, text=text)
 
     def _audit(self, request: LLMRequest, status: RequestStatus) -> None:
