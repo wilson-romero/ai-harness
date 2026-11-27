@@ -1,8 +1,9 @@
+
 # Estudio: ¿existen sistemas de diseño para interfaces de terminal y cuál adoptar?
 
 Fecha de consulta: 2026-11-27. Repo leído en `origin/develop`: `harness/shell/tui.py`, `harness/shell/render.py` y `README.md` (sección «Aspecto»). Textual leído en el código instalado, la versión 8.2.8 que fija `uv.lock`. Las capturas son de la pantalla real con el Mock y una sesión sintética, tomadas con el `Pilot` de Textual. Este estudio no cambia código del producto.
 
-Etiquetas: **[V]** verificado aquí, en el código instalado o ejecutando Textual 8.2.8 · **[C]** citado de la fuente primaria (enlace en §9) · **[I]** inferencia u observación de uso, sin fuente que lo confirme.
+Etiquetas: **[V]** verificado aquí, en el código instalado o ejecutando Textual 8.2.8 · **[C]** citado de la fuente primaria (enlace en §11) · **[I]** inferencia u observación de uso, sin fuente que lo confirme.
 
 ## Resumen
 
@@ -15,7 +16,7 @@ Etiquetas: **[V]** verificado aquí, en el código instalado o ejecutando Textua
 7. **[V]** A 80×24 el panel lateral ocupa 34 de 80 columnas (42 %), la conversación se queda en 46 y el identificador de sesión se corta a media palabra. La entrada, su margen y el pie se comen 5 de las 24 filas.
 8. **Recomendación.** Adoptar tal cual los tokens de color de Textual (sin paleta propia) y añadir encima una capa pequeña de la casa: una escala de espaciado (columnas 0/1/2/4/8, filas 0/1/2, regla 1 fila = 2 columnas), alias semánticos de color hacia variables del tema, una lista cerrada de estilos para texto ajeno disjunta de los de chrome y dos *breakpoints*. No añadir ninguna dependencia ni adoptar una norma externa entera.
 9. **Primer corte:** el CSS en tokens, `STYLES` sobre variables del tema (corrige la colisión del punto 5), un hueco uniforme de 1 fila entre bloques, el panel lateral oculto por debajo de 100 columnas y pruebas con `Pilot` a 80×24 y 120×40 más una prueba de que ningún estilo de texto ajeno usa fondo, `reverse` ni colores de estado.
-10. **Fuera:** paleta hexadecimal propia, iconos Nerd Font o emoji, degradados y animaciones, trucos de media línea con `▀▄` fuera de los bordes de Textual y selector de temas mientras no haya decisión del dueño (§8).
+10. **Fuera:** paleta hexadecimal propia, iconos Nerd Font o emoji, degradados y animaciones, trucos de media línea con `▀▄` fuera de los bordes de Textual y selector de temas mientras no haya decisión del dueño (§8, §9).
 
 ## 1. Qué existe y qué especifica cada uno
 
@@ -280,25 +281,35 @@ Presupuesto a 80×24: hoy la conversación tiene 19 filas. Con `-short` serían 
 
 **Fuera de alcance:** iconos Nerd Font y emoji, degradados y *shimmer*, animaciones, estados `hover` de ratón, media línea con `▀▄` fuera de los bordes de Textual, colores por subagente y un modo para lector de pantalla distinto del modo plano (que ya cumple ese papel).
 
-## 8. Decisiones abiertas para el dueño
+## 8. Decisiones del dueño (2026-11-27)
+
+1. **Adoptado:** las variables de tema de Textual para todo color (alias semánticos, ningún hexadecimal de la casa), la escala de espaciado de la casa (columnas 0/1/2/4/8, filas 0/1/2, 1 fila = 2 columnas) y estados que no dependen solo del color. Sin dependencias nuevas.
+2. **D1, panel lateral:** oculto por debajo de 100 columnas; sus datos siguen disponibles con `/status`.
+3. **D2, mensajes de la persona:** barra a la izquierda más un fondo suave propio, con una fila de separación.
+4. **Ya hecho en un primer corte** (rama `feature/tui-8pt-grid`, aún sin fusionar): la caja de aprobación sobre la escala. Los dos botones miden 16×3, van separados por 8 columnas y centrados; la caja tiene 2 columnas de relleno; las filas en blanco dependen del alto (ninguna por debajo de 30 filas, una encima de los botones desde 30 y más desde 40). Estados: deshabilitado tachado, habilitado en negrita y enfocado en negrita con `reverse`. El código en línea del texto ajeno ya no comparte el color de los avisos del harness.
+5. **Orden:** el resto de la interfaz (fase 2) se implementa cuando `feature/collapsible-blocks` esté en `develop`.
+
+D3–D7 siguen abiertas; mientras tanto, la recomendación de la tabla siguiente es el criterio de trabajo.
+
+## 9. Decisiones para el dueño
 
 | # | Decisión | Opciones | Recomiendo |
 |---|---|---|---|
-| D1 | Panel lateral en terminales estrechas | (a) ocultarlo por debajo de 100 columnas; (b) pasarlo a una línea de estado de 1 fila; (c) dejarlo como está | **(a)**, y (b) más adelante si se echa en falta |
-| D2 | Marca del usuario | (a) barra `thick` + fondo `$boost`; (b) solo barra (hoy); (c) prefijo `> ` + fondo, como Codex y Gemini | **(a)** |
+| D1 | Panel lateral en terminales estrechas | (a) ocultarlo por debajo de 100 columnas; (b) pasarlo a una línea de estado de 1 fila; (c) dejarlo como está | **Decidida (2026-11-27): (a)**, con los datos en `/status` |
+| D2 | Marca del usuario | (a) barra `thick` + fondo `$boost`; (b) solo barra (hoy); (c) prefijo `> ` + fondo, como Codex y Gemini | **Decidida (2026-11-27): (a)**, barra y fondo suave propio, una fila de separación |
 | D3 | Color del marco ajeno | (a) `$secondary` (hoy); (b) neutro (`$foreground-muted`), para que el color quede libre para los estados; (c) `$primary` | **(b)**: el marco es estructura y su forma ya basta |
 | D4 | Entrada a 24 filas | (a) `compact` por debajo de 30 filas; (b) siempre `tall` | **(a)** |
 | D5 | Ancho máximo de prosa | (a) sin límite; (b) 100 columnas en `-wide` | **(a)** en S1; revisar con uso real |
 | D6 | Tema | (a) fijo `textual-dark` (hoy); (b) seguir la terminal (`textual-light` en fondo claro); (c) selector en la paleta; (d) `ansi-dark`/`ansi-light` por defecto, que respeta la paleta del usuario | **(a)** en S1-S3 y decidir (b) o (d) después; (c) exige persistir una preferencia |
 | D7 | «El chrome se distingue por el fondo» | (a) el fondo es refuerzo y la forma es la marca; (b) el fondo como marca única | **(a)**: en los temas ANSI el fondo de chrome es transparente |
 
-## 9. Verificado frente a supuesto
+## 10. Verificado frente a supuesto
 
 - **Verificado [V]:** variables, temas, CSS por defecto de `Button`, `Input`, `Footer` y `Collapsible`, caracteres de borde, pseudoclases, *breakpoints*, variables CSS de espaciado, alias y estilos de `Content` con `$variables`, todo en Textual 8.2.8 instalado; colores resueltos de `textual-dark`, `textual-light` y `ansi-dark` ejecutando Textual; la captura a 80×24; el código de Codex (`styles.md`, `style.rs`, `history_cell/*.rs`), OpenCode (`packages/tui/src/routes/session/index.tsx`, `ui/border.ts`), Gemini CLI (`UserMessage.tsx`, `GeminiMessage.tsx`, `HalfLinePaddedBox.tsx`), Toad (`toad.tcss`, `screens/main.tcss`), lazygit (`docs/Config.md`), btop (`themes/nord.theme`) y k9s (`skins/nord.yaml`) leídos en sus ramas principales.
-- **Citado [C]:** páginas de documentación (§10).
+- **Citado [C]:** páginas de documentación (§11).
 - **Supuesto [I] o sin confirmar:** las viñetas `⏺`/`⎿` y el prefijo `>` de Claude Code (es código cerrado; los conozco por uso, no por documentación); el tamaño de celda en píxeles; que conhost no muestre la cursiva ni los bordes `tall`/`round` con su fuente por defecto; la tabla de colores ANSI de Primer (es una imagen); el contenido del manual de CLI de PatternFly (404); la madurez de Monospace Design TUI más allá de lo que muestra GitHub.
 
-## 10. Fuentes
+## 11. Fuentes
 
 - Textual, temas y variables: <https://textual.textualize.io/guide/design/> · unidades: <https://textual.textualize.io/css_types/scalar/> · código: `textual/design.py`, `textual/theme.py`, `textual/_border.py`, `textual/app.py` (`HORIZONTAL_BREAKPOINTS`, `_PSEUDO_CLASSES`), `textual/widgets/_button.py`, `_input.py`, `_footer.py`, `_collapsible.py` (8.2.8).
 - Lip Gloss: <https://github.com/charmbracelet/lipgloss> · Huh: <https://github.com/charmbracelet/huh>
