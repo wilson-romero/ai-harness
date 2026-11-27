@@ -41,6 +41,7 @@ HARNESS_VARS = [
     "HARNESS_SKILLS_DIR",
     "HARNESS_APPROVAL_TTL_S",
     "HARNESS_MCP_CONFIG",
+    "HARNESS_PLAIN",
     # Set in every MCP server the harness starts; a test run inside one would be refused.
     "AI_HARNESS_MCP_CHILD",
     # No longer read by the harness; cleared so a developer's shell cannot change a test.
