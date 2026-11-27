@@ -74,15 +74,17 @@ Al entrar se ve el proveedor, la sesión y el proyecto. Una línea normal es una
 |---|---|
 | `/help` | Lista los comandos. |
 | `/status` | Sesión, proyecto, proveedor, última solicitud y adjunto pendiente. |
-| `/new [--project SLUG] [NOMBRE]` | Pasa a una sesión nueva; la anterior queda libre y sin cambios. |
+| `/new [--project SLUG] [NOMBRE]` | Pasa a una sesión nueva; la anterior queda libre y sin cambios. Forma corta: `/new SLUG` si `SLUG` es una carpeta de `projects/` del vault. |
 | `/sessions` | Lista numerada de sesiones. |
-| `/resume N` | Pasa a la sesión número N de la última `/sessions` (un número, no un identificador). |
+| `/resume N` o `/resume ID` | Pasa a la sesión número N de la última `/sessions`, o a la sesión con ese identificador (entero, o sus primeros 8 caracteres o más si solo una sesión empieza así). |
 | `/history` | Historial de esta sesión, y de ninguna otra. |
 | `/memory TÉRMINOS` | Lo mismo que `memory search` (dentro del proyecto de la sesión, si lo tiene). |
 | `/context` | Lo mismo que `memory context` para el proyecto de la sesión. |
-| `/skill NOMBRE [CLAVE=VALOR…] [--file CLAVE=RUTA…]` | Ejecuta un Skill en esta sesión, como `skill run`. Su aprobación se pide ahí mismo, con el aviso de siempre. |
+| `/skill NOMBRE [CLAVE=VALOR…] [--file CLAVE=RUTA…]` | Ejecuta un Skill en esta sesión, como `skill run`, con el proyecto de la sesión. Su aprobación se pide ahí mismo, con el aviso de siempre. Forma corta: `/skill NOMBRE RUTA` si el Skill declara una sola entrada. |
 | `/file RUTA` | Adjunta un fichero de texto (hasta 64 KiB, UTF-8, un fichero normal: no un enlace, una tubería ni un dispositivo) a la **siguiente** pregunta. Va marcado como datos y no se guarda nunca. |
 | `/exit` | Sale. El fin de entrada (Ctrl+D; en Windows, Ctrl+Z e Intro) también. |
+
+**Formas cortas** (`command-completion`). Las formas largas siguen igual. Basta el principio del nombre de un comando si solo uno empieza así (`/sk` es `/skill`, `/c` es `/context`); si hay más de uno (`/s`), es un error que los nombra y no se ejecuta nada. `/new demo-alpha` es `/new --project demo-alpha` cuando `demo-alpha` es una carpeta de `projects/`; si no lo es, sigue siendo el nombre de la sesión. `/skill architecture-memory RUTA` es `/skill architecture-memory --file source=RUTA`, porque ese Skill declara una sola entrada (`source`). `/file` y `--file` leen `~/…` de la carpeta personal. Antes de ejecutar un comando escrito en forma corta, la conversación muestra el comando entero (`running: /skill architecture-memory --file source=…`); en la pantalla completa, además, se ve en el borde de la entrada mientras se escribe. Un comando escrito entero no se repite.
 
 - **Ctrl+C** durante una pregunta la interrumpe: queda `uncertain` si el prompt ya había salido, `failed` si no, nunca se reenvía y la conversación sigue. Ctrl+C mientras se espera una línea solo recuerda cómo salir. Ctrl+C durante `/skill` lo detiene: si el paso del modelo estaba en curso, queda `uncertain` (no se reenvía) y la conversación escribe los dos comandos que lo continúan o lo cancelan, que se usan tras dejar la sesión. Ctrl+C en el aviso de aprobación lo deja sin decidir: no se aplica nada. Ctrl+C mientras el proveedor abre sus recursos, al entrar, termina la conversación (código 130) sin preguntar nada; mientras los cierra, al salir, deja de esperar y avisa de que algo puede haber quedado abierto.
 - **Lo que se escribe mientras nadie lee se queda en la terminal** y es la primera línea que recibe la lectura siguiente, también el aviso de aprobación. No puede aprobar (el código sale de un hash que aún no se había mostrado). Tampoco rechaza sola: en la conversación, tras `n` el aviso pide la palabra `reject` completa, y cualquier otra respuesta deja la aprobación pendiente (sin cancelar la ejecución; se continúa con `skill resume` tras dejar la sesión) y no se envía ni se ejecuta. En texto plano (`--plain`), un pegado que contenga `n` y `reject` rechaza. En la pantalla completa, la caja de aprobación se decide con botones que no tienen el foco al abrirse y están deshabilitados el primer medio segundo, y lo escrito mientras el núcleo trabaja no se envía. `skill run` desde la línea de órdenes sigue rechazando con `n`.
@@ -164,7 +166,34 @@ En una consola, la conversación ocupa la pantalla completa ([Textual](https://t
    up/down move  enter open/close  +/- all  end latest  esc back to typing
   ```
 - **Panel:** sesión (nombre e identificador completo), proyecto, proveedor, peticiones enviadas en esta sesión, estado de la última y las notas de memoria que llevó la última pregunta. Sale solo del estado del harness y siempre describe la sesión tomada.
-- **Teclas:** `ctrl+p` abre la paleta de órdenes (solo órdenes del harness: estado, sesión nueva, cambiar de sesión, historial, contexto, elegir Skill, adjuntar fichero, buscar en la memoria…). «Switch session...» lista las sesiones y elige con el teclado; «Choose a skill...» rellena `/skill NOMBRE `; «Attach a file...» lista los ficheros de la carpeta de trabajo. `ctrl+n` sesión nueva. Flechas arriba y abajo: lo escrito en esta ejecución (solo en memoria); `Esc` cambia las flechas a recorrer los bloques. Tab completa los comandos `/`. `ctrl+c` interrumpe la pregunta en curso; sin nada en curso no sale. `ctrl+q`, `ctrl+d` con la entrada vacía o `/exit` salen: se cierra el proveedor y la terminal vuelve a como estaba.
+- **Teclas:** `ctrl+p` abre la paleta de órdenes (solo órdenes del harness: estado, sesión nueva, cambiar de sesión, historial, contexto, elegir Skill, adjuntar fichero, buscar en la memoria…). «Switch session...» lista las sesiones y elige con el teclado; «Choose a skill...» rellena `/skill NOMBRE `; «Attach a file...» lista los ficheros de la carpeta de trabajo. `ctrl+n` sesión nueva. Flechas arriba y abajo: lo escrito en esta ejecución (solo en memoria); `Esc` cambia las flechas a recorrer los bloques. Tab completa (ver «Completar»). `ctrl+c` interrumpe la pregunta en curso; sin nada en curso no sale. `ctrl+q`, `ctrl+d` con la entrada vacía o `/exit` salen: se cierra el proveedor y la terminal vuelve a como estaba.
+- **Completar** (`command-completion`): al escribir `/` aparece debajo de la entrada la lista de comandos con una línea de ayuda; al seguir escribiendo se filtra (primero los que empiezan así, después los que contienen esas letras en orden). Después del comando, la lista ofrece sus opciones (`--project`, `--file`) y sus valores: los proyectos del vault, los Skills válidos con su descripción, las entradas que declara el Skill (`source=`), las sesiones (identificador, proyecto y título) para `/resume`, y rutas para `/file`, `--file NOMBRE=` y la ruta corta de un Skill de una entrada. Las rutas son relativas a la carpeta de trabajo, carpetas primero; `~/` se lista y se queda escrito `~/`; los nombres ocultos solo salen si lo escrito empieza por `.`; un enlace sale como nombre y nunca se sigue. Ninguna fila está elegida al abrirse. Teclas, en este orden:
+  | Tecla | Con la lista abierta | Con la lista cerrada |
+  |---|---|---|
+  | `Tab` | pone la fila elegida, o la primera | pone el primer candidato (si hay) |
+  | `↑`/`↓` | eligen fila | historial de lo escrito |
+  | `Enter` | con una fila elegida, la pone y no envía; sin fila elegida, cierra y envía lo escrito | envía |
+  | `Esc` | cierra la lista | recorre los bloques |
+  | letras, borrar | se escriben y la lista se filtra | se escriben |
+  | `ctrl+c`, `ctrl+q`, `ctrl+n`, `ctrl+p` | lo de siempre (la paleta cierra la lista) | lo de siempre |
+
+  Completar nunca envía ni ejecuta nada y nunca lee el contenido de un fichero, solo nombres. La lista no se abre sobre la caja de aprobación, la paleta ni un selector. Solo se ofrece lo que la conversación lee como ese mismo valor: un nombre con secuencias de escape, caracteres invisibles, cualquier espacio (también el duro o el estrecho de Unicode), comillas, o que empieza por `-`, no se ofrece; los demás se dibujan como caracteres, nunca como estilos. Una carpeta se lista en otro hilo, con un tope de 100 000 entradas y medio segundo; una que no se puede leer no ofrece nada y no da error, y una que nunca contesta no retiene la salida. Así, tras escribir `/` (110 × 32, captura de texto del `Pilot`):
+  ```text
+  ╭─ tab completes · ↑↓ choose · enter takes the chosen · esc closes ──────────────────────────────────────────╮
+  │ /help      this list                                                                                       │
+  │ /status    session, project, provider and last request                                                     │
+  │ /new       switch to a new session                                                                         │
+  │ /sessions  numbered list of sessions                                                                       │
+  │ /resume    switch to session N of the last /sessions list, or to session ID                                │
+  │ /history   the history of this session                                                                  ▁▁ │
+  │ /memory    search the memory (of the session's project, if it has one)                                     │
+  │ /context   the memory block sent with each question of this session                                        │
+  ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  ▊▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▎
+  ▊  /                                                                                                         ▎
+  ▊▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▎
+  ```
+  En texto plano (`--plain`) no hay lista ni Tab (la biblioteca estándar de Python no trae `readline` en Windows), pero las formas cortas son las mismas.
 - **Mientras el proveedor trabaja** se ve `mock: thinking (N s), ctrl+c interrupts` y la entrada no envía (lo escrito se queda en ella).
 - **La aprobación** se abre en su propia caja: la cabecera del motor (destino, hash, caducidad), el contenido propuesto en un recuadro de texto ajeno y, fija abajo, la fila **[Approve] [Reject]** (desde el 2026-11-27, `approval-buttons`). Cómo funciona:
   - El foco empieza en la propuesta, que se recorre con `AvPág`/`RePág`, flechas, `Inicio`, `Fin` o la rueda. La caja dice cuántas líneas quedan debajo o que la propuesta se ha mostrado entera.
@@ -214,12 +243,14 @@ uv run python main.py
 Dentro de la conversación (las líneas son iguales en las dos terminales; en zsh la ruta del fichero va con `/`):
 
 ```text
-/new --project demo-alpha "Demo Corte 9"
+/new demo-alpha "Demo Corte 9"
 ¿Qué decisiones de mensajería tiene el proyecto?
 ¿Qué riesgos ves en esa decisión?
 /context
-/skill architecture-memory --file source=tests\fixtures\skill-inputs\fuente-decision.md
+/skill architecture-memory tests\fixtures\skill-inputs\fuente-decision.md
 ```
+
+Son formas cortas: antes de ejecutarse, la conversación muestra `running: /new --project demo-alpha "Demo Corte 9"` y `running: /skill architecture-memory --file source=…`. En la pantalla completa se escriben aún menos: `/new demo-a` y Tab; `/sk`, Tab, `arch`, Tab, y la ruta con Tab en cada carpeta (`tests/fi` Tab, `sk` Tab, `fu` Tab).
 
 Cada pregunta muestra una línea `context: demo-alpha, 7 note(s) included…` y la respuesta del Mock con `| ` delante. `/context` muestra el bloque de memoria. El Skill abre la caja `Approval requested` con la nota entera, su destino `Decisiones/…` y su hash. Cuando la caja dice «The whole proposal has been shown», Tab y Enter, o un clic en «Approve», la aprueban, y se ve `applied: Decisiones/…md` y `skill: run … is completed`. Con `--plain`, el aviso es de texto y se aprueba escribiendo los 8 primeros caracteres del hash. Después, `/status` (anotar el identificador de la sesión) y `/exit`.
 

@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from harness.shell.completion import CompletionData
     from harness.shell.render import Row
 
 
@@ -83,6 +84,8 @@ class ShellState:
     # shell-tui D4: read in the conversation's own thread only (they query the database).
     panel: Callable[[], PanelState] | None = None  # the side panel of the session held now
     sessions: Callable[[], list[str]] | None = None  # what /sessions lists; sets /resume numbers
+    # command-completion D2: harness data for the list under the input, read between actions.
+    completion: Callable[[], CompletionData] | None = None
 
 
 @dataclass(frozen=True)

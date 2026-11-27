@@ -70,7 +70,19 @@ from harness.shell.blocks import (
     turn_who,
 )
 from harness.shell.blocks import FOREIGN as FOREIGN_KIND
-from harness.shell.completion import PATH, acceptable_path, complete
+from harness.shell.commands import resolve_name
+from harness.shell.completion import (
+    NONE,
+    CompletionData,
+    Item,
+    Listing,
+    Suggestions,
+    acceptable_path,
+    list_folder,
+    suggest,
+)
+from harness.shell.parser import Command, LineError, parse_line, parse_short
+from harness.shell.shortforms import RUNNING, expand, format_command
 from harness.shell.render import (
     CONTINUATION_PREFIX,
     FOREIGN,
@@ -131,6 +143,15 @@ PANEL_NOTES = 12
 UNCUT = 10_000  # columns the core is told: it cuts no row (D3)
 FOREIGN_FRAME = 2 + 2 * spacing.BLOCK_INSET  # a foreign block's border and padding, in columns
 FILE_PICKER_MAX = 500
+SUGGESTIONS_TITLE = "tab completes · ↑↓ choose · enter takes the chosen · esc closes"
+PREVIEW_MAX = 300  # characters of the full command shown under the input
+MAX_SHOWN_SUGGESTIONS = 50
+TYPED_PENDING_MAX = 1000  # edits whose `Changed` is still on its way, at most
+# Folder listings run in daemon threads of their own, at most this many alive: one may be stuck
+# on a dead folder while another serves the text typed since. A request that finds them all busy
+# waits in one slot, where a newer request replaces it (independent review, 2026-11-27).
+MAX_LISTERS = 2
+SUGGESTION_COLUMN = 40  # where the harness's words start in a row of the list, at most
 FOREIGN_TITLE = "text from outside the harness"
 APPROVAL_TITLE = "Approval requested"
 
@@ -212,7 +233,8 @@ def plain(text: str, style: str = "") -> Content:
 
 
 CORE_CALLS = frozenset({
-    "bind_state", "close_approval", "exit", "open_approval", "open_session_picker",
+    "bind_completion", "bind_state", "close_approval", "exit", "open_approval",
+    "open_session_picker",
     "set_ready", "set_working", "show_approval_header", "show_panel", "show_rows",
 })
 
@@ -339,6 +361,18 @@ class TuiTerminal:
             return
         self._post("show_panel", panel)
 
+    def _refresh_completion(self) -> None:
+        """The harness data the list under the input offers (command-completion D2), read
+        here in the conversation's thread, where the database connection lives."""
+        state = self._state
+        if state is None or state.completion is None:
+            return
+        try:
+            data = state.completion()
+        except Exception:  # noqa: BLE001 - completion never stops the conversation
+            return
+        self._post("bind_completion", data)
+
     def _drop_stale(self, items: queue.SimpleQueue[tuple[str, str | None]], *,
                     everything: bool = False) -> list:
         """Interruptions that arrived before this wait began were meant for something else;
@@ -382,6 +416,7 @@ class TuiTerminal:
         if self._closing:
             return None
         self._refresh_panel()
+        self._refresh_completion()
         self._arm("line")
         self._post("set_ready", True)
         try:
@@ -822,14 +857,110 @@ class SidePanel(Static):
         self.update(Content.assemble(*lines))
 
 
+class SuggestionList(OptionList, can_focus=False):
+    """The list under the conversation input (command-completion D2). Never focusable: the
+    keys stay at the input, which moves the highlight; no row is highlighted until the person
+    moves to one, so Enter sends what is typed unless a row was chosen. Rows are Content, never
+    markup; each one is a candidate as it would be typed and the harness's words about it."""
+
+    # Its style is in the app's CSS (`#suggestions`), on the spacing scale and the colour roles
+    # (tui-spacing D1), which a widget's own DEFAULT_CSS cannot name.
+
+    def __init__(self) -> None:
+        super().__init__(id="suggestions", markup=False)
+        self.items: list[Item] = []
+
+    def show_items(self, items: list[Item]) -> None:
+        self.items = items
+        self.clear_options()
+        width = min(SUGGESTION_COLUMN, max(len(item.insert.rstrip()) for item in items))
+        self.add_options([Option(Content.assemble(
+            (item.insert.rstrip(), ""),
+            (" " * max(2, width + 2 - len(item.insert.rstrip())) + item.help, "dim")))
+            for item in items])
+        self.highlighted = None
+        self.border_title = plain(SUGGESTIONS_TITLE)
+        self.display = True
+
+    def close(self) -> None:
+        if not self.items and not self.display:
+            return
+        self.items = []
+        self.clear_options()
+        self.display = False
+
+    @property
+    def showing(self) -> bool:
+        return bool(self.display) and bool(self.items)
+
+    def move(self, step: int) -> None:
+        if not self.items:
+            return
+        if self.highlighted is None:
+            self.highlighted = 0 if step > 0 else len(self.items) - 1
+        else:
+            self.highlighted = (self.highlighted + step) % len(self.items)
+
+    def chosen(self) -> Item | None:
+        index = self.highlighted
+        return self.items[index] if index is not None and 0 <= index < len(self.items) else None
+
+
+class FolderLister:
+    """Folder listings off the screen's thread, in daemon threads of its own: never in the
+    event loop's default executor, which `asyncio.run` waits for at exit (a listing stuck on a
+    dead network folder held the exit; independent review, 2026-11-27). At most MAX_LISTERS
+    threads are alive; a request that finds them busy waits in one slot, replaced by any newer
+    one, and is listed by the first thread that frees. `deliver` is called from those threads
+    and must be thread-safe."""
+
+    def __init__(self, deliver: Callable[[int, Listing], None]) -> None:
+        self._deliver = deliver
+        self._lock = threading.Lock()
+        self._live = 0
+        self._waiting: tuple[int, str, str] | None = None
+
+    @property
+    def live(self) -> int:
+        with self._lock:
+            return self._live
+
+    def ask(self, generation: int, path: str, prefix: str) -> None:
+        request = (generation, path, prefix)
+        with self._lock:
+            if self._live >= MAX_LISTERS:
+                self._waiting = request
+                return
+            self._live += 1
+        threading.Thread(target=self._run, args=(request,), name="completion-listing",
+                         daemon=True).start()
+
+    def _run(self, request: tuple[int, str, str] | None) -> None:
+        while request is not None:
+            generation, path, prefix = request
+            try:
+                listing = list_folder(path, prefix=prefix)
+            except Exception:  # noqa: BLE001 - a listing that fails offers nothing
+                listing = Listing()
+            with contextlib.suppress(Exception):  # the screen is gone
+                self._deliver(generation, listing)
+            with self._lock:
+                request, self._waiting = self._waiting, None
+                if request is None:
+                    self._live -= 1
+
+
 class PromptInput(Input):
-    """The conversation input: an in-memory history and Tab completion (shell-appearance D6).
-    Nothing typed here is written anywhere but the core's queue."""
+    """The conversation input: an in-memory history, the list of completions under it and the
+    full command a short form stands for, shown on its lower border (shell-appearance D6,
+    command-completion D2-D4). Nothing typed here is written anywhere but the core's queue."""
 
     BINDINGS: ClassVar = [
         Binding("up", "history(-1)", show=False),
         Binding("down", "history(1)", show=False),
-        Binding("tab", "complete", show=False, priority=True),
+        # Not a priority binding: those run as the app receives the key, before the keys
+        # typed just ahead of it reach the input. `_on_key` takes tab first (task 4.8).
+        Binding("tab", "complete", show=False),
         Binding("ctrl+d", "end_of_input", show=False),
         # The blocks, from the input (collapsible-blocks D3): the focus never leaves it.
         Binding("alt+up,ctrl+up", "blocks('select', -1)", show=False),
@@ -849,13 +980,160 @@ class PromptInput(Input):
         "plus": ("all", 1), "minus": ("all", 0),
     }
 
+    class Listed(Message):
+        """A folder listing, posted from a listing thread (`post_message` is thread-safe and
+        never waits, so a thread never blocks on a screen that has gone)."""
+
+        def __init__(self, generation: int, listing: Listing) -> None:
+            super().__init__()
+            self.generation = generation
+            self.listing = listing
+
     def __init__(self) -> None:
         super().__init__(placeholder=BUSY_HINT, id="prompt")
+        self.lister = FolderLister(lambda generation, listing: self.post_message(
+            self.Listed(generation, listing)))
         self.history: list[str] = []
         self._position = 0
         self.state: ShellState | None = None
         self.browsing = False
         self._hint = BUSY_HINT
+        self.data = CompletionData()
+        self.found: Suggestions = NONE
+        self.preview = ""  # the full command the line stands for, when it is a short form
+        # Values made by a key, a paste or a completion whose `Changed` has not been handled
+        # yet: keys written in one go (a fast typist, a terminal) are all applied before the
+        # first `Changed` is handled, so a single flag would lose them (found at a real
+        # terminal, task 4.8). A value not in here was set by the program.
+        self._typed: list[str] = []
+        self._editing = False  # inside an edit: its cursor move does not close the list
+        self._found_for: str | None = None  # the text before the cursor the list is for
+        self._generation = 0  # which request a folder listing answers
+        self._tab_waits: int | None = None  # a Tab that waits for a listing to complete
+        self.listings = 0  # folder listings started (the tests count them)
+
+    # -- completion (command-completion D2) ------------------------------------------------------
+
+    @property
+    def suggestions(self) -> SuggestionList:
+        return self.app.query_one(SuggestionList)
+
+    def replace(self, text: str, start: int, end: int) -> None:
+        """Every edit of a key or a paste comes through here (Input 8.2.8): only those open
+        the list; a value set by the program (the history, the palette, a test) does not."""
+        self._edit(lambda: super(PromptInput, self).replace(text, start, end))
+
+    def _edit(self, change: Callable[[], None]) -> bool:
+        before = self.value
+        self._editing = True
+        try:
+            change()
+        finally:
+            self._editing = False
+        if self.value == before:
+            return False
+        self._typed.append(self.value)
+        del self._typed[:-TYPED_PENDING_MAX]
+        return True
+
+    def watch_selection(self) -> None:
+        """The cursor moved without an edit: the list no longer fits it."""
+        if not self._editing:
+            self.close_suggestions()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self._show_preview()
+        if event.value in self._typed:
+            del self._typed[: self._typed.index(event.value) + 1]
+            # The last of a burst: the list follows it, unless a Tab already asked for this
+            # very text (its listing may still be on its way).
+            if event.value == self.value and \
+                    self._found_for != self.value[: self.cursor_position]:
+                self.refresh_suggestions()
+            return
+        self._typed.clear()
+        self.close_suggestions()
+
+    def close_suggestions(self) -> None:
+        self._generation += 1  # a listing still on its way is not shown
+        self._tab_waits = None
+        self._found_for = None
+        self.found = NONE
+        with contextlib.suppress(Exception):  # not mounted yet, or the screen is leaving
+            self.suggestions.close()
+
+    def _covered(self) -> bool:
+        """Another screen (the approval box, the palette, a picker) is over the input."""
+        return self.app.screen is not self.screen
+
+    def refresh_suggestions(self, *, tab: bool = False) -> None:
+        """Compute the list for the text before the cursor; list a folder in a thread."""
+        self.close_suggestions()
+        if self._covered() or self.browsing:
+            return
+        self._found_for = self.value[: self.cursor_position]
+        found = suggest(self._found_for, self.data)
+        self.found = found
+        if found.path is None:
+            self._offer(list(found.items), tab=tab)
+            return
+        if found.worth_showing():
+            self._offer(list(found.items), tab=False)
+        generation = self._generation
+        self._tab_waits = generation if tab else None
+        self.listings += 1
+        self.lister.ask(generation, found.path, found.prefix)
+
+    def on_prompt_input_listed(self, message: Listed) -> None:
+        message.stop()
+        self._listed(message.generation, message.listing)
+
+    def _listed(self, generation: int, listing: Listing) -> None:
+        if generation != self._generation or self._covered() or self.browsing:
+            return  # the text changed, the list closed or a box is open since it was asked
+        tab = self._tab_waits == generation
+        self._tab_waits = None
+        self._offer(list(self.found.items) + list(listing.items), tab=tab)
+
+    def _offer(self, items: list[Item], *, tab: bool) -> None:
+        found = self.found
+        if not Suggestions(found.start, found.word, tuple(items)).worth_showing():
+            self.suggestions.close()
+            return
+        if tab:  # Tab takes the top candidate, open list or not (Claude Code does the same)
+            self.accept(items[0])
+            return
+        self.suggestions.show_items(items[:MAX_SHOWN_SUGGESTIONS])
+
+    def accept(self, item: Item) -> None:
+        """Put the candidate in place of the word being completed, exactly as it is; nothing
+        is sent. The list then follows the new text (a command's arguments, a folder's
+        entries)."""
+        if not self._put(self.found.start, item.insert):
+            self.refresh_suggestions()
+
+    def _put(self, start: int, text: str) -> bool:
+        """Replace the text from `start` to the cursor. True if the value changed: its
+        `Changed` then follows the new text, as after a key."""
+        end = self.cursor_position
+        value = self.value[:start] + text + self.value[end:]
+
+        def change() -> None:
+            self.value = value
+            self.cursor_position = start + len(text)
+
+        return self._edit(change)
+
+    def _show_preview(self) -> None:
+        """Under the input, the full command a short form stands for (command-completion D3):
+        what Enter would run is on the screen before it is pressed."""
+        self.preview = preview_of(self.value, self.data)
+        shown = plain(self.preview) if self.preview else None
+        # On a short screen the input has only its top rule (tui-spacing D5): the preview goes
+        # there, as its title; otherwise on its lower border.
+        short = self.screen.has_class("-short")
+        self.border_subtitle = None if short else shown
+        self.border_title = shown if short else None
 
     def set_hint(self, hint: str) -> None:
         self._hint = hint
@@ -874,6 +1152,38 @@ class PromptInput(Input):
         self.app.blocks_action(what, *args)  # type: ignore[attr-defined]
 
     async def _on_key(self, event: Key) -> None:
+        if event.key == "tab" and not self.browsing:
+            # Here, in the order of the keys, not as a binding: a binding of a key that came
+            # in one write with the keys before it ran late or not at all at a real terminal
+            # (task 4.8).
+            event.stop()
+            event.prevent_default()
+            self.action_complete()
+            return
+        listing = self.suggestions
+        if listing.showing and event.key in ("escape", "up", "down", "enter"):
+            # The list first (command-completion D4): esc closes it, the arrows move in it,
+            # enter takes the chosen row; with no row chosen, enter sends as typed.
+            if event.key == "enter":
+                chosen = listing.chosen()
+                if self._found_for != self.value[: self.cursor_position]:
+                    # The list is for older text: keys written in one go with this Enter
+                    # have not reached it. Taking its row would drop them; send as typed.
+                    chosen = None
+                if chosen is not None and chosen.insert.rstrip() != self.found.word:
+                    event.stop()
+                    event.prevent_default()
+                    self.accept(chosen)
+                    return
+                self.close_suggestions()
+                return  # Input's own enter: submit
+            event.stop()
+            event.prevent_default()
+            if event.key == "escape":
+                self.close_suggestions()
+            else:
+                listing.move(-1 if event.key == "up" else 1)
+            return
         if not self.browsing:
             if event.key == "escape":
                 event.stop()
@@ -916,40 +1226,40 @@ class PromptInput(Input):
         self.cursor_position = len(self.value)
 
     def action_complete(self) -> None:
-        if self.state is None:
+        """Tab: the chosen row, else the top one; with the list closed, the top candidate of
+        the text before the cursor (once a folder is listed, for a path)."""
+        if self.browsing or self._covered():
             return
-        before = self.value[: self.cursor_position]
-        found = complete(before, self.state)
-        candidates = list(found.candidates)
-        if found.kind == PATH:
-            candidates = _path_candidates(found.word)
-        if not candidates:
+        listing = self.suggestions
+        if listing.showing and self._found_for == self.value[: self.cursor_position]:
+            self.accept(listing.chosen() or listing.items[0])
             return
-        common = os.path.commonprefix(candidates)
-        if len(candidates) == 1 or len(common) > found.length:
-            start = len(before) - found.length
-            completed = candidates[0] if len(candidates) == 1 else common
-            self.value = before[:start] + completed + self.value[self.cursor_position:]
-            self.cursor_position = start + len(completed)
-        if len(candidates) > 1:
-            self.app.notify(plain("  ".join(candidates[:20])), timeout=4)  # type: ignore[arg-type]
+        # Closed, or made for text typed since (keys written in one go): computed again now.
+        self.refresh_suggestions(tab=True)
 
 
-def _path_candidates(word: str) -> list[str]:
-    folder, _, start = word.rpartition("/")
-    base = Path(folder or ".")
+def preview_of(value: str, data: CompletionData) -> str:
+    """`running: <full command>` when the line is a short form (a cut name, a project's name
+    for /new, a path for a skill's only input), as the conversation will expand it with the
+    data it had at its last prompt; else empty. Cleaned and bounded: it is harness chrome."""
+    if not value.lstrip().startswith("/"):
+        return ""
     try:
-        entries = sorted(base.iterdir(), key=lambda p: p.name)[:FILE_PICKER_MAX]
-    except OSError:
-        return []
-    found = []
-    for entry in entries:
-        if not entry.name.startswith(start):
-            continue
-        text = (f"{folder}/" if folder else "") + entry.name + ("/" if entry.is_dir() else "")
-        if acceptable_path(text):
-            found.append(text)
-    return found
+        parsed = parse_short(value)
+        typed = parse_line(value)
+    except LineError:
+        typed = None
+        try:
+            parsed = parse_short(value)
+        except LineError:
+            return ""
+    if not isinstance(parsed, Command):
+        return ""
+    full = expand(parsed, data.known())
+    if full == typed:
+        return ""
+    text = terminal_safe(RUNNING + format_command(full))
+    return text if len(text) <= PREVIEW_MAX else text[: PREVIEW_MAX - 1] + "…"
 
 
 APPROVE_LABEL = "Approve"
@@ -1342,7 +1652,8 @@ class HarnessApp(App[int]):
     #log { width: 1fr; padding: 0 $edge; scrollbar-size-vertical: 1; }
     #side { width: $side-w; padding: 0 $space-2; border-left: solid $rule; }
     Screen.-narrow #side { display: none; }
-    #prompt { dock: bottom; margin: 0 $edge 1 $edge; padding: 0 $inset; }
+    #prompt { dock: bottom; margin: 0 $edge 1 $edge; padding: 0 $inset;
+              border-subtitle-color: $chrome-muted; }
     Screen.-short #prompt { height: 2; border: none;
                             border-top: hkey $rule; padding: 0 $space-2; }
     #footer { dock: bottom; height: 1; background: $chrome-fill; color: $chrome-muted;
@@ -1369,6 +1680,13 @@ class HarnessApp(App[int]):
     .foreign.-collapsed, .foreign.-collapsed.-selected { border: none; margin: $row 0 0 0;
                                                          padding: 0 $space-2; }
     #prompt.-browsing { border: tall $browse-frame; }
+    /* The completion list (command-completion D2), right above the input and as wide: its
+       bottom margin is the rows the input takes under it (3 rows and the footer's row; 2 and
+       1 on a short screen), not a gap of the scale. 8 rows of candidates (Codex's popup). */
+    #suggestions { dock: bottom; margin: 0 $edge 4 $edge; width: 100%;
+                   height: auto; max-height: 10; display: none; border: round $picker-frame; background: $box-fill;
+                   border-title-color: $chrome-muted; padding: 0 $inset; }
+    Screen.-short #suggestions { margin: 0 $edge 3 $edge; }
     Screen.-short #prompt.-browsing { border: none; border-top: hkey $browse-frame; }
     #approval { align: center middle; }
     #approval-box { width: 90%; height: 90%; border: heavy $approval-frame;
@@ -1436,6 +1754,7 @@ class HarnessApp(App[int]):
             yield ConversationPane(id="log", can_focus=False)
             yield SidePanel()
         yield Static(plain(FOOTER), markup=False, id="footer")
+        yield SuggestionList()
         yield PromptInput()
 
     def get_system_commands(self, screen: Any) -> Iterator[Any]:
@@ -1533,6 +1852,11 @@ class HarnessApp(App[int]):
             getattr(self, message.method)(*message.args)
 
     # -- what the core posts ------------------------------------------------------------------
+
+    def bind_completion(self, data: CompletionData) -> None:
+        prompt = self.query_one(PromptInput)
+        prompt.data = data
+        prompt._show_preview()
 
     def bind_state(self, state: ShellState) -> None:
         self.state = state
@@ -1640,7 +1964,7 @@ class HarnessApp(App[int]):
         turn = self._turn()
         last = turn.last()
         if foreign:
-            command = turn.line.split()[0] if turn.line and turn.line.split() else None
+            command = _command_word(turn.line)
             kind = category("", foreign=True, label=label, command=command)
             block = ForeignBlock(rows, label or FOREIGN_TITLE, kind=kind,
                                  preview=self._preview(), height_of=self._height_of(True))
@@ -1902,6 +2226,7 @@ class HarnessApp(App[int]):
         browsing: Textual sends no Blur to the input it covers (review 2026-11-27)."""
         for prompt in self.query(PromptInput):
             prompt.set_browsing(False)
+            prompt.close_suggestions()  # never over a box: the list is the input's
         return super().push_screen(*args, **kwargs)
 
     def open_approval(self, header: list[str], content: list[str], approval_hash: str,
@@ -1976,6 +2301,7 @@ class HarnessApp(App[int]):
             prompt.value = what[len("insert:"):]
             prompt.cursor_position = len(prompt.value)
             prompt.focus()
+            prompt.call_after_refresh(prompt.refresh_suggestions)
         elif what == "pick_session":
             if not self.terminal.request_sessions():
                 self.notify(plain("Busy: wait for the answer"), timeout=3)  # type: ignore[arg-type]
@@ -2003,6 +2329,20 @@ class HarnessApp(App[int]):
     def _file_chosen(self, path: str | None) -> None:
         if path is not None:
             self._submit(f"/file {path}")
+
+
+def _command_word(line: str | None) -> str | None:
+    """The command of a turn's line, with a cut name read whole (`/con` is `/context`), so
+    what `/context` shows is always whole however it was typed (collapsible-blocks D1)."""
+    words = line.split() if line else []
+    if not words:
+        return None
+    word = words[0]
+    if word.startswith("/") and not word.startswith("//"):
+        name = resolve_name(word[1:])
+        if name is not None:
+            return f"/{name}"
+    return word
 
 
 def _file_choices(root: Path | None = None) -> list[str]:
