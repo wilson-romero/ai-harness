@@ -6,6 +6,7 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
 from textual.widgets import Input
 
 from harness.shell import tui as tui_module
@@ -490,5 +491,33 @@ async def test_enter_after_keys_the_list_has_not_seen_sends_what_is_typed(tmp_pa
         await prompt._on_key(event)
         assert prompt.value == "/se"  # the e is kept; Enter goes on to send it as typed
         assert not event._no_default_action and not listing.showing
+        prompt.value = ""
+        await tui.send(pilot, "/exit")
+
+
+# -- the list over the spaced layout (tui-spacing, merged 2026-11-27) ----------------------------
+
+
+@pytest.mark.parametrize("size", [(80, 24), (100, 30), (120, 40)])
+async def test_the_list_sits_on_the_input_at_every_size(tmp_path, size):
+    """Right above the input, as wide and as indented as it, with the side panel shown or
+    hidden; the preview of a short form stays visible on a short screen too."""
+    tui = _skills_tui(tmp_path)
+    async with tui.app.run_test(size=size) as pilot:
+        prompt, listing = await _open(tui, pilot)
+        await pilot.press(*"/sk")
+        await tui.until(pilot, lambda: listing.showing)
+        await pilot.pause(0.1)
+        above, below = listing.region, prompt.region
+        assert above.bottom == below.y, (above, below)
+        assert (above.x, above.width) == (below.x, below.width), (above, below)
+        assert above.right <= size[0] and above.height >= 3
+        side = tui.app.query_one("#side")
+        assert side.display == (size[0] >= 100)
+        await pilot.press("escape")
+        prompt.value = ""
+        await pilot.press(*"/skill demo-echo nota.md")
+        await pilot.pause(0.1)
+        assert RUNNING + "/skill demo-echo --file text=nota.md" in tui.screen()
         prompt.value = ""
         await tui.send(pilot, "/exit")

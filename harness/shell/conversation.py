@@ -132,6 +132,9 @@ class ConversationDeps:
     effects: Mapping[str, Effect] | None = None
     engine_options: Mapping[str, object] | None = None  # extra SkillEngine options (tests)
     columns: Callable[[], int] = terminal_columns  # asked before each output
+    # The columns a reply's tables and code blocks are laid out in (reply-rendering D1); None:
+    # what `columns` leaves after the mark.
+    layout: Callable[[], int | None] = lambda: None
 
 
 def read_text_file(raw_path: str, max_bytes: int = MAX_FILE_BYTES) -> tuple[str, str]:
@@ -239,7 +242,8 @@ class Conversation:
             self._terminal.show("\n".join(plain_rows(rows)))
 
     def _foreign(self, text: str, *, markdown: bool = False) -> None:
-        rows, hidden = foreign_rows(text, self._deps.columns(), markdown=markdown)
+        rows, hidden = foreign_rows(text, self._deps.columns(), markdown=markdown,
+                                    layout=self._deps.layout())
         self._emit(rows)
         if hidden:
             self._say(f"[{hidden} more character(s) not shown]")
@@ -724,11 +728,16 @@ class Conversation:
         session = self._service.require_session(str(self._session_id))
         entries = self._service.history(str(session.session_id))
         last = next((e for e in reversed(entries) if e.role == "user"), None)
+        panel = self._panel()
+        # Everything the side panel shows, which a narrow screen hides (tui-spacing D2).
         self._say("\n".join([
             f"session:  {session.session_id} ({terminal_safe(session.name)}), {session.status}",
             f"project:  {session.project_id or '-'}",
             f"provider: {self._deps.provider_name}",
             "last request: " + (f"{last.request_id} {last.request_status}" if last else "-"),
+            f"sends: {panel.sends}",
+            f"memory: {len(panel.notes)} note(s) in the last question",
+            *(f"  {terminal_safe(note)}" for note in panel.notes),
             "attachment: " + (self._attachment[0] if self._attachment else "-"),
         ]))
 

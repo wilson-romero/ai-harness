@@ -100,6 +100,7 @@ from harness.shell.render import (
     MD_QUOTE,
     MD_RULE,
     MD_STRONG,
+    MD_TABLE,
     MIN_COLUMNS,
     STATUS,
     Row,
@@ -108,6 +109,8 @@ from harness.shell.render import (
     rows_of_plain_text,
 )
 from harness.shell import spacing
+from harness.shell.palette import ROLES
+from harness.shell.palette import css_variables as palette_css
 from harness.shell.terminal import PanelState, ShellState, WaitInterrupted
 from harness.skills.approvals import ButtonPress
 from harness.text.safe_text import terminal_safe
@@ -124,12 +127,18 @@ BROWSE_HINT = "browsing the blocks: esc or any letter goes back to typing"
 FOOTER = ("ctrl+p commands  ctrl+c interrupts  ctrl+q leaves  ctrl+n new  esc blocks  "
           "ctrl+o open/close")
 BROWSE_FOOTER = "up/down move  enter open/close  +/- all  end latest  esc back to typing"
+
+
+def below_hint(rows: int) -> str:
+    """The start of the footer while the pane has rows below what it shows (reply-rendering
+    D6): harness words and a count, never foreign text."""
+    return f"↓ {rows} more {'row' if rows == 1 else 'rows'} below  "
 ARM_S = 0.5  # the approval buttons stay disabled this long after the box opens
 HISTORY_MAX = 200  # lines typed at the conversation input, kept in memory only
 TICK_S = 1.0
-SIDE_COLUMNS = 34
 PANEL_NOTES = 12
 UNCUT = 10_000  # columns the core is told: it cuts no row (D3)
+FOREIGN_FRAME = 2 + 2 * spacing.BLOCK_INSET  # a foreign block's border and padding, in columns
 FILE_PICKER_MAX = 500
 SUGGESTIONS_TITLE = "tab completes · ↑↓ choose · enter takes the chosen · esc closes"
 PREVIEW_MAX = 300  # characters of the full command shown under the input
@@ -143,32 +152,34 @@ SUGGESTION_COLUMN = 40  # where the harness's words start in a row of the list, 
 FOREIGN_TITLE = "text from outside the harness"
 APPROVAL_TITLE = "Approval requested"
 
-# Style names of the rows (render.py) to Textual styles. Plain colours only: no style here
-# names a link or an action, and no text is ever parsed for a style.
+# Style names of the rows (render.py) to Textual styles. Theme variables only, through the
+# roles of palette.py (tui-spacing D1): no style here names a link or an action, and no text is
+# ever parsed for a style. Foreign text never gets a status colour, a fill or reverse.
 STYLES: dict[str, str] = {
     GUTTER: "dim",
     FOREIGN: "",
     HARNESS: "",
-    HARNESS_ERROR: "bold #e06c75",
-    HARNESS_WARNING: "#e5c07b",
+    HARNESS_ERROR: f"bold {ROLES['error-text']}",
+    HARNESS_WARNING: ROLES["warning-text"],
     STATUS: "bold",
-    MD_HEADING: "bold #61afef",
-    MD_BULLET: "#c678dd",
-    MD_QUOTE: "italic #98c379",
+    MD_HEADING: f"bold {ROLES['heading-text']}",
+    MD_BULLET: ROLES["bullet-text"],
+    MD_QUOTE: "italic dim",
     MD_RULE: "dim",
     MD_FENCE: "dim",
+    MD_TABLE: "dim",  # the rules of a table or a code block: harness-drawn, no colour, no fill
     # A theme colour no harness status uses: inline code written by the model, such as
     # `warning: ...`, must not look like the harness's own warning (approval-buttons D8).
-    MD_CODE: "$text-secondary",
+    MD_CODE: ROLES["code-text"],
     MD_STRONG: "bold",
     MD_EM: "italic",
-    MD_LINK: "underline #56b6c2",
+    MD_LINK: "underline",
 }
 
 # The chrome of a folded block (its collapsed line and the footer of a harness block): the one
 # style with a background. No style of STYLES has one, and foreign text only ever gets a style
 # of STYLES, so no foreign text can look like it (collapsible-blocks D4).
-CHROME = "bold #e6e6e6 on #3a3f4b"
+CHROME = f"bold {ROLES['fold-text']} on {ROLES['fold-fill']}"
 EXCERPT_STYLE = "italic"
 TYPED_MARK = "› "  # before an excerpt of what the person typed
 CLOSED = "▸"
@@ -271,6 +282,13 @@ class TuiTerminal:
         terminal's own wrapping from starting a row with foreign text; on this screen every
         block is its own region and Textual wraps inside it, so the rows stay whole."""
         return UNCUT
+
+    def layout_columns(self) -> int | None:
+        """The text width inside a foreign block now (reply-rendering D1): what a reply's
+        tables and code blocks are laid out in. Kept by the screen on every resize; read here
+        as one int, so the core never measures a widget."""
+        app = self.app
+        return app.foreign_width if app is not None else None
 
     def attach(self, conversation: Any) -> None:
         """The conversation whose `interrupt` Ctrl+C calls (D8)."""
@@ -725,6 +743,11 @@ class Turn(Vertical):
         return self.summary_line if self.closed or self.you is None else self.you
 
     def add(self, block: FoldBlock) -> None:
+        if self.you is None and not self.items and self.parent is not None \
+                and self.parent.children and self.parent.children[0] is self:
+            # The first block of a pane starts at its top: the gap is between blocks
+            # (tui-spacing D5), never above the first one.
+            block.add_class("-lead")
         self.items.append(block)
         self.mount(block)
         if self.closed:
@@ -791,6 +814,14 @@ class SessionLog(Vertical):
         self.turns: list[Turn] = []
 
 
+class ConversationPane(VerticalScroll):
+    """The pane of the conversation: on every change of its size the screen measures again
+    the width a reply's tables are laid out in (reply-rendering D1)."""
+
+    def on_resize(self) -> None:
+        self.app.call_after_refresh(self.app._measure)  # type: ignore[attr-defined]
+
+
 class SidePanel(Static):
     can_focus = False
 
@@ -829,21 +860,8 @@ class SuggestionList(OptionList, can_focus=False):
     moves to one, so Enter sends what is typed unless a row was chosen. Rows are Content, never
     markup; each one is a candidate as it would be typed and the harness's words about it."""
 
-    # Its own style, apart from the app's: plain cell counts. `margin-bottom` is the rows the
-    # input takes under it (its 3 rows and the 1 row of margin under them), not a gap; the
-    # 8 rows of candidates are Codex's popup height (design D2).
-    DEFAULT_CSS = """
-    SuggestionList {
-        dock: bottom;
-        margin: 0 0 4 0;
-        height: auto;
-        max-height: 10;
-        display: none;
-        border: round $accent;
-        background: $surface;
-        border-title-color: $text-muted;
-    }
-    """
+    # Its style is in the app's CSS (`#suggestions`), on the spacing scale and the colour roles
+    # (tui-spacing D1), which a widget's own DEFAULT_CSS cannot name.
 
     def __init__(self) -> None:
         super().__init__(id="suggestions", markup=False)
@@ -1107,7 +1125,12 @@ class PromptInput(Input):
         """Under the input, the full command a short form stands for (command-completion D3):
         what Enter would run is on the screen before it is pressed."""
         self.preview = preview_of(self.value, self.data)
-        self.border_subtitle = plain(self.preview) if self.preview else None
+        shown = plain(self.preview) if self.preview else None
+        # On a short screen the input has only its top rule (tui-spacing D5): the preview goes
+        # there, as its title; otherwise on its lower border.
+        short = self.screen.has_class("-short")
+        self.border_subtitle = None if short else shown
+        self.border_title = shown if short else None
 
     def set_hint(self, hint: str) -> None:
         self._hint = hint
@@ -1523,40 +1546,57 @@ class HarnessApp(App[int]):
         Binding("ctrl+q", "leave", show=False, priority=True),
         Binding("ctrl+n", "new_session", show=False, priority=True),
     ]
-    # The spacing scale and the colour roles first (approval-buttons D7): the rules of the
-    # approval box name them, never a bare number or a colour of their own.
-    CSS = spacing.css_variables() + """
-    $approval-frame: $warning;
-    $approval-fill: $warning-muted;
-    $foreign-frame: $secondary;
-    $box-fill: $surface;
+    # The input's bottom margin is the footer's row (both dock at the bottom), not a gap.
+    # Two classes on every screen by its size (tui-spacing D2, D5): the side panel only where
+    # it fits, and blank rows only where the rows allow.
+    HORIZONTAL_BREAKPOINTS: ClassVar = [(0, "-narrow"), (spacing.WIDE_COLUMNS, "-wide")]
+    VERTICAL_BREAKPOINTS: ClassVar = [(0, "-short"), (spacing.SNUG_ROWS, "-tall")]
+    # The spacing scale and the colour roles first (approval-buttons D7, tui-spacing D1): the
+    # rules below name them, never a bare number or a colour of their own.
+    CSS = spacing.css_variables() + "\n" + palette_css() + """
     Screen { layout: vertical; }
     #main { height: 1fr; }
-    #log { width: 1fr; padding: 0 1; scrollbar-size-vertical: 1; }
-    #side { width: %d; padding: 0 1; border-left: solid $panel-lighten-2; }
-    #prompt { dock: bottom; margin: 0 0 1 0; border-subtitle-color: $text-muted; }
-    #footer { dock: bottom; height: 1; background: $panel; color: $text-muted; padding: 0 1; }
-    #working { height: auto; color: $text-muted; display: none; }
-    #conversation { height: auto; min-height: 100%%; }
-    .you { margin: 1 0 0 0; padding: 0 1; border-left: thick $accent; }
-    .harness { color: $text-muted; }
-    .foreign { margin: 1 0 0 0; padding: 0 1; border: round $secondary;
-               border-title-color: $secondary; border-title-style: bold;
-               border-subtitle-color: #e6e6e6; border-subtitle-background: #3a3f4b;
+    #log { width: 1fr; padding: 0 $edge; scrollbar-size-vertical: 1; }
+    #side { width: $side-w; padding: 0 $space-2; border-left: solid $rule; }
+    Screen.-narrow #side { display: none; }
+    #prompt { dock: bottom; margin: 0 $edge 1 $edge; padding: 0 $inset;
+              border-subtitle-color: $chrome-muted; }
+    Screen.-short #prompt { height: 2; border: none;
+                            border-top: hkey $rule; padding: 0 $space-2; }
+    #footer { dock: bottom; height: 1; background: $chrome-fill; color: $chrome-muted;
+              padding: 0 $edge; }
+    #working { height: auto; color: $chrome-muted; display: none; padding: 0 $space-2; }
+    #conversation { height: auto; min-height: 100%; }
+    .you { margin: $row 0 0 0; padding: 0 $inset; border-left: thick $you-bar;
+           background: $you-fill; }
+    .harness { color: $chrome-muted; margin: $row 0 0 0; padding: 0 $space-2; }
+    Screen.-short .harness, .harness.-lead { margin: 0; }
+    .foreign { margin: $row 0 0 0; padding: 0 $inset; border: round $foreign-frame;
+               border-title-color: $foreign-frame; border-title-style: bold;
+               border-subtitle-color: $fold-text; border-subtitle-background: $fold-fill;
                border-subtitle-style: bold; }
     .session-log { height: auto; }
     .turn { height: auto; }
-    .turn-summary { display: none; margin: 1 0 0 0; }
+    .turn-summary { display: none; margin: $row 0 0 0; padding: 0 $space-2; }
+    .turn:first-child > .turn-summary { margin: 0; }
     .turn.-closed > .turn-summary { display: block; }
     .turn.-closed > .you, .turn.-closed > .block { display: none; }
     .turn-summary, .block.-collapsed { height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
-    .-selected { background: $accent 25%%; }
-    .foreign.-selected { border: round $accent; }
-    .foreign.-collapsed, .foreign.-collapsed.-selected { border: none; margin: 1 0 0 0;
-                                                         padding: 0 1; }
-    #prompt.-browsing { border: tall $warning; }
+    .-selected { background: $select-fill; }
+    .foreign.-selected { border: round $select-frame; }
+    .foreign.-collapsed, .foreign.-collapsed.-selected { border: none; margin: $row 0 0 0;
+                                                         padding: 0 $space-2; }
+    #prompt.-browsing { border: tall $browse-frame; }
+    /* The completion list (command-completion D2), right above the input and as wide: its
+       bottom margin is the rows the input takes under it (3 rows and the footer's row; 2 and
+       1 on a short screen), not a gap of the scale. 8 rows of candidates (Codex's popup). */
+    #suggestions { dock: bottom; margin: 0 $edge 4 $edge; width: 100%;
+                   height: auto; max-height: 10; display: none; border: round $picker-frame; background: $box-fill;
+                   border-title-color: $chrome-muted; padding: 0 $inset; }
+    Screen.-short #suggestions { margin: 0 $edge 3 $edge; }
+    Screen.-short #prompt.-browsing { border: none; border-top: hkey $browse-frame; }
     #approval { align: center middle; }
-    #approval-box { width: 90%%; height: 90%%; border: heavy $approval-frame;
+    #approval-box { width: 90%; height: 90%; border: heavy $approval-frame;
                     padding: 0 $box-x;
                     border-title-color: $approval-frame; border-title-style: bold;
                     background: $box-fill; }
@@ -1579,8 +1619,10 @@ class HarnessApp(App[int]):
     #approval.-roomy #approval-box { padding: $row $box-x; }
     #approval.-roomy #approval-content { margin: $row 0; }
     .picker { align: center middle; }
-    #picker-box { width: 80%%; height: 70%%; border: round $accent; background: $surface; }
-    """ % SIDE_COLUMNS
+    #picker-box { width: 80%; height: 70%; border: round $picker-frame; background: $box-fill;
+                  padding: $row $space-2; }
+    Screen.-short #picker-box { padding: 0 $space-1; }
+    """
 
     def __init__(self, terminal: TuiTerminal, body: Callable[[], int], *,
                  arm_s: float = ARM_S) -> None:
@@ -1606,13 +1648,16 @@ class HarnessApp(App[int]):
         self._session_key: str | None = None
         self._session_log: SessionLog | None = None
         self.selected: Turn | FoldBlock | None = None
+        # The text width inside a foreign block (reply-rendering D1), measured on every resize;
+        # until the first, that of an 80-column terminal.
+        self.foreign_width = 80 - 2 * spacing.EDGE - FOREIGN_FRAME
         terminal.app = self
 
     # -- layout -----------------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="main"):
-            yield VerticalScroll(id="log", can_focus=False)
+            yield ConversationPane(id="log", can_focus=False)
             yield SidePanel()
         yield Static(plain(FOOTER), markup=False, id="footer")
         yield SuggestionList()
@@ -1681,10 +1726,20 @@ class HarnessApp(App[int]):
         conversation.mount(self._session_log)
         conversation.mount(Static(plain(""), markup=False, id="working"))
         log.anchor()  # the end stays in view as blocks arrive (collapsible-blocks D3)
+        self.call_after_refresh(self._measure)
+        # The footer says how much is below whenever the pane moves (reply-rendering D6).
+        self.watch(log, "scroll_y", lambda: self._show_below(), init=False)
+        self.watch(log, "max_scroll_y", lambda: self._show_below(), init=False)
         self.query_one(PromptInput).focus()
         self.set_interval(TICK_S, self._tick)
         self.core = threading.Thread(target=self._run_core, name="conversation", daemon=True)
         self.core.start()
+
+    def _measure(self) -> None:
+        """The text width inside a foreign block, for the tables of the next reply."""
+        width = self._log().scrollable_content_region.width
+        if width:
+            self.foreign_width = max(MIN_COLUMNS, width - FOREIGN_FRAME)
 
     def _run_core(self) -> None:
         code = 1
@@ -1724,10 +1779,36 @@ class HarnessApp(App[int]):
         if force:  # checked first: a line sent while browsing goes to the end too
             log.anchor()
             return
-        if self.query_one(PromptInput).browsing:
-            return
-        if log.scroll_y >= log.max_scroll_y - 1:
+        if self._following():
             log.anchor()
+
+    def _following(self) -> bool:
+        """Whether new output may move the pane: the person is not browsing the blocks and
+        has not scrolled up to read."""
+        log = self._log()
+        return not self.query_one(PromptInput).browsing and log.scroll_y >= log.max_scroll_y - 1
+
+    def _show_start(self, block: FoldBlock) -> None:
+        """A reply just laid out: whole in the pane, the end in view as before; taller than
+        the pane, its first line at the top and the footer says how much is below."""
+        log = self._log()
+        if not block.is_attached:
+            return
+        if block.outer_size.height + spacing.ROW <= log.size.height:
+            log.anchor()
+            log.scroll_end(animate=False, immediate=True)
+        else:
+            log.scroll_to_widget(block, animate=False, top=True, immediate=True)
+        self._show_below()
+
+    def _show_below(self, browsing: bool | None = None) -> None:
+        """The footer, with how many rows of the pane are below what it shows."""
+        log = self._log()
+        below = max(0, round(log.max_scroll_y - log.scroll_y))
+        if browsing is None:
+            browsing = self.query_one(PromptInput).browsing
+        words = BROWSE_FOOTER if browsing else FOOTER
+        self.query_one("#footer", Static).update(plain((below_hint(below) if below else "") + words))
 
     @property
     def session_log(self) -> SessionLog:
@@ -1755,7 +1836,7 @@ class HarnessApp(App[int]):
         """The screen rows a row takes in a block of the pane as wide as it is now (a foreign
         block loses its border and padding): Textual's own wrapping of the row's text."""
         width = max(MIN_COLUMNS, (self._log().scrollable_content_region.width
-                                  or self.size.width or 80) - (4 if foreign else 0))
+                                  or self.size.width or 80) - (FOREIGN_FRAME if foreign else 0))
 
         def height_of(row: Row) -> int:
             return max(1, len(Content(body_text(row)).wrap(width)))
@@ -1781,8 +1862,16 @@ class HarnessApp(App[int]):
         if foreign:
             command = _command_word(turn.line)
             kind = category("", foreign=True, label=label, command=command)
-            turn.add(ForeignBlock(rows, label or FOREIGN_TITLE, kind=kind,
-                                  preview=self._preview(), height_of=self._height_of(True)))
+            block = ForeignBlock(rows, label or FOREIGN_TITLE, kind=kind,
+                                 preview=self._preview(), height_of=self._height_of(True))
+            following = self._following()
+            turn.add(block)
+            if kind == REPLY and following:
+                # The pane stops following the end until the reply is laid out: a reply taller
+                # than the pane is shown from its start (reply-rendering D6).
+                self._log().release_anchor()
+                self.call_after_refresh(self._show_start, block)
+                return
         else:
             first = row_text(rows[0]) if rows else ""
             kind = category(first, foreign=False, label=None)
@@ -2000,7 +2089,7 @@ class HarnessApp(App[int]):
             self.set_all(bool(args[0]))
 
     def browsing_changed(self, browsing: bool) -> None:
-        self.query_one("#footer", Static).update(plain(BROWSE_FOOTER if browsing else FOOTER))
+        self._show_below(browsing)
         if not browsing:
             self._select(None)
 

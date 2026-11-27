@@ -131,9 +131,10 @@ def test_negative_control_the_style_oracle_says_no():
 @pytest.mark.parametrize("columns", [None, 80, 41, 20, 5])
 @pytest.mark.parametrize("text", [REPLY, "\n".join(HOSTILE), "表" * 90 + "\n" + "y" * 300])
 def test_styled_rows_have_exactly_the_characters_of_the_plain_rows(text, columns):
-    """shell-appearance D3: colours off, the styled path prints what the plain path prints."""
-    plain, hidden = foreign_lines(text, columns)
+    """shell-appearance D3: colours off, the styled path prints what the plain path prints.
+    With `markdown` both lay out the same tables and code blocks (reply-rendering D4)."""
     for markdown in (False, True):
+        plain, hidden = foreign_lines(text, columns, markdown=markdown)
         styled, styled_hidden = foreign_rows(text, columns, markdown=markdown)
         assert plain_rows(styled) == plain and styled_hidden == hidden
 
@@ -145,7 +146,8 @@ def test_the_same_holds_for_random_text():
         text = "".join(rng.choice(alphabet) for _ in range(rng.randrange(0, 300)))
         columns = rng.choice([None, *range(1, 100)])
         assert plain_rows(foreign_rows(text, columns, markdown=True)[0]) == \
-            foreign_lines(text, columns)[0], (text, columns)
+            foreign_lines(text, columns, markdown=True)[0], (text, columns)
+        assert plain_rows(foreign_rows(text, columns)[0]) == foreign_lines(text, columns)[0]
 
 
 @pytest.mark.parametrize("columns", [None, 80, 30])

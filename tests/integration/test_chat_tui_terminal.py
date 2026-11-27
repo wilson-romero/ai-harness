@@ -141,7 +141,9 @@ def test_ctrl_c_interrupts_the_question_not_the_screen(data_dir):
         child.type("pregunta lenta\r")
         wait_for_running(data_dir, session_id)
         child.type("\x03")
-        child.read_until("is uncertain")
+        # "interrupted: request <id> is uncertain: the prompt ...": the pane may wrap the
+        # line between any two words (tui-spacing moved the text column), never inside one.
+        child.read_until("uncertain:")
         child.type("/exit\r")
         assert child.wait() == 0
     finally:
@@ -227,9 +229,11 @@ def test_a_hangup_during_a_question_exits_cleanly(data_dir):
     assert run_main(data_dir, "ask", session_id, "otra").returncode == 0  # the session is free
 
 
-def test_a_long_reply_folds_and_opens_at_a_real_terminal(data_dir, tmp_path):
-    """collapsible-blocks: a long Mock reply arrives folded with its footer; Escape and Enter
-    open it without sending anything, and ctrl+q leaves a restored terminal."""
+def test_a_long_reply_arrives_whole_and_folds_at_a_real_terminal(data_dir, tmp_path):
+    """reply-rendering D5-D6 (was collapsible-blocks' folded arrival): a long Mock reply
+    arrives whole, its start in view and the footer saying how much is below; Escape and
+    Enter fold it to its line and open it again without sending anything, and ctrl+q leaves a
+    restored terminal."""
     body = "\n".join(f"- Punto sintético {n}." for n in range(1, 61))
     answers = tmp_path / "respuestas.json"
     answers.write_text(json.dumps({"HLS": f"## Resumen\nSintético.\n\n## Riesgos\n{body}"}),
@@ -238,11 +242,14 @@ def test_a_long_reply_folds_and_opens_at_a_real_terminal(data_dir, tmp_path):
     try:
         child.read_until(READY)
         child.type("revisa el HLS\r")
-        child.read_until("more lines · enter/click to expand")
+        child.read_until("## Resumen")
+        child.read_until("more rows below")
         child.type("\x1b")  # Escape: browsing, the newest reply selected
         child.read_until("browsing the blocks")
-        child.type("\r")  # Enter opens it in place: no question is sent
-        child.read_until("Punto sintético 17.")  # a row the preview did not show
+        child.type("\r")  # Enter folds it to its line: no question is sent
+        child.read_until("▸ mock · 64 lines")
+        child.type("\r")  # and opens it again
+        child.read_until("Punto sintético 1.")
         child.type("\x11")
         assert child.wait() == 0
     finally:
@@ -252,17 +259,26 @@ def test_a_long_reply_folds_and_opens_at_a_real_terminal(data_dir, tmp_path):
 
 
 def test_the_approval_buttons_at_a_real_terminal(data_dir, tmp_path):
-    """approval-buttons: the skill line and, in the same write, the keys that would approve
-    if a button had the focus (Tab, Enter, Space). The box opens and stays pending; Tab and
-    Enter sent once it is armed approve, and the audit says so."""
+    """approval-buttons: the skill line, then, while the skill drafts and before the box
+    exists, the keys that would approve if a button had the focus (Tab, Enter, Space). The
+    box opens and stays pending; Tab and Enter sent once it is armed approve, and the audit
+    says so.
+
+    The keys go once the line is taken (reply-rendering, 2026-11-27): written in the same
+    burst as the line, Tab (a priority binding of the input) could run before the input had
+    inserted the line's last characters on a loaded machine, and the line sent was
+    `/skill demo-o-echo`, so no box opened. The Mock's delay keeps the box from opening
+    before the keys arrive."""
     responses = tmp_path / "respuestas.json"
     responses.write_text(json.dumps({"tarea: demo-echo/draft": GOOD_ECHO}), encoding="utf-8")
     child = FullScreenChild(data_dir, "chat", HARNESS_MOCK_RESPONSES=str(responses),
                             HARNESS_SKILLS_DIR=str(REPO_ROOT / "tests" / "fixtures" / "skills"),
-                            HARNESS_MOCK_DELAY_MS="0")
+                            HARNESS_MOCK_DELAY_MS="3000")
     try:
         child.read_until(READY)
-        child.type("/skill demo-echo text=texto-sintetico\r\t\r \r\t\r")
+        child.type("/skill demo-echo text=texto-sintetico\r")
+        child.read_until("working: ctrl+c interrupts")  # the line is taken; the skill drafts
+        child.type("\t\r \r\t\r")
         child.read_until("The whole proposal has been shown")
         time.sleep(1.0)  # armed by now
         assert query(data_dir, "SELECT status FROM approvals") == [("pending",)]
