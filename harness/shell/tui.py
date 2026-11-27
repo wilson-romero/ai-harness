@@ -135,6 +135,10 @@ SUGGESTIONS_TITLE = "tab completes · ↑↓ choose · enter takes the chosen ·
 PREVIEW_MAX = 300  # characters of the full command shown under the input
 MAX_SHOWN_SUGGESTIONS = 50
 TYPED_PENDING_MAX = 1000  # edits whose `Changed` is still on its way, at most
+# Folder listings run in daemon threads of their own, at most this many alive: one may be stuck
+# on a dead folder while another serves the text typed since. A request that finds them all busy
+# waits in one slot, where a newer request replaces it (independent review, 2026-11-27).
+MAX_LISTERS = 2
 SUGGESTION_COLUMN = 40  # where the harness's words start in a row of the list, at most
 FOREIGN_TITLE = "text from outside the harness"
 APPROVAL_TITLE = "Approval requested"
@@ -881,6 +885,50 @@ class SuggestionList(OptionList, can_focus=False):
         return self.items[index] if index is not None and 0 <= index < len(self.items) else None
 
 
+class FolderLister:
+    """Folder listings off the screen's thread, in daemon threads of its own: never in the
+    event loop's default executor, which `asyncio.run` waits for at exit (a listing stuck on a
+    dead network folder held the exit; independent review, 2026-11-27). At most MAX_LISTERS
+    threads are alive; a request that finds them busy waits in one slot, replaced by any newer
+    one, and is listed by the first thread that frees. `deliver` is called from those threads
+    and must be thread-safe."""
+
+    def __init__(self, deliver: Callable[[int, Listing], None]) -> None:
+        self._deliver = deliver
+        self._lock = threading.Lock()
+        self._live = 0
+        self._waiting: tuple[int, str, str] | None = None
+
+    @property
+    def live(self) -> int:
+        with self._lock:
+            return self._live
+
+    def ask(self, generation: int, path: str, prefix: str) -> None:
+        request = (generation, path, prefix)
+        with self._lock:
+            if self._live >= MAX_LISTERS:
+                self._waiting = request
+                return
+            self._live += 1
+        threading.Thread(target=self._run, args=(request,), name="completion-listing",
+                         daemon=True).start()
+
+    def _run(self, request: tuple[int, str, str] | None) -> None:
+        while request is not None:
+            generation, path, prefix = request
+            try:
+                listing = list_folder(path, prefix=prefix)
+            except Exception:  # noqa: BLE001 - a listing that fails offers nothing
+                listing = Listing()
+            with contextlib.suppress(Exception):  # the screen is gone
+                self._deliver(generation, listing)
+            with self._lock:
+                request, self._waiting = self._waiting, None
+                if request is None:
+                    self._live -= 1
+
+
 class PromptInput(Input):
     """The conversation input: an in-memory history, the list of completions under it and the
     full command a short form stands for, shown on its lower border (shell-appearance D6,
@@ -911,8 +959,19 @@ class PromptInput(Input):
         "plus": ("all", 1), "minus": ("all", 0),
     }
 
+    class Listed(Message):
+        """A folder listing, posted from a listing thread (`post_message` is thread-safe and
+        never waits, so a thread never blocks on a screen that has gone)."""
+
+        def __init__(self, generation: int, listing: Listing) -> None:
+            super().__init__()
+            self.generation = generation
+            self.listing = listing
+
     def __init__(self) -> None:
         super().__init__(placeholder=BUSY_HINT, id="prompt")
+        self.lister = FolderLister(lambda generation, listing: self.post_message(
+            self.Listed(generation, listing)))
         self.history: list[str] = []
         self._position = 0
         self.state: ShellState | None = None
@@ -1002,18 +1061,11 @@ class PromptInput(Input):
         generation = self._generation
         self._tab_waits = generation if tab else None
         self.listings += 1
-        path, prefix = found.path, found.prefix
+        self.lister.ask(generation, found.path, found.prefix)
 
-        def work() -> None:
-            try:
-                listing = list_folder(path, prefix=prefix)
-            except Exception:  # noqa: BLE001 - a listing that fails offers nothing
-                listing = Listing()
-            with contextlib.suppress(Exception):  # the screen is gone
-                self.app.call_from_thread(self._listed, generation, listing)
-
-        self.run_worker(work, thread=True, group="completion", exclusive=True,
-                        exit_on_error=False)
+    def on_prompt_input_listed(self, message: Listed) -> None:
+        message.stop()
+        self._listed(message.generation, message.listing)
 
     def _listed(self, generation: int, listing: Listing) -> None:
         if generation != self._generation or self._covered() or self.browsing:
@@ -1088,6 +1140,10 @@ class PromptInput(Input):
             # enter takes the chosen row; with no row chosen, enter sends as typed.
             if event.key == "enter":
                 chosen = listing.chosen()
+                if self._found_for != self.value[: self.cursor_position]:
+                    # The list is for older text: keys written in one go with this Enter
+                    # have not reached it. Taking its row would drop them; send as typed.
+                    chosen = None
                 if chosen is not None and chosen.insert.rstrip() != self.found.word:
                     event.stop()
                     event.prevent_default()
