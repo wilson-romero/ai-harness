@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import unicodedata
 from dataclasses import dataclass
 from typing import Literal
 
+from harness.shell.render import FOREIGN_PREFIX, wrap_rows
 from harness.shell.terminal import Terminal, TtyTerminal  # the common interface (re-exported)
 from harness.text.redaction import redact
 from harness.text.safe_text import strip_controls, terminal_safe
@@ -137,10 +139,21 @@ APPROVAL_RULE = "-" * 72
 
 
 def render_for_terminal(proposal: Proposal, approval_hash: str, expires_at: str,
-                        redactions: int = 0) -> str:
-    """Header, then the full content between two rules. The content is shown as hashed."""
+                        redactions: int = 0, columns: int | None = None) -> str:
+    """Header, then the full content between two rules (`skill run` and `skill resume`).
+
+    The content is shown as hashed, as foreign text (security review 2026-11-27, F-04): every
+    line starts with FOREIGN_PREFIX and is cut into rows narrower than the terminal, each
+    continuation starting with CONTINUATION_PREFIX, as the conversation does. So the model
+    cannot draw a rule or a second notice that reads as the harness's, nor pad a line so that
+    the terminal wraps it into an unmarked row. Nothing else changes: not the content, nor
+    what is hashed. `columns` None: the terminal's width (80 when it cannot be known).
+    """
+    width = columns if columns is not None else shutil.get_terminal_size().columns
     header = approval_header(proposal, approval_hash, expires_at, redactions)
-    return "\n".join([*header, APPROVAL_RULE, proposal.content, APPROVAL_RULE])
+    rows = [row for line in proposal.content.split("\n")
+            for row in wrap_rows(line, width, FOREIGN_PREFIX)]
+    return "\n".join([*header, APPROVAL_RULE, *rows, APPROVAL_RULE])
 
 
 def approval_header(proposal: Proposal, approval_hash: str, expires_at: str,

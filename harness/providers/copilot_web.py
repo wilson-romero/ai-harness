@@ -282,6 +282,20 @@ REPLY_TEXT_JS = r"""
 """
 
 
+async def read_reply(turn: Locator, code_label: str) -> tuple[str, bool]:
+    """The text of one assistant turn as the page renders it, and whether it was cut.
+
+    The cap is applied again here (security review 2026-11-27, F-05): REPLY_TEXT_JS runs in
+    the page, and a hostile page could return more than it was asked for, or under-report its
+    length. What Python keeps is at most REPLY_MAX_CHARS characters, and a reply cut here is
+    reported as cut, like one the page cut.
+    """
+    length, text, walk_cut = await turn.evaluate(REPLY_TEXT_JS, [REPLY_MAX_CHARS, code_label])
+    text = text if isinstance(text, str) else ""
+    cut_here = len(text) > REPLY_MAX_CHARS
+    return text[:REPLY_MAX_CHARS], cut_here or int(length) > REPLY_MAX_CHARS or bool(walk_cut)
+
+
 def editor_length(text: str) -> int:
     """`EDITOR_LENGTH_JS` for a Python string."""
     return sum(1 for c in text if c not in "​‌‍⁠﻿\r\n")
@@ -771,15 +785,13 @@ class _Turn:
                     await self.submit(composer)
             if answer is not None:
                 turn = assistants.nth(answer)
-                length, text, walk_cut = await turn.evaluate(
-                    REPLY_TEXT_JS, [REPLY_MAX_CHARS, self.code_label]
-                )
+                text, cut = await read_reply(turn, self.code_label)
                 now = _digest(text)
                 if now != digest:
                     digest, since = now, time.monotonic()
                 stable = time.monotonic() - since >= window_s
                 if text.strip() and stable and await self.signal_met(page, composer, turn):
-                    return text, int(length) > REPLY_MAX_CHARS or bool(walk_cut)
+                    return text, cut
             await asyncio.sleep(POLL_S)
 
     async def signal_met(self, page: Page, composer: Locator, turn: Locator) -> bool:

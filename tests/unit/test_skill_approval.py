@@ -21,6 +21,7 @@ from tests.skill_support import (
     WriteEffect,
     build,
     copy_skills,
+    unmark_rows,
     with_effect,
 )
 
@@ -179,7 +180,8 @@ def test_escape_sequence_in_a_model_output(conn, data_dir, tmp_path):
     engine, session, _, _ = _engine(conn, data_dir, tmp_path, terminal, answer=answer)
     _run(engine, session)
     shown = terminal.shown[0]
-    content = shown.split("-" * 72 + "\n", 1)[1].rsplit("\n" + "-" * 72, 1)[0]
+    content = unmark_rows(
+        shown.split("-" * 72 + "\n", 1)[1].rsplit("\n" + "-" * 72, 1)[0].split("\n"))
     for char in ("\x1b", "‮", "\x07"):
         assert char not in shown
     proposal_line = next(l for l in shown.splitlines() if "bytes:" in l)
@@ -451,7 +453,8 @@ def _shown(terminal, label):
 
 
 def _shown_content(terminal):
-    return terminal.shown[0].split("-" * 72 + "\n", 1)[1].rsplit("\n" + "-" * 72, 1)[0]
+    marked = terminal.shown[0].split("-" * 72 + "\n", 1)[1].rsplit("\n" + "-" * 72, 1)[0]
+    return unmark_rows(marked.split("\n"))
 
 
 @pytest.mark.parametrize("target", [

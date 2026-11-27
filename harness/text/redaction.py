@@ -97,7 +97,10 @@ PATTERNS: tuple[tuple[str, Spans], ...] = (
     ("openai", _regex(r"\bsk-[A-Za-z0-9]{48}(?![A-Za-z0-9_-])")),
     ("github", _regex(r"\bgh[pousr]_[A-Za-z0-9]{36,255}(?![A-Za-z0-9_])")),
     ("github", _regex(r"\bgithub_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}(?![A-Za-z0-9_])")),
-    ("gitlab", _regex(r"\bglpat-[A-Za-z0-9_-]{20}(?![A-Za-z0-9_-])")),
+    # The legacy 20-character body and the current routable one, longer and with an optional
+    # `.<version>.<suffix>` (security review of 2026-11-27, F-01). Possessive: linear.
+    ("gitlab", _regex(r"\bglpat-[A-Za-z0-9_-]{20,300}+(?:\.[A-Za-z0-9]{2}\.[A-Za-z0-9]{1,32})?"
+                      r"(?![A-Za-z0-9_-])")),
     ("aws", _regex(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])")),
     ("google", _regex(r"\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])")),
     ("slack", _regex(r"\bxox[abposr]-[A-Za-z0-9-]{10,}")),
@@ -150,8 +153,8 @@ def redact(text: str) -> Redacted:
     later passes can only mask more. Not covered: a credential whose start another pattern
     swallowed (an Anthropic or Slack key ending in the header of a JWT leaves the JWT's other
     two segments, which no pattern matches); a hand-made chain of more than four glued
-    credentials that each find their boundary only once the next one is a marker (GitLab
-    tokens whose body ends in `-`, then an AWS key): the first ones stay in clear, and nothing
+    credentials that each find their boundary only once the next one is a marker (Google API
+    keys whose body ends in `-`, then a Slack token): the first ones stay in clear, and nothing
     says so (the single pass of before masked only the last one).
     """
     kinds: list[str] = []
@@ -206,8 +209,9 @@ class LineRedactor:
     with its END, the lines after the header line are dropped; if the END is not within
     `key_bytes` after the header, a marker says so and logging goes on at the next line.
 
-    Only the current line is held (at most `line_bytes`). Bytes that are not UTF-8 pass
-    unchanged (`surrogateescape`). No input makes it raise. Not covered: a credential of a
+    Only the current line is held (at most `line_bytes`). Whole terminal escape sequences are
+    dropped before a line is redacted. Bytes that are not UTF-8 pass unchanged
+    (`surrogateescape`). No input makes it raise. Not covered: a credential of a
     format `redact` does not know; a header or footer longer than 256 bytes split across reads;
     a key block longer than `key_bytes`; the unfinished line if `finish` is never called.
     """
@@ -267,7 +271,13 @@ class LineRedactor:
         else:  # the line end stays: a key block without END would otherwise swallow it
             body = bytes(self._line).rstrip(b"\r\n")  # a line holds one line end at most
             end = bytes(self._line[len(body):])
-            piece = Piece(size, _encoded(redact(_text(body)).text) + end, True)
+            # Whole escape sequences go first (security review of 2026-11-27, F-02): a
+            # credential right after a colour code has no word boundary and would stay in
+            # clear. The log keeps the text without them.
+            from harness.text.safe_text import drop_escape_sequences  # it imports this module
+
+            clean = drop_escape_sequences(_text(body))
+            piece = Piece(size, _encoded(redact(clean).text) + end, True)
         self._line.clear()
         self._size, self._tail, self._in_key, self._cr = 0, b"", self._open, False
         return piece
