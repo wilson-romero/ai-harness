@@ -80,6 +80,7 @@ Lo que existe, medido en `develop` (`5af28ed`) el 2026-11-27:
   Las reglas:
   - **Foco al abrir:** en la propuesta, nunca en un botón. Enter y Espacio sobre la propuesta no hacen nada.
   - **Armado:** durante `ARM_S` (0,5 s) los dos botones están deshabilitados. Una tecla, un Tab, un clic o una pulsación que llegue antes no encuentra ningún botón, y el manejador lo comprueba otra vez por el reloj. Esto cubre lo escrito por adelantado, que llega mientras la caja se arma.
+    - **Revisado el 2026-11-27 (D9):** el plazo solo por reloj caducaba en una máquina cargada; ahora la caja se arma tras `ARM_S` sin entrada contados desde que se pinta, y una entrada leída antes del armado nunca actúa.
   - **El final mostrado:** «Approve» sigue deshabilitado hasta que el final de la propuesta ha estado en pantalla. Cuenta igual llegar con teclas, con la rueda o con la barra: se mira la posición del área cada 0,1 s. Si la propuesta cabe, se habilita al armarse.
   - **Orden de Tab:** propuesta → Approve → Reject. Con «Approve» deshabilitado, el primer Tab lleva a «Reject», que no decide sin su pregunta (D3).
   - **Una pulsación:** tras la primera, todos los botones se deshabilitan, y `TuiTerminal.press` toma la espera y la cierra en el mismo paso (`_take`). Un doble clic, o Enter mantenido, decide una vez.
@@ -201,10 +202,38 @@ Lo que existe, medido en `develop` (`5af28ed`) el 2026-11-27:
   - pruebas en `tests/unit/test_shell_tui_styles.py`;
   - spec `interactive-shell`: el requisito «El texto ajeno no se pinta como un aviso del harness».
 
+### D9 · El armado no depende de la velocidad de la máquina (segunda ejecución en Windows, 2026-11-27)
+
+- **Medido:** Windows 11, copia de prueba de `79cde60`, `arm_s=0.5`, tres ejecuciones de `test_keys_typed_ahead_of_the_box_cannot_approve`, tiempos desde el `on_mount` de la caja:
+  - las teclas escritas por adelantado se procesaron entre +154 y +601 ms, +171 y +452 ms, y +159 y +458 ms, todas sin armar salvo un Enter a +601 ms (armada, foco en la propuesta, sin efecto);
+  - la caja se armó a +502, +501 y +501 ms;
+  - el Tab del test llegó a +656, +530 y +586 ms (armada, el foco pasa a Approve, habilitado porque la propuesta cabe), y su Enter a +702, +602 y +663 ms: aprobado, `written=1`.
+
+  Ninguna tecla procesada sin armar tuvo efecto. Las que aprobaron llegaron después del plazo: el plazo solo por reloj caduca, y en una máquina lenta o un bucle ocupado no separa lo escrito antes de lo escrito después. Reproducido en macOS sin Windows: teclas creadas (leídas) antes de `_arm()` y entregadas después aprueban con el código anterior (`test_keys_read_before_a_late_arming_never_act`: la caja se cierra y aplica).
+- **Qué:** dos reglas, juntas:
+  1. **Silencio antes de armar.** Los botones se habilitan cuando la caja se ha pintado (`call_after_refresh` tras montarla, `shown`) y después ha pasado `ARM_S` sin ninguna tecla, pegado o botón del ratón. Cada entrada recibida sin armar reinicia la cuenta (`_quiet_from`); un único temporizador vuelve a mirar cuando el silencio se cumpliría (`_arm_if_quiet`).
+  2. **Corte por la hora de lectura.** Cada evento de entrada trae la hora a la que el driver de Textual lo leyó del terminal (`Message.time`). Una entrada leída antes del momento del armado (`armed_at`) nunca actúa, por tarde que la procese el bucle. Se descarta donde se entrega (`check_message_enabled` de la propuesta, de los botones y de la caja), así que no llega a ningún binding ni burbujea. Textual rehace cada evento del ratón con una hora nueva antes de dárselo al widget, así que el ratón se juzga en la caja, sobre el evento que hizo el driver (`_forward_event`). Y como la aplicación fabrica el Click al procesar el MouseUp, un clic cuenta solo si su MouseDown pasó el filtro sobre ese mismo botón.
+
+  La caja usa un solo reloj, el de los eventos (`ApprovalScreen.clock`), para el armado, la comprobación de `on_button_pressed` y la confirmación de Reject. ctrl+c, ctrl+q y ctrl+n son bindings prioritarios de la aplicación y siguen funcionando sin armar. Las teclas de desplazamiento con binding propio (`pagedown`, `end`…) tampoco deciden y también reinician el silencio.
+- **Por qué:** lo que se promete es que lo escrito antes de que la caja aparezca no aprueba. La primera regla cubre a quien sigue escribiendo cuando aparece la caja: mientras escribe, la caja no se arma. La segunda cubre el bucle ocupado: las teclas ya leídas que el bucle procesa tarde. Ninguna depende de cuánto tarde la máquina.
+- **Alternativas rechazadas:**
+  - Solo silencio: con el bucle ocupado, el temporizador y las teclas ya leídas se procesan juntos y el orden no está garantizado; el armado puede ir primero.
+  - Solo armar en el primer momento ocioso tras montar la caja: las colas de la aplicación y de la pantalla son distintas, así que «ocioso» no garantiza que lo ya leído se haya procesado.
+  - Subir `ARM_S`: sigue dependiendo de la velocidad de la máquina y hace esperar a todos.
+  - Descartar toda entrada sin armar: impediría desplazarse por la propuesta con el teclado en el primer medio segundo, sin cerrar nada que el silencio no cierre ya.
+- **Residual (escrito, no se arregla):** unas teclas que el terminal, el sistema o una sesión remota retengan y entreguen después de `ARM_S` de silencio llegan con hora nueva, y ninguna aplicación las distingue de unas teclas nuevas. La regla depende del reloj con el que Textual sella los eventos (`textual._time.get_time`, privado; Textual está fijado exacto y un test compara los dos relojes).
+- **Impacto:**
+  - spec `interactive-shell`: el texto del requisito «Nada aprueba al abrirse la caja» y tres escenarios nuevos;
+  - `tui.py`: `ProposalArea`, `ApprovalButton` y `ApprovalScreen`;
+  - pruebas en `tests/unit/test_shell_tui_arming.py`;
+  - `tests/tui_support.py` (`approval_box`, que espera a `shown`; ver 8.2).
+
 ## Risks / Trade-offs
 
 - [Aprobar es más fácil que con el código: un Tab y un Enter] → lo aceptó Wilson el 2026-11-27. Las protecciones de D2 cierran lo accidental, y lo deliberado sigue ligado al hash, con caducidad y uso único.
 - [Un clic llega en el primer medio segundo y se pierde] → es lo pedido; el botón se ve deshabilitado hasta que se puede pulsar.
+- [Quien sigue escribiendo cuando aparece la caja no la ve armarse hasta que para medio segundo] → es lo pedido (D9); el botón se ve deshabilitado.
+- [Un terminal o una sesión remota retienen teclas más de `ARM_S` y las entregan después] → residual escrito en D9: llegan como teclas nuevas.
 - [Textual cambie cómo trata un `Button` deshabilitado o el orden de Tab] → Textual está fijado exacto. Las pruebas de la caja fallan si un botón deshabilitado se puede pulsar o enfocar.
 - [Una pulsación de una caja vieja llega a la siguiente] → se vacía al abrir, y el motor exige el mismo hash.
 - [Quien quiera escribir el código en la pantalla completa no puede] → `chat --plain`.
