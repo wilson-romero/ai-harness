@@ -141,7 +141,9 @@ def test_ctrl_c_interrupts_the_question_not_the_screen(data_dir):
         child.type("pregunta lenta\r")
         wait_for_running(data_dir, session_id)
         child.type("\x03")
-        child.read_until("is uncertain")
+        # "interrupted: request <id> is uncertain: the prompt ...": the pane may wrap the
+        # line between any two words (tui-spacing moved the text column), never inside one.
+        child.read_until("uncertain:")
         child.type("/exit\r")
         assert child.wait() == 0
     finally:

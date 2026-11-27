@@ -647,11 +647,16 @@ class Conversation:
         session = self._service.require_session(str(self._session_id))
         entries = self._service.history(str(session.session_id))
         last = next((e for e in reversed(entries) if e.role == "user"), None)
+        panel = self._panel()
+        # Everything the side panel shows, which a narrow screen hides (tui-spacing D2).
         self._say("\n".join([
             f"session:  {session.session_id} ({terminal_safe(session.name)}), {session.status}",
             f"project:  {session.project_id or '-'}",
             f"provider: {self._deps.provider_name}",
             "last request: " + (f"{last.request_id} {last.request_status}" if last else "-"),
+            f"sends: {panel.sends}",
+            f"memory: {len(panel.notes)} note(s) in the last question",
+            *(f"  {terminal_safe(note)}" for note in panel.notes),
             "attachment: " + (self._attachment[0] if self._attachment else "-"),
         ]))
 

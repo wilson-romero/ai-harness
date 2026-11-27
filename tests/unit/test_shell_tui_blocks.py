@@ -9,8 +9,8 @@ from __future__ import annotations
 import time
 
 import pytest
-from rich.color import Color
 from textual.content import Content
+from textual.style import Style
 from textual.widgets import Button
 
 from harness.shell import blocks
@@ -41,7 +41,12 @@ from harness.shell.tui import (
 from tests.tui_support import SIZE, Tui
 from tests.unit.test_shell_tui import _approval, _palette, _skill_tui
 
-CHROME_BG = Color.parse("#3a3f4b").triplet
+
+
+def _chrome_bg() -> tuple[int, int, int]:
+    """The fill of CHROME as the running theme draws it (a theme variable since tui-spacing)."""
+    colour = Style.parse(CHROME).background
+    return (colour.r, colour.g, colour.b)
 
 
 def long_reply(lines: int = 60, first: str = "## Resumen") -> str:
@@ -60,10 +65,11 @@ def _turns(tui) -> list[Turn]:
 def _chrome_cells(tui) -> list[str]:
     """Per screen row, the characters drawn on the chrome background."""
     rows = []
+    chrome_bg = _chrome_bg()
     for strip in tui.app.screen._compositor.render_strips():
         rows.append("".join(seg.text for seg in strip if seg.style is not None and
                             seg.style.bgcolor is not None and
-                            seg.style.bgcolor.triplet == CHROME_BG))
+                            tuple(seg.style.bgcolor.triplet) == chrome_bg))
     return rows
 
 

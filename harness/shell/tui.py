@@ -96,6 +96,8 @@ from harness.shell.render import (
     rows_of_plain_text,
 )
 from harness.shell import spacing
+from harness.shell.palette import ROLES
+from harness.shell.palette import css_variables as palette_css
 from harness.shell.terminal import PanelState, ShellState, WaitInterrupted
 from harness.skills.approvals import ButtonPress
 from harness.text.safe_text import terminal_safe
@@ -115,39 +117,39 @@ BROWSE_FOOTER = "up/down move  enter open/close  +/- all  end latest  esc back t
 ARM_S = 0.5  # the approval buttons stay disabled this long after the box opens
 HISTORY_MAX = 200  # lines typed at the conversation input, kept in memory only
 TICK_S = 1.0
-SIDE_COLUMNS = 34
 PANEL_NOTES = 12
 UNCUT = 10_000  # columns the core is told: it cuts no row (D3)
 FILE_PICKER_MAX = 500
 FOREIGN_TITLE = "text from outside the harness"
 APPROVAL_TITLE = "Approval requested"
 
-# Style names of the rows (render.py) to Textual styles. Plain colours only: no style here
-# names a link or an action, and no text is ever parsed for a style.
+# Style names of the rows (render.py) to Textual styles. Theme variables only, through the
+# roles of palette.py (tui-spacing D1): no style here names a link or an action, and no text is
+# ever parsed for a style. Foreign text never gets a status colour, a fill or reverse.
 STYLES: dict[str, str] = {
     GUTTER: "dim",
     FOREIGN: "",
     HARNESS: "",
-    HARNESS_ERROR: "bold #e06c75",
-    HARNESS_WARNING: "#e5c07b",
+    HARNESS_ERROR: f"bold {ROLES['error-text']}",
+    HARNESS_WARNING: ROLES["warning-text"],
     STATUS: "bold",
-    MD_HEADING: "bold #61afef",
-    MD_BULLET: "#c678dd",
-    MD_QUOTE: "italic #98c379",
+    MD_HEADING: f"bold {ROLES['heading-text']}",
+    MD_BULLET: ROLES["bullet-text"],
+    MD_QUOTE: "italic dim",
     MD_RULE: "dim",
     MD_FENCE: "dim",
     # A theme colour no harness status uses: inline code written by the model, such as
     # `warning: ...`, must not look like the harness's own warning (approval-buttons D8).
-    MD_CODE: "$text-secondary",
+    MD_CODE: ROLES["code-text"],
     MD_STRONG: "bold",
     MD_EM: "italic",
-    MD_LINK: "underline #56b6c2",
+    MD_LINK: "underline",
 }
 
 # The chrome of a folded block (its collapsed line and the footer of a harness block): the one
 # style with a background. No style of STYLES has one, and foreign text only ever gets a style
 # of STYLES, so no foreign text can look like it (collapsible-blocks D4).
-CHROME = "bold #e6e6e6 on #3a3f4b"
+CHROME = f"bold {ROLES['fold-text']} on {ROLES['fold-fill']}"
 EXCERPT_STYLE = "italic"
 TYPED_MARK = "› "  # before an excerpt of what the person typed
 CLOSED = "▸"
@@ -690,6 +692,11 @@ class Turn(Vertical):
         return self.summary_line if self.closed or self.you is None else self.you
 
     def add(self, block: FoldBlock) -> None:
+        if self.you is None and not self.items and self.parent is not None \
+                and self.parent.children and self.parent.children[0] is self:
+            # The first block of a pane starts at its top: the gap is between blocks
+            # (tui-spacing D5), never above the first one.
+            block.add_class("-lead")
         self.items.append(block)
         self.mount(block)
         if self.closed:
@@ -1205,40 +1212,49 @@ class HarnessApp(App[int]):
         Binding("ctrl+q", "leave", show=False, priority=True),
         Binding("ctrl+n", "new_session", show=False, priority=True),
     ]
-    # The spacing scale and the colour roles first (approval-buttons D7): the rules of the
-    # approval box name them, never a bare number or a colour of their own.
-    CSS = spacing.css_variables() + """
-    $approval-frame: $warning;
-    $approval-fill: $warning-muted;
-    $foreign-frame: $secondary;
-    $box-fill: $surface;
+    # The input's bottom margin is the footer's row (both dock at the bottom), not a gap.
+    # Two classes on every screen by its size (tui-spacing D2, D5): the side panel only where
+    # it fits, and blank rows only where the rows allow.
+    HORIZONTAL_BREAKPOINTS: ClassVar = [(0, "-narrow"), (spacing.WIDE_COLUMNS, "-wide")]
+    VERTICAL_BREAKPOINTS: ClassVar = [(0, "-short"), (spacing.SNUG_ROWS, "-tall")]
+    # The spacing scale and the colour roles first (approval-buttons D7, tui-spacing D1): the
+    # rules below name them, never a bare number or a colour of their own.
+    CSS = spacing.css_variables() + "\n" + palette_css() + """
     Screen { layout: vertical; }
     #main { height: 1fr; }
-    #log { width: 1fr; padding: 0 1; scrollbar-size-vertical: 1; }
-    #side { width: %d; padding: 0 1; border-left: solid $panel-lighten-2; }
-    #prompt { dock: bottom; margin: 0 0 1 0; }
-    #footer { dock: bottom; height: 1; background: $panel; color: $text-muted; padding: 0 1; }
-    #working { height: auto; color: $text-muted; display: none; }
-    #conversation { height: auto; min-height: 100%%; }
-    .you { margin: 1 0 0 0; padding: 0 1; border-left: thick $accent; }
-    .harness { color: $text-muted; }
-    .foreign { margin: 1 0 0 0; padding: 0 1; border: round $secondary;
-               border-title-color: $secondary; border-title-style: bold;
-               border-subtitle-color: #e6e6e6; border-subtitle-background: #3a3f4b;
+    #log { width: 1fr; padding: 0 $edge; scrollbar-size-vertical: 1; }
+    #side { width: $side-w; padding: 0 $space-2; border-left: solid $rule; }
+    Screen.-narrow #side { display: none; }
+    #prompt { dock: bottom; margin: 0 $edge 1 $edge; padding: 0 $inset; }
+    Screen.-short #prompt { height: 2; border: none;
+                            border-top: hkey $rule; padding: 0 $space-2; }
+    #footer { dock: bottom; height: 1; background: $chrome-fill; color: $chrome-muted;
+              padding: 0 $edge; }
+    #working { height: auto; color: $chrome-muted; display: none; padding: 0 $space-2; }
+    #conversation { height: auto; min-height: 100%; }
+    .you { margin: $row 0 0 0; padding: 0 $inset; border-left: thick $you-bar;
+           background: $you-fill; }
+    .harness { color: $chrome-muted; margin: $row 0 0 0; padding: 0 $space-2; }
+    Screen.-short .harness, .harness.-lead { margin: 0; }
+    .foreign { margin: $row 0 0 0; padding: 0 $inset; border: round $foreign-frame;
+               border-title-color: $foreign-frame; border-title-style: bold;
+               border-subtitle-color: $fold-text; border-subtitle-background: $fold-fill;
                border-subtitle-style: bold; }
     .session-log { height: auto; }
     .turn { height: auto; }
-    .turn-summary { display: none; margin: 1 0 0 0; }
+    .turn-summary { display: none; margin: $row 0 0 0; padding: 0 $space-2; }
+    .turn:first-child > .turn-summary { margin: 0; }
     .turn.-closed > .turn-summary { display: block; }
     .turn.-closed > .you, .turn.-closed > .block { display: none; }
     .turn-summary, .block.-collapsed { height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
-    .-selected { background: $accent 25%%; }
-    .foreign.-selected { border: round $accent; }
-    .foreign.-collapsed, .foreign.-collapsed.-selected { border: none; margin: 1 0 0 0;
-                                                         padding: 0 1; }
-    #prompt.-browsing { border: tall $warning; }
+    .-selected { background: $select-fill; }
+    .foreign.-selected { border: round $select-frame; }
+    .foreign.-collapsed, .foreign.-collapsed.-selected { border: none; margin: $row 0 0 0;
+                                                         padding: 0 $space-2; }
+    #prompt.-browsing { border: tall $browse-frame; }
+    Screen.-short #prompt.-browsing { border: none; border-top: hkey $browse-frame; }
     #approval { align: center middle; }
-    #approval-box { width: 90%%; height: 90%%; border: heavy $approval-frame;
+    #approval-box { width: 90%; height: 90%; border: heavy $approval-frame;
                     padding: 0 $box-x;
                     border-title-color: $approval-frame; border-title-style: bold;
                     background: $box-fill; }
@@ -1261,8 +1277,10 @@ class HarnessApp(App[int]):
     #approval.-roomy #approval-box { padding: $row $box-x; }
     #approval.-roomy #approval-content { margin: $row 0; }
     .picker { align: center middle; }
-    #picker-box { width: 80%%; height: 70%%; border: round $accent; background: $surface; }
-    """ % SIDE_COLUMNS
+    #picker-box { width: 80%; height: 70%; border: round $picker-frame; background: $box-fill;
+                  padding: $row $space-2; }
+    Screen.-short #picker-box { padding: 0 $space-1; }
+    """
 
     def __init__(self, terminal: TuiTerminal, body: Callable[[], int], *,
                  arm_s: float = ARM_S) -> None:
