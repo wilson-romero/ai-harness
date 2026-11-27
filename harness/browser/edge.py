@@ -136,17 +136,23 @@ class EdgeLauncher:
 
 def launch_error(exc: PlaywrightError, profile: Path) -> ProfileInUse | BrowserLaunchFailed:
     message = str(exc)
-    if any(marker in message for marker in PROFILE_IN_USE_MARKERS) or (
-            _closed_at_launch(exc, message) and _profile_held(profile)):
-        return ProfileInUse(
-            "the dedicated Edge profile is already open in another Edge window; "
-            "close that window and try again"
-        )
     # Only the first line: the rest is Playwright's call log, with the full command line.
     first_line = message.splitlines()[0] if message else type(exc).__name__
-    return BrowserLaunchFailed(
-        f"Microsoft Edge could not be started: {first_line.replace(str(profile), '<profile>')}"
-    )
+    said = first_line.replace(str(profile), "<profile>")
+    if any(marker in message for marker in PROFILE_IN_USE_MARKERS):
+        return ProfileInUse(
+            "the dedicated Edge profile is already open in another Edge window; "
+            f"close that window and try again (Edge said: {said})"
+        )
+    if _closed_at_launch(exc, message) and _profile_held(profile):
+        # Revised on 2026-11-27 (review): the lock may also be one an Edge that crashed left
+        # behind, with an unrelated close; the report says so and keeps what Edge said.
+        return ProfileInUse(
+            "the dedicated Edge profile is already open in another Edge window, or an Edge "
+            "that crashed left its lock in it; close that window and try again "
+            f"(Edge closed at once: {said})"
+        )
+    return BrowserLaunchFailed(f"Microsoft Edge could not be started: {said}")
 
 
 def _closed_at_launch(exc: PlaywrightError, message: str) -> bool:

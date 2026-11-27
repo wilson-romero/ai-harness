@@ -89,3 +89,21 @@ def test_another_failure_on_a_held_profile_is_a_launch_failure(profile, artefact
     error = launch_error(_error(OTHER_FAILURE, profile), profile)
     assert isinstance(error, BrowserLaunchFailed)
     assert "is not found" in str(error)
+
+
+@pytest.mark.parametrize("artefact", ["lockfile", "SingletonLock link"])
+def test_in_use_by_an_immediate_close_keeps_edges_message_and_names_a_stale_lock(
+        profile, artefact):
+    """A lock left by an Edge that crashed, with an unrelated close at launch, also reads as
+    'in use': the report says so and keeps what Playwright said (review of 2026-11-27)."""
+    _hold(profile, artefact)
+    error = launch_error(_error(WINDOWS_CLOSED, profile, TargetClosedError), profile)
+    _in_use(error, profile)
+    assert "Target page, context or browser has been closed" in str(error)
+    assert "crashed" in str(error)
+
+
+def test_in_use_by_a_named_singleton_keeps_edges_message(profile):
+    error = launch_error(_error(MACOS_SINGLETON, profile), profile)
+    _in_use(error, profile)
+    assert "Failed to create a ProcessSingleton" in str(error)
