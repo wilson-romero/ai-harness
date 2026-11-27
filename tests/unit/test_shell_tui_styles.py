@@ -7,6 +7,7 @@ from textual.style import Style
 
 from harness.shell.render import (
     FOREIGN,
+    GUTTER,
     HARNESS_ERROR,
     HARNESS_WARNING,
     MD_BULLET,
@@ -19,7 +20,7 @@ from harness.shell.render import (
     MD_RULE,
     MD_STRONG,
 )
-from harness.shell.tui import STYLES
+from harness.shell.tui import CHROME, EXCERPT_STYLE, STYLES
 from tests.shell_support import CountingProvider
 from tests.tui_support import SIZE, Tui
 from tests.unit.test_shell_tui import _skill_tui
@@ -40,6 +41,13 @@ async def test_no_style_of_foreign_text_takes_a_status_colour_a_fill_or_reverse(
             assert style.foreground not in statuses.values(), name
             assert style.background is None, name
             assert not style.reverse, name
+        # The excerpt of a collapsed line is foreign or typed text too (collapsible-blocks
+        # D4); the chrome of a folded block is the harness's, and only it has a fill.
+        excerpt = Style.parse(EXCERPT_STYLE)
+        assert excerpt.foreground not in statuses.values()
+        assert excerpt.background is None and not excerpt.reverse
+        assert Style.parse(CHROME).background is not None
+        assert Style.parse(STYLES[GUTTER]).background is None
         await tui.ready(pilot)
         await tui.send(pilot, "/exit")
 
