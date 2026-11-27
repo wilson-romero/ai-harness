@@ -114,6 +114,8 @@ Premisas medidas aquí (2026-11-27, Textual 8.2.8 instalado, macOS 26.2, Termina
   - **si cabe con una fila de margen,** vuelve el ancla y se ve el final, como antes;
   - **si es más alta,** su cabecera queda en la primera fila del panel (`scroll_to_widget(top=True)`).
 
+  Solo se coloca la respuesta más nueva (`_arriving`): una a la que siguió otra antes de redibujar la pantalla no mueve el panel. La decisión espera a que la respuesta tenga su altura: recién montado, un bloque mide 0 filas y parecería caber. Espera como mucho `LAYOUT_WAIT_REFRESHES` (20) redibujados; después se ve el final, como antes. Enviar una línea o empezar a recorrer los bloques antes de que se coloque anula la colocación. Esto se añadió tras la revisión del 2026-11-27: `test_output_does_not_move_the_pane_while_browsing_at_the_end` fallaba 4 de 5 veces y pasaba 1. La prueba daba por hecho que, tras diez respuestas largas, el panel estaba al final; con D6 está en el principio de la última. Y la vez que pasaba era el fallo del producto: el primer redibujado llegó antes de la maquetación, la respuesta midió 0 filas y el panel se ancló a su final.
+
   El pie empieza por `↓ N more rows below` mientras el panel tenga filas debajo de lo que muestra. Se actualiza al moverse el panel (vigilando `scroll_y` y `max_scroll_y`) y desaparece al llegar al final. Si la persona recorría los bloques o leía más arriba, nada se mueve, como manda `collapsible-blocks`. Lo que el harness muestre tras la respuesta tampoco mueve el panel. Enviar una línea lleva al final, como siempre.
 - **Por qué:**
   - Una respuesta entera y anclada al final se leería desde su última línea.

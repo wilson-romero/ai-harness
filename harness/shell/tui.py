@@ -136,6 +136,9 @@ def below_hint(rows: int) -> str:
 ARM_S = 0.5  # the approval buttons stay disabled this long after the box opens
 HISTORY_MAX = 200  # lines typed at the conversation input, kept in memory only
 TICK_S = 1.0
+# Refreshes a reply just mounted may wait for its layout before the pane decides where to show
+# it (reply-rendering D6); past them it is shown from its end, as before.
+LAYOUT_WAIT_REFRESHES = 20
 PANEL_NOTES = 12
 UNCUT = 10_000  # columns the core is told: it cuts no row (D3)
 FOREIGN_FRAME = 2 + 2 * spacing.BLOCK_INSET  # a foreign block's border and padding, in columns
@@ -1648,6 +1651,7 @@ class HarnessApp(App[int]):
         self._session_key: str | None = None
         self._session_log: SessionLog | None = None
         self.selected: Turn | FoldBlock | None = None
+        self._arriving: FoldBlock | None = None  # the newest reply the pane is placing (D6)
         # The text width inside a foreign block (reply-rendering D1), measured on every resize;
         # until the first, that of an 80-column terminal.
         self.foreign_width = 80 - 2 * spacing.EDGE - FOREIGN_FRAME
@@ -1777,6 +1781,7 @@ class HarnessApp(App[int]):
         up to read; sending a line or switching session always goes to the end."""
         log = self._log()
         if force:  # checked first: a line sent while browsing goes to the end too
+            self._arriving = None  # a reply not placed yet no longer moves the pane
             log.anchor()
             return
         if self._following():
@@ -1788,12 +1793,21 @@ class HarnessApp(App[int]):
         log = self._log()
         return not self.query_one(PromptInput).browsing and log.scroll_y >= log.max_scroll_y - 1
 
-    def _show_start(self, block: FoldBlock) -> None:
+    def _show_start(self, block: FoldBlock, waited: int = 0) -> None:
         """A reply just laid out: whole in the pane, the end in view as before; taller than
-        the pane, its first line at the top and the footer says how much is below."""
+        the pane, its first line at the top and the footer says how much is below.
+
+        Only the newest reply is placed: one that a newer reply followed before the screen
+        refreshed leaves the pane to it. A block not laid out yet measures 0 rows and would
+        look as if it fit, so the decision waits for its layout (review 2026-11-27: the first
+        refresh can come before it)."""
         log = self._log()
-        if not block.is_attached:
+        if not block.is_attached or block is not self._arriving:
             return
+        if block.outer_size.height == 0 and waited < LAYOUT_WAIT_REFRESHES:
+            self.call_after_refresh(self._show_start, block, waited + 1)
+            return
+        self._arriving = None
         if block.outer_size.height + spacing.ROW <= log.size.height:
             log.anchor()
             log.scroll_end(animate=False, immediate=True)
@@ -1870,6 +1884,7 @@ class HarnessApp(App[int]):
                 # The pane stops following the end until the reply is laid out: a reply taller
                 # than the pane is shown from its start (reply-rendering D6).
                 self._log().release_anchor()
+                self._arriving = block
                 self.call_after_refresh(self._show_start, block)
                 return
         else:
@@ -2089,6 +2104,8 @@ class HarnessApp(App[int]):
             self.set_all(bool(args[0]))
 
     def browsing_changed(self, browsing: bool) -> None:
+        if browsing:
+            self._arriving = None  # browsing starts: nothing the screen shows moves the pane
         self._show_below(browsing)
         if not browsing:
             self._select(None)

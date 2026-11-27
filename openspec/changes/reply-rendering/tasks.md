@@ -35,6 +35,24 @@
   - La prueba de pseudo-terminal pasa a `test_a_long_reply_arrives_whole_and_folds_at_a_real_terminal`: espera `more rows below`, pliega con `Esc`+`enter`, ve `▸ mock · 64 lines` y la abre otra vez.
   - Oráculo: `test_shell_tui_blocks.py` `40 passed`; el fichero de pseudo-terminal en 6.2.
 
+- [x] 2.3 Colocación de una respuesta, tras la revisión del 2026-11-27 sobre `fe808fc`. Allí `test_output_does_not_move_the_pane_while_browsing_at_the_end` falló 4 de 5 veces y pasó 1 (`63 == 77`).
+  - Causa: dos cosas.
+    - La prueba llenaba el panel con respuestas largas y daba por hecho que quedaba al final. Con D6 queda en el principio de la última.
+    - El producto, a veces, decidía antes de la maquetación: la respuesta medía 0 filas, «cabía» y el panel se anclaba a su final. Era la vez que la prueba pasaba. En una sonda de 4 ejecuciones, en 1 todas las alturas eran 0.
+  - Arreglo en `tui.py`:
+    - solo se coloca la respuesta más nueva (`_arriving`);
+    - la decisión espera su altura, como mucho 20 redibujados;
+    - enviar una línea o empezar a recorrer los bloques anula la colocación.
+  - La prueba ahora llena el panel con respuestas que caben, así que está en su final. Comprueba lo mismo: recorriendo los bloques, una respuesta larga que llega no mueve el panel.
+  - Oráculo, en `tests/unit/test_shell_tui_replies.py`:
+    - `test_a_reply_not_laid_out_yet_is_not_taken_for_one_that_fits` (determinista: coloca a mano un bloque montado sin maquetar);
+    - `test_a_line_sent_before_the_reply_is_placed_goes_to_the_end`;
+    - `test_of_replies_that_arrive_together_the_newest_is_shown_from_its_start`.
+  - Recibo (2026-11-27, macOS arm64):
+    - Con el `tui.py` de `fe808fc`: las dos primeras fallan 5 de 5; la tercera falla 2 de 5; la prueba reescrita pasa 5 de 5, porque su propia comprobación nunca falló.
+    - Con el arreglo, las cuatro dan 30 de 30 solas y 12 de 12 en copias a la vez.
+    - Las hermanas que leen la geometría del panel tras llegar texto (`test_switching_session_shows_that_sessions_blocks`, `test_the_palette_starts_browsing_and_jumps_to_the_latest`, `test_sending_while_browsing_goes_to_the_end`, `test_the_block_being_read_does_not_jump` y las tres de D6): 12 de 12 en copias a la vez cada una.
+
 ## 3. README (D7)
 
 - [x] 3.1 «Conversación › Aspecto»: tablas y bloques de código, respuestas enteras, el pie `↓`, el límite de 64 000 y la entrada «Texto resaltado en azul» (selección de Textual; copiar en Terminal.app y Windows Terminal).
@@ -84,6 +102,10 @@
     - `openspec validate --all --strict`: 25 de 25 válidos, código 0.
     - `scripts/check_sec_matrix.py`: PASS (15 filas, 135 pruebas), código 0.
     - `scripts/check_public_safety.py` sobre los 18 ficheros del change: PASS, código 0.
+  - Repetidas tras la tarea 2.3, sobre `589619e` (con `develop` integrado en `fe808fc`):
+    - Sin Edge: `1884 passed, 157 deselected` en 314 s, sin fallos.
+    - Edge: `155 passed, 1886 deselected` en 1278 s, código 0.
+    - `openspec validate --all --strict` 25 de 25, `check_sec_matrix.py` PASS y `check_public_safety.py` PASS.
 - [x] 6.3 Sin código por plataforma: `tests/unit/test_portability.py` pasa con los ficheros nuevos.
   - Recibo: está en la tanda sin Edge de 6.2, que pasa entera.
 - [x] 6.4 Capturas antes (`1a49ad2`) y después, con Pilot y el Mock: una tabla y un bloque de código a 80×40, 100×40 y 120×40, y una respuesta de 73 líneas al llegar a 100×30. Texto y SVG, fuera del repo; el texto va en el informe del change.

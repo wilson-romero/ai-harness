@@ -8,7 +8,8 @@ from textual.widgets import Static
 
 from harness.shell import blocks
 from harness.shell.blocks import Fold
-from harness.shell.tui import FOREIGN_FRAME, ForeignBlock, below_hint
+from harness.shell.render import foreign_rows
+from harness.shell.tui import FOREIGN_FRAME, UNCUT, ForeignBlock, below_hint
 from tests.tui_support import SIZE, Tui
 from tests.unit.test_shell_tui_blocks import _ask, _replies, _turns, long_reply
 
@@ -55,6 +56,59 @@ async def test_a_long_reply_arrives_whole_with_its_start_at_the_top_of_the_pane(
         assert "## Resumen" in tui.screen()
         below = log.max_scroll_y - log.scroll_y
         assert below > 0 and _footer(tui).startswith(below_hint(below))
+        await tui.send(pilot, "/exit")
+
+
+async def test_a_reply_not_laid_out_yet_is_not_taken_for_one_that_fits(tmp_path):
+    """The placement waits for the reply's layout: a block mounted and placed before the
+    screen laid it out measures 0 rows. Deterministic: the placement is called by hand at
+    that moment (review 2026-11-27; before the fix it anchored the pane to the reply's end)."""
+    tui = Tui(tmp_path)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        await tui.ready(pilot)
+        app = tui.app
+        app.start_turn("pregunta sintética")
+        await pilot.pause(0.1)
+        rows = foreign_rows(long_reply(80), UNCUT, markdown=True)[0]
+        block = ForeignBlock(rows, "mock", kind=blocks.REPLY, preview=app._preview(),
+                             height_of=app._height_of(True))
+        app.session_log.turns[-1].add(block)
+        app._log().release_anchor()
+        app._arriving = block
+        assert block.outer_size.height == 0  # mounted, not laid out
+        app._show_start(block)
+        await pilot.pause(0.3)
+        assert block.outer_size.height > app._log().size.height
+        assert 0 <= _top_in_pane(tui, block) <= 1
+        await tui.send(pilot, "/exit")
+
+
+async def test_of_replies_that_arrive_together_the_newest_is_shown_from_its_start(tmp_path):
+    tui = Tui(tmp_path)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        await tui.ready(pilot)
+        rows = foreign_rows(long_reply(40), UNCUT, markdown=True)[0]
+        for n in range(10):
+            tui.app.start_turn(f"pregunta sintética {n}")
+            tui.app.show_rows(rows, "mock")
+        await pilot.pause(0.3)
+        assert 0 <= _top_in_pane(tui, _replies(tui)[-1]) <= 1
+        await tui.send(pilot, "/exit")
+
+
+async def test_a_line_sent_before_the_reply_is_placed_goes_to_the_end(tmp_path):
+    """Sending always goes to the end (collapsible-blocks): a reply that has not been placed
+    yet does not pull the pane back to its start afterwards."""
+    tui = Tui(tmp_path)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        await tui.ready(pilot)
+        tui.app.start_turn("pregunta sintética")
+        await pilot.pause(0.1)
+        tui.app.show_rows(foreign_rows(long_reply(80), UNCUT, markdown=True)[0], "mock")
+        tui.app.start_turn("otra pregunta")  # before any refresh
+        await pilot.pause(0.3)
+        log = tui.app._log()
+        assert log.scroll_y == log.max_scroll_y
         await tui.send(pilot, "/exit")
 
 
