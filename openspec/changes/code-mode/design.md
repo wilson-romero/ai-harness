@@ -12,7 +12,7 @@ Lo que ya existe y sobre lo que se construye. Cada premisa se midió aquí, en `
 | Pieza | Dónde | Medido aquí |
 |---|---|---|
 | Política sin servidor: los motivos 2 a 6 se deciden sin arrancar nada | `harness/mcp/policy.py`, `decide_before_start`, `check_arguments` | Reutilizada tal cual. Los 54 casos de rechazo de `tests/unit/test_mcp_plan.py` pasan sin cambiar la política. |
-| JSON estricto | `harness/core/strict_json.py`, `loads_strict` | Ya rechazaba lo que el plan necesita: duplicados, `NaN`/`Infinity`, datos tras el valor, BOM, clave no cadena, control crudo en una cadena, entero de más de 4 300 cifras y profundidad. Faltaban dos cosas: decir **qué** rechazó sin leer el mensaje, y un tope de profundidad más estricto que 32. Además **acepta** `"\ud800"` (sustituto suelto), comprobado con `loads_strict('"\\ud800"')`. El plan lo rechaza aparte (D5). |
+| JSON estricto | `harness/core/strict_json.py`, `loads_strict` | Casi todo lo que el plan necesita ya se rechazaba; la excepción era un número fuera de rango (`1e400`), que leía como `inf` (revisión independiente, D4). Rechazaba: duplicados, `NaN`/`Infinity`, datos tras el valor, BOM, clave no cadena, control crudo en una cadena, entero de más de 4 300 cifras y profundidad. Faltaban dos cosas: decir **qué** rechazó sin leer el mensaje, y un tope de profundidad más estricto que 32. Además **acepta** `"\ud800"` (sustituto suelto), comprobado con `loads_strict('"\\ud800"')`. El plan lo rechaza aparte (D5). |
 | Vallas como las lee CommonMark | `harness/skills/checks.py`, `_split` | Una valla dentro de una cita (`> ```json`) o sangrada 4 espacios **no** es valla para este analizador, igual que para CommonMark. Lo prueban los casos `a plan inside a quote` y `a plan indented as code`. Un bloque `json` dentro de un bloque ```` ````markdown ```` es cuerpo del exterior, no bloque propio. |
 | Hash de aprobación con dominio y contenido normalizado | `harness/skills/approvals.py`: `Proposal`, `proposal_hash`, `normalise_content`, `is_invisible` | `is_invisible` se reutiliza. La `Proposal` se usa en el tramo 2. |
 | Caja de aprobación de la pantalla completa | `harness/shell/tui.py`: `open_approval(header, content, approval_hash, question)`, `ButtonPress`/`Verdict(means)` | Tramo 2. |
@@ -88,6 +88,9 @@ Lo que ya existe y sobre lo que se construye. Cada premisa se midió aquí, en `
   4. Si no hay ningún bloque `json`, se busca el nonce: dentro de otro bloque da `wrong_language`; fuera de todo bloque (cita, sangrado o prosa) da `plan_outside_block`; en ningún sitio, `NoPlan`, que es la respuesta final.
   5. Dos o más bloques `json` dan `too_many_blocks`; uno sin cerrar, `block_not_closed`.
   6. La respuesta entera se limita a 200 000 caracteres (`reply_too_large`), el mismo tope de lectura del proveedor (`REPLY_MAX_CHARS`).
+  7. **El nonce aparece una sola vez en toda la respuesta** (revisión independiente de `38683ac`, hallazgo 3). Una vez elegido el único bloque `json`, si el nonce aparece más de una vez, la respuesta se rechaza con `nonce_elsewhere`. Da igual dónde esté la segunda aparición: una cita, un comentario HTML, `<details>`, un elemento de lista, la prosa o el propio bloque.
+     - **El ataque que cierra:** las vallas dentro de una cita o de un comentario no cuentan como bloque. Una respuesta con `> ```json` (plan B) seguida de un bloque real (plan A) daba el plan A, mientras la respuesta pintada podía mostrar el B.
+     - **El falso negativo que acepta:** un modelo que repite el nonce en la prosa ve su plan rechazado. El prompt del tramo 2 dice que no lo repita.
 
   El nonce va **dentro** del cuerpo, en el campo `nonce`: la línea de apertura solo admite la etiqueta de lenguaje (estudio §3, `REPLY_TEXT_JS`).
 - **Por qué.**
@@ -105,6 +108,8 @@ Lo que ya existe y sobre lo que se construye. Cada premisa se midió aquí, en `
 
 - **Qué.** `loads_strict` gana:
   - `StrictJsonError(InvalidInput)` con `kind` ∈ {`too_large`, `too_deep`, `duplicate_key`, `not_finite`, `not_json`}, con los mismos mensajes que antes;
+  - un `parse_float` que rechaza como `not_finite` un número fuera del rango de `float`, como `1e400` o `-1e400` (revisión independiente, hallazgo 1). `json.loads` lo convertía en `inf` sin pasar por `parse_constant`, y después `canonical_json(allow_nan=False)` lanzaba `ValueError`: `read_plan` no devolvía una lectura. Un número así nunca fue legítimo en ningún llamador. Para la misma entrada, los mensajes existentes no cambian;
+  - además, un sustituto suelto **crudo** en el bloque (no el escape `\ud800`) hacía lanzar `UnicodeEncodeError` al medir el tamaño. El lector lo rechaza antes, con `invisible_character`. Un test de 3 000 mutaciones hostiles con semilla fija comprueba que `read_plan` siempre devuelve una lectura;
   - `max_depth`, que solo puede bajar el tope de 32.
 
   El plan usa `max_bytes = 16 KiB` y `max_depth = 6`: plan, pasos, paso, argumentos, valor, y un nivel de margen para que `{"$ref": …}` llegue a su propio motivo.
@@ -121,12 +126,15 @@ Lo que ya existe y sobre lo que se construye. Cada premisa se midió aquí, en `
   - Más de 10 pasos: sin medida que lo pida; el tramo 3 lo dirá.
 - **Impacto.** Spec «JSON estricto y acotado»; `tests/unit/test_strict_json.py` gana 15 casos. Los demás llamadores (`config.py`, `policy.py`, `definition.py`, `checks.py`, `mock.py`) no cambian: siguen capturando `InvalidInput`.
 
+  **Nota sin corregir:** `harness/skills/checks.py:69` serializa con `json.dumps` sin `allow_nan=False`. Con el `parse_float` nuevo, `loads_strict` ya no puede devolver `inf` ni `NaN`, así que hoy no llega ningún valor no finito a esa línea. Se deja como está, fuera del alcance de este change, y se anota para la revisión de `skill-engine`.
+
 ### D5. El texto del plan: sin invisibles, en NFC, sin credenciales y sin interpretar
 
 - **Qué.** Antes del esquema se recorre el árbol entero, claves y cadenas, sin recursión. Se rechaza:
   - un carácter que `approvals.is_invisible` declara invisible (`Cc`, `Cf`, `Cs`, `Co`, `Cn` y los ignorables por defecto), lo que incluye los controles bidireccionales, los de anchura cero y un sustituto suelto (`invisible_character`);
   - una cadena que no está en NFC (`not_nfc`);
-  - una cadena con una credencial que `redact` reconoce (`credential_in_plan`).
+  - una cadena con una credencial que `redact` reconoce (`credential_in_plan`);
+  - una cadena que cualquier camino de visualización cambiaría, también como `invisible_character`. La regla es una sola: **lo que se muestra es lo que se envía**, con el criterio `terminal_safe(s) != s` o `normalise_content(s) != s` (revisión independiente, hallazgo 2). Antes pasaban el salto de línea (que `is_invisible` exceptúa) y los separadores de línea y de párrafo U+2028 y U+2029, que esas funciones borran: la persona habría visto `ab` y el servidor habría recibido `a\u2028b`. Un test recorre todo el BMP y una muestra de los planos astrales (1 de cada 97): todo lo aceptado sale idéntico de `normalise_content`, `terminal_safe` y `safe_foreign_line`.
 
   Nada se normaliza, se expande ni se interpreta: `~`, `$HOME`, `${X}`, `{{x}}`, `%PATH%` y `$(id)` son literales. El lector no tiene ni `eval`, ni plantillas, ni `os.path.expanduser`, y un test lo comprueba sobre el código fuente.
 - **Por qué se rechaza en lugar de normalizar.**
@@ -163,7 +171,7 @@ Lo que ya existe y sobre lo que se construye. Cada premisa se midió aquí, en `
 - **Qué.**
   - **Forma canónica:** `canonical_json` de la política (claves ordenadas, `separators=(",", ":")`, UTF-8 sin escapes ASCII, sin `NaN`) sobre el modelo validado, con todos sus campos.
   - **Hash del plan:** `sha256(b"ai-harness/plan/v1\n" + canónica)`. Incluye el nonce, así que el mismo plan en otra pregunta tiene otro hash. Los enteros se escriben como enteros. Un `1.0` nunca llega aquí: ningún argumento admite números con decimales, y la política lo rechaza.
-  - **Lo que se aprueba (tramo 2):** una `Proposal` de `approvals.py` con `scope="code-mode.plan"`, la sesión, la solicitud y como `content` el plan mostrado. El plan mostrado es una línea por paso, generada por el harness: `id`, `servidor.herramienta`, operación, decisión de la política (`allowed`) y los argumentos canónicos. Al final, el hash del plan. El `content` pasa por `normalise_content`, que con D5 no cambia nada. El hash que se aprueba es el de la `Proposal` (dominio `ai-harness/approval/v1`): liga el plan, la decisión de cada paso, la sesión y la solicitud.
+  - **Lo que se aprueba (tramo 2):** una `Proposal` de `approvals.py` con `scope="code-mode.plan"`, la sesión, la solicitud y como `content` el plan mostrado. El plan mostrado es una línea por paso, generada por el harness: `id`, `servidor.herramienta`, operación, decisión de la política (`allowed`) y los argumentos canónicos. Al final, el hash del plan. El `content` pasa por `normalise_content`. Las cadenas del plan salen de ella sin cambios porque D5 rechaza toda cadena que esa función o `terminal_safe` alterarían. Corregido tras la revisión independiente de `38683ac`: antes esta frase afirmaba lo mismo sin que fuera cierto para U+2028, U+2029 y el salto de línea. El hash que se aprueba es el de la `Proposal` (dominio `ai-harness/approval/v1`): liga el plan, la decisión de cada paso, la sesión y la solicitud.
   - **Al ejecutar:** se comprueba que los bytes canónicos son los del plan aprobado y que la aprobación no ha caducado ni se ha usado.
 - **Por qué.**
   - Las claves ordenadas y sin espacios hacen el hash independiente de cómo escribió el modelo el JSON. Lo comprueban 200 variantes aleatorias y 9 mutaciones.
@@ -201,6 +209,10 @@ Lo que ya existe y sobre lo que se construye. Cada premisa se midió aquí, en `
   - **Pantalla completa:** `open_approval(header, content, approval_hash, question)`. La cabecera la escribe el harness (plan, pasos, hash, caducidad); el contenido son las líneas de D7, como texto ajeno. Valen las protecciones de `approval-buttons`: «Approve» solo tras mostrar el final, sin foco al abrir y armado tras 0,5 s. El motor acepta solo un `ButtonPress` con el hash preguntado; `Verdict.means` queda en la auditoría.
   - **Modo plano y CLI:** `decide_by_code`, los 8 primeros caracteres del hash.
   - **En los dos:** uso único y caducidad de `approvals.py`.
+  - **Lo que la caja tiene que decir** (revisión independiente de `38683ac`, para el tramo 2; sin código ahora):
+    - que **solo se ejecuta el plan canónico de la caja**, porque la respuesta pintada en la conversación puede ser distinta: Markdown, HTML o un bloque que se ve y no cuenta;
+    - **qué leerá el plan**: servidor, herramienta y argumentos de cada paso, en lenguaje llano. El nonce solo separa preguntas. Una inyección dentro de la misma pregunta (una nota de memoria o un fichero adjunto) puede hacer que el modelo escriba un plan **válido** con el nonce correcto. Contra eso, la única defensa es la persona que aprueba, y la caja tiene que darle lo necesario para decidir.
+  - **`read_plan` solo se llama sobre la respuesta a una pregunta `/plan`**, nunca sobre una respuesta normal de la conversación, de `ask` ni de un Skill. Un plan que aparece en una respuesta cualquiera es texto, no una propuesta.
 - **Por qué.** Lo decidió el dueño, y el mecanismo existe y está revisado.
 - **Alternativas rechazadas.**
   - Un sí o no sin código ni botón: lo propuso el modelo, no la persona (estudio §10, 2).
@@ -298,7 +310,7 @@ Lo que ya existe y sobre lo que se construye. Cada premisa se midió aquí, en `
 | SEC-07 | Timeout tras enviar | Respuesta no `completed` o truncada no se lee (D3, D12) | Plan `interrupted` no se reanuda |
 | SEC-12 | Aprobación reutilizada o plan alterado | Forma canónica y hash con dominio y nonce (D7) | `Proposal` con uso único, caducidad, botón ligado al hash |
 | SEC-14 | Código arbitrario | No hay código: sin `eval`, sin plantillas, sin expansión (D1, D5) | Igual; `/run` es otra superficie (D14) |
-| SEC-15 | Límites | 200 000 caracteres de respuesta, 16 KiB, 6 niveles, 10 pasos, 64 argumentos (D4) | Plazo total y 256 KiB de resultado mostrado (D10) |
+| SEC-15 | Límites | 200 000 caracteres de respuesta, 16 KiB, 6 niveles, 10 pasos, 64 argumentos (D4), fijados con números literales en sus fronteras | Plazo total y 256 KiB de resultado mostrado (D10) |
 | SEC-02 | Cruce de sesiones | Nonce por pregunta (D15) | `Proposal` ligada a sesión y solicitud |
 | SEC-01 | Credenciales | Un plan con una credencial se rechaza (D5) | Resultados enmascarados (D11) |
 
@@ -353,10 +365,31 @@ Cada una tiene una opción de trabajo, que es la que sigue el tramo 1 y que se c
    - 5, `description` y `result_fields` en la lista;
    - 6, esto es la forma del «Experimento de agente».
 
+## Hoja de ruta aprobada por el dueño (2026-11-27): «Fase A»
+
+Esta nota reemplaza, para los tramos posteriores, lo que digan en contra D9, D11 y los tramos 2 a 4 de `proposal.md`. El tramo 1 no cambia. Los tramos siguientes pasan a ser la **Fase A**:
+
+- **A1.** `/plan` de solo lectura con el Mock: el tramo 2 actual.
+- **A2.** Lecturas permitidas por regla. Una herramienta puede llevar `auto_read: true` en la lista local, y un plan cuyos pasos son todos `auto_read` se ejecuta sin la caja. Se ve una línea `running plan:` y queda auditado.
+- **A3.** El resultado vuelve al modelo como datos marcados y acotados, en un bucle automático:
+  - con un tope de vueltas, `HARNESS_LOOP_MAX_TURNS` (5 por defecto);
+  - con un contador de envíos visible;
+  - con un turno de cierre.
+- **A4.** Medición con Copilot real: el tramo 3 actual.
+
+Para los tramos posteriores a A1, esto deja sin efecto dos cosas: «el resultado solo se muestra a la persona» (D11) y, para los planes `auto_read`, «todo plan necesita el botón de aprobación» (D9). Los cambios de spec y de tareas se escribirán en cada tramo, cuando se diseñe.
+
+Las fases siguientes añaden dos cosas:
+- herramientas de ficheros del espacio de trabajo, en proceso: `read`, `glob` y `grep` automáticas; `write` y `edit` siempre aprobadas como lista de efectos con el diff exacto;
+- órdenes de ejecución con nombre.
+
+**Consecuencia para el esquema.** El catálogo podrá incluir un «servidor» interno, que no es MCP. El esquema `plan/1` ya lo admite: `server` y `tool` son nombres que decide el catálogo, no la sintaxis del plan. El lector solo los comprueba contra la vista de la política que recibe. Cuando exista ese servidor interno, esa vista tendrá que incluirlo con su operación por herramienta, sin cambiar el formato del plan.
+
 ## Risks / Trade-offs
 
 - [El modelo no escribe a la primera un JSON con una gramática que no conoce] → El tramo 3 lo mide con 10 tareas antes de construir nada más. Cada motivo de rechazo es estable y se cuenta.
 - [El editor de código de la página altera o virtualiza un bloque largo] → La sonda del tramo 3 envía un bloque `json` sintético de 80 líneas antes de las tareas. Un bloque alterado falla el análisis, nunca se ejecuta a medias.
+- [Una inyección en la misma pregunta hace que el modelo escriba un plan válido] → El nonce no lo impide (D15). La defensa es la aprobación humana con el plan canónico y lo que leerá a la vista (D9), y que un plan de la versión 1 solo pueda leer herramientas de la lista.
 - [Un plan legítimo dentro de una lista o una cita se rechaza] → Es un falso negativo aceptado: el texto se muestra y el motivo `plan_outside_block` lo dice.
 - [Sin referencias, una tarea que necesita encadenar cuesta otra pregunta] → Límite aceptado en la versión 1 (D2). Se revisa con las cifras del tramo 3.
 - [Homóglifos en un valor de argumento] → Límite que no se arregla aquí (D5): el `pattern` del argumento o la persona al aprobar.

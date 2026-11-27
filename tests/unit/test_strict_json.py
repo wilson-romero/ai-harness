@@ -63,7 +63,7 @@ def test_brackets_inside_strings_do_not_count():
         ('{"a": 1', "not_json"),
         ('{"a": 1} {"b": 2}', "not_json"),  # trailing data
         ('{"a": 1}x', "not_json"),
-        ('﻿{"a": 1}', "not_json"),  # a byte order mark is not JSON text
+        ('\ufeff{"a": 1}', "not_json"),  # a byte order mark is not JSON text
         ('{1: 2}', "not_json"),  # a key that is not a string
         ('{"a": "x\ny"}', "not_json"),  # a raw control character inside a string
         ('{"a": ' + "1" * 5000 + "}", "not_json"),  # past the interpreter's digit limit
@@ -76,6 +76,31 @@ def test_each_refusal_has_its_kind(text, kind):
         loads_strict(text, max_bytes=100 if kind == "too_large" else 10_000)
     assert caught.value.kind == kind
     assert isinstance(caught.value, InvalidInput)  # callers that catch InvalidInput still do
+
+
+@pytest.mark.parametrize("literal", ["1e400", "-1e400", "1E+999", "-0.1e99999"])
+def test_a_number_out_of_float_range_is_refused_as_not_finite(literal):
+    """Independent review of code-mode, finding 1: `json.loads` turns `1e400` into `inf`
+    without calling `parse_constant`."""
+    with pytest.raises(StrictJsonError) as caught:
+        loads_strict('{"a": %s}' % literal, max_bytes=100)
+    assert caught.value.kind == "not_finite"
+
+
+def test_finite_numbers_are_still_read():
+    assert loads_strict('[1.5, -0.0, 1e308, 1e-400, 3]', max_bytes=100) == [1.5, -0.0, 1e308,
+                                                                            0.0, 3]
+
+
+@pytest.mark.parametrize("text, message", [
+    ('{"a": NaN}', "the JSON text: NaN is not allowed"),
+    ('{"a": 1, "a": 2}', "the JSON text: duplicate key 'a'"),
+    ('{"a": 1', "the JSON text is not valid JSON"),
+])
+def test_the_messages_of_existing_refusals_do_not_change(text, message):
+    with pytest.raises(StrictJsonError) as caught:
+        loads_strict(text, max_bytes=100)
+    assert str(caught.value) == message
 
 
 def test_a_tighter_depth_can_be_asked():

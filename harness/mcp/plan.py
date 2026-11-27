@@ -21,10 +21,14 @@ for one stated reason:
 2. the block (D3): no `json` block and no nonce anywhere is no plan at all;
    `too_many_blocks`, `block_not_closed`; the nonce only inside a block with another label
    (`wrong_language`) or only outside any block, quoted or indented (`plan_outside_block`);
-3. the JSON (`loads_strict`, D4): `plan_too_large`, `plan_too_deep`, `duplicate_key`,
-   `not_finite`, `not_json`; `not_an_object`;
+   once the block is chosen, the nonce more than once anywhere in the reply
+   (`nonce_elsewhere`: a second copy the person could see rendered, review finding 3);
+3. the JSON (`loads_strict`, D4): a raw lone surrogate in the block (`invisible_character`),
+   `plan_too_large`, `plan_too_deep`, `duplicate_key`, `not_finite` (also `1e400`),
+   `not_json`; `not_an_object`;
 4. the text of every key and string (D5): `invisible_character`, `not_nfc`,
-   `credential_in_plan`;
+   `credential_in_plan`, and `invisible_character` again for a string any display path
+   would change (a newline, U+2028, U+2029: what is shown equals what is sent);
 5. the nonce, before the schema, so that a plan of another question says so: `nonce_missing`,
    `nonce_mismatch`;
 6. the closed schema: `unsupported_format`, `unknown_field`, `missing_field`,
@@ -60,10 +64,10 @@ from harness.mcp.policy import (
     decide_before_start,
     parse_arguments,
 )
-from harness.skills.approvals import is_invisible
+from harness.skills.approvals import is_invisible, normalise_content
 from harness.skills.checks import split_fences
 from harness.text.redaction import secret_kinds
-from harness.text.safe_text import safe_foreign_line
+from harness.text.safe_text import safe_foreign_line, terminal_safe
 
 PLAN_FORMAT = "ai-harness/plan/1"
 PLAN_HASH_DOMAIN = b"ai-harness/plan/v1\n"
@@ -84,6 +88,7 @@ REFUSAL_REASONS = (
     "block_not_closed",
     "wrong_language",
     "plan_outside_block",
+    "nonce_elsewhere",
     "plan_too_large",
     "plan_too_deep",
     "duplicate_key",
@@ -214,9 +219,19 @@ def read_plan(text: str, *, nonce: str, config: LoadedConfig) -> Reading:
     if len(text) > MAX_REPLY_CHARS:
         return Refusal("reply_too_large", f"the reply is longer than {MAX_REPLY_CHARS} "
                                           "characters")
-    body = _block(text.replace("\r\n", "\n").replace("\r", "\n"), nonce)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    body = _block(text, nonce)
     if not isinstance(body, str):
         return body
+    if text.count(nonce) > 1:
+        # Anywhere else (a quote, an HTML comment, `<details>`, a list item, the prose, or a
+        # second time inside the block), the person could see a plan other than the one read.
+        return Refusal("nonce_elsewhere", "the nonce appears more than once in the reply; "
+                                          "it must appear only in the plan's nonce field")
+    try:
+        body.encode("utf-8")
+    except UnicodeEncodeError:  # a raw lone surrogate: not text that can be shown or sent
+        return Refusal("invisible_character", "an invisible character in the plan")
     try:
         data = loads_strict(body, max_bytes=MAX_PLAN_BYTES, what="the plan",
                             max_depth=MAX_PLAN_DEPTH)
@@ -272,12 +287,34 @@ def _text_problem(value: Any, where: str) -> Refusal | None:
         elif isinstance(item, str):
             strings.append((item, path))
         for string, at in strings:
-            if any(is_invisible(c) for c in string):
-                return Refusal("invisible_character", f"an invisible character in {at}")
-            if unicodedata.normalize("NFC", string) != string:
-                return Refusal("not_nfc", f"a text not in Unicode NFC form in {at}")
-            if secret_kinds(string):
-                return Refusal("credential_in_plan", f"a credential in {at}")
+            reason = string_refusal(string)
+            if reason is not None:
+                return Refusal(reason, f"{_WHAT[reason]} in {at}")
+    return None
+
+
+_WHAT = {"invisible_character": "an invisible character",
+         "not_nfc": "a text not in Unicode NFC form",
+         "credential_in_plan": "a credential"}
+
+
+def string_refusal(string: str) -> str | None:
+    """Why one key or string of a plan cannot be shown, hashed and sent as it is, or None.
+
+    One rule (independent review, finding 2): what is shown equals what is sent. Besides the
+    invisible characters, a string that any display path would change (`normalise_content`
+    for the approval, `terminal_safe` for one line) is refused as `invisible_character`: that
+    catches a newline and the line and paragraph separators U+2028 and U+2029, which those
+    paths drop. NFC and credentials keep their own reasons and are checked first.
+    """
+    if any(is_invisible(c) for c in string):
+        return "invisible_character"
+    if unicodedata.normalize("NFC", string) != string:
+        return "not_nfc"
+    if secret_kinds(string):
+        return "credential_in_plan"
+    if terminal_safe(string) != string or normalise_content(string) != string:
+        return "invisible_character"
     return None
 
 

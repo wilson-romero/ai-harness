@@ -191,8 +191,10 @@ CASES = [
     ("a plan nested too deep", fenced(DEEP), "plan_too_deep", None),
     ("a plan nested 8 000 levels", fenced("[" * 8_000 + "]" * 8_000), "plan_too_deep", None),
     ("a duplicate key at the top",
-     fenced('{"format":"ai-harness/plan/1","nonce":"0123456789abcdef","nonce":"0123456789abcdef",'
-            '"steps":[]}'), "duplicate_key", None),
+     fenced('{"format":"ai-harness/plan/1","format":"ai-harness/plan/1",'
+            '"nonce":"0123456789abcdef","steps":[]}'), "duplicate_key", None),
+    ("the nonce twice in the reply", "Nonce " + NONCE + "\n\n" + reply(TWO_READS),
+     "nonce_elsewhere", None),
     ("a duplicate key inside args",
      fenced('{"format":"ai-harness/plan/1","nonce":"0123456789abcdef","steps":[{"id":"a",'
             '"server":"synthetic","tool":"get_project_metadata",'
@@ -203,21 +205,21 @@ CASES = [
     ("Infinity", fenced(json.dumps(plan(step("a", "count_items"))).replace(
         '"args": {}', '"args": {"limit": -Infinity}')), "not_finite", None),
     ("trailing data", fenced(PLAN_TEXT + "\n{}"), "not_json", None),
-    ("a byte order mark", fenced("﻿" + PLAN_TEXT), "not_json", None),
+    ("a byte order mark", fenced("\ufeff" + PLAN_TEXT), "not_json", None),
     ("a non-string key", fenced('{"format":"ai-harness/plan/1",1:2}'), "not_json", None),
     ("a truncated object", fenced(PLAN_TEXT[:-5]), "not_json", None),
     ("a list, not an object", fenced(json.dumps([TWO_READS])), "not_an_object", None),
     ("a zero-width space in a tool name",
-     reply(plan(step("a", "get_project​metadata", project="demo-alpha"))),
+     reply(plan(step("a", "get_project\u200bmetadata", project="demo-alpha"))),
      "invisible_character", None),
     ("a bidi control in an argument key",
      reply(plan({"id": "a", "server": "synthetic", "tool": "get_project_metadata",
-                 "args": {"pro‮ject": "demo-alpha"}})), "invisible_character", None),
+                 "args": {"pro\u202eject": "demo-alpha"}})), "invisible_character", None),
     ("a bidi control in an argument value",
-     reply(plan(step("a", "echo_env", name="abc⁦def"))), "invisible_character", None),
+     reply(plan(step("a", "echo_env", name="abc\u2066def"))), "invisible_character", None),
     ("a lone surrogate", fenced(json.dumps(plan(step("a", "echo_env", name="X"))).replace(
         '"X"', '"\\ud800"')), "invisible_character", None),
-    ("a decomposed character", reply(plan(step("a", "echo_env", name="café"))),
+    ("a decomposed character", reply(plan(step("a", "echo_env", name="cafe\u0301"))),
      "not_nfc", None),
     ("a credential in an argument", reply(plan(step("a", "echo_env", name=TOKEN))),
      "credential_in_plan", None),

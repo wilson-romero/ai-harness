@@ -9,6 +9,7 @@ are refused.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +37,8 @@ def loads_strict(
     Refused, each with its kind: more than `max_bytes` UTF-8 bytes (`too_large`, before any
     parsing); nesting deeper than `max_depth` (`too_deep`, measured with a linear scan, so a
     deep text never reaches the recursive parser); a repeated key in an object
-    (`duplicate_key`); `NaN`, `Infinity` or `-Infinity` (`not_finite`); and anything that is
+    (`duplicate_key`); `NaN`, `Infinity`, `-Infinity` or a number out of the float range such
+    as `1e400` (`not_finite`); and anything that is
     not one JSON value (`not_json`): syntax errors, data after the value, a leading byte order
     mark, raw control characters inside a string, an integer past the interpreter's digit
     limit. JSON keys are always strings, so a non-string key is a syntax error. `max_depth`
@@ -51,7 +53,8 @@ def loads_strict(
     if _depth(text, max_depth) > max_depth:
         raise StrictJsonError(f"{what} is nested deeper than {max_depth} levels", "too_deep")
     try:
-        return json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_no_constant)
+        return json.loads(text, object_pairs_hook=_no_duplicates, parse_constant=_no_constant,
+                          parse_float=_finite_float)
     except _Refused as exc:
         raise StrictJsonError(f"{what}: {exc}", exc.kind) from None
     except (ValueError, RecursionError):
@@ -101,6 +104,15 @@ def _no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _no_constant(name: str) -> Any:
     raise _Refused(f"{name} is not allowed", "not_finite")
+
+
+def _finite_float(literal: str) -> float:
+    """A number literal out of the float range (`1e400`) would become `inf` without passing
+    through `parse_constant` (independent review of code-mode, finding 1): refused the same."""
+    value = float(literal)
+    if not math.isfinite(value):
+        raise _Refused("a number out of range is not allowed", "not_finite")
+    return value
 
 
 def _depth(text: str, limit: int = MAX_DEPTH) -> int:

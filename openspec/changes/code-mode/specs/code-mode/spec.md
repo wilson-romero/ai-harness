@@ -25,6 +25,17 @@ Una respuesta SHALL tener o ningún plan o exactamente un bloque cercado con la 
 - **WHEN** el bloque del plan va dentro de una cita (`> `), sangrado cuatro espacios o sin valla
 - **THEN** se rechaza con `plan_outside_block`
 
+### Requirement: El nonce aparece una sola vez
+Una vez elegido el único bloque `json`, el nonce de la pregunta SHALL aparecer una sola vez en toda la respuesta: en el campo `nonce` del plan. Cualquier otra aparición SHALL rechazar la respuesta, esté en una cita, un comentario HTML, `<details>`, un elemento de lista, la prosa o el propio bloque, porque la persona podría ver pintado un plan distinto del leído.
+
+#### Scenario: Segundo plan citado
+- **WHEN** la respuesta trae un plan B dentro de una cita y después un bloque `json` real con el plan A
+- **THEN** se rechaza con `nonce_elsewhere` y no se lee ninguno de los dos
+
+#### Scenario: Segundo plan en un comentario HTML
+- **WHEN** la respuesta trae un plan B en un comentario HTML o en un elemento `<details>`, y un bloque `json` real
+- **THEN** se rechaza con `nonce_elsewhere`
+
 ### Requirement: El nonce de la pregunta
 Un plan SHALL llevar en su campo `nonce` el nonce de la pregunta a la que responde, y el nonce SHALL comprobarse antes que el esquema. Un plan sin nonce o con otro SHALL rechazarse.
 
@@ -48,7 +59,19 @@ Una respuesta cuyo estado no es `completed`, o que el proveedor leyó solo en pa
 - **THEN** se rechaza con `reply_truncated` sin leer el texto
 
 ### Requirement: JSON estricto y acotado
-El cuerpo del bloque SHALL ser un único objeto JSON de como mucho 16 KiB y 6 niveles de anidamiento, medidos antes de analizarlo. Las claves repetidas, `NaN` e `Infinity`, los datos tras el objeto, una marca de orden de bytes y las claves que no son cadenas SHALL rechazarse.
+El cuerpo del bloque SHALL ser un único objeto JSON de como mucho 16 KiB y 6 niveles de anidamiento, medidos antes de analizarlo. Las claves repetidas, `NaN`, `Infinity`, un número fuera de rango como `1e400`, los datos tras el objeto, una marca de orden de bytes y las claves que no son cadenas SHALL rechazarse. Leer SHALL devolver siempre un plan, un rechazo o «sin plan», nunca un error.
+
+#### Scenario: Número fuera de rango
+- **WHEN** un argumento vale `1e400` o `-1e400`, aunque su clave no esté declarada
+- **THEN** se rechaza con `not_finite`
+
+#### Scenario: Texto hostil
+- **WHEN** se leen 3 000 mutaciones con semilla fija de una respuesta válida, con fragmentos hostiles insertados, borrados o duplicados
+- **THEN** cada lectura devuelve un plan, un rechazo de la lista o «sin plan», y ninguna lanza un error
+
+#### Scenario: Fronteras de los límites
+- **WHEN** el plan tiene 16 384 bytes, 10 pasos o 6 niveles, o la respuesta tiene 200 000 caracteres
+- **THEN** se lee; con 16 385 bytes, 11 pasos, 7 niveles o 200 001 caracteres se rechaza con su motivo
 
 #### Scenario: Clave repetida
 - **WHEN** el plan repite una clave, en el objeto principal o dentro de los argumentos de un paso
@@ -82,7 +105,15 @@ Un plan SHALL tener exactamente `format` (`ai-harness/plan/1`), `nonce` y `steps
 - **THEN** se rechaza con `duplicate_step_id`
 
 ### Requirement: Lo que se lee es lo que se muestra y se envía
-Ninguna clave ni cadena del plan SHALL contener caracteres invisibles, de control, de formato o bidireccionales, ni un sustituto suelto, ni una credencial reconocible. Toda cadena SHALL estar en forma NFC. El harness SHALL NOT normalizar, expandir ni interpretar ninguna cadena: `~`, `$VAR`, `{{x}}` y similares son literales.
+Ninguna clave ni cadena del plan SHALL contener caracteres invisibles, de control, de formato o bidireccionales, un sustituto suelto, una credencial reconocible ni nada que la visualización de la aprobación cambie (un salto de línea, U+2028, U+2029). Toda cadena SHALL estar en forma NFC. El harness SHALL NOT normalizar, expandir ni interpretar ninguna cadena: `~`, `$VAR` o `{{x}}` son literales.
+
+#### Scenario: Separador de línea
+- **WHEN** un argumento o una clave contiene U+2028, U+2029 o un salto de línea
+- **THEN** se rechaza con `invisible_character`
+
+#### Scenario: Todo lo aceptado se muestra igual
+- **WHEN** se prueba cada carácter del BMP y una muestra de los planos astrales entre dos letras
+- **THEN** toda cadena aceptada sale idéntica de la visualización de la aprobación y de la de una línea de terminal
 
 #### Scenario: Invisible en un nombre de herramienta
 - **WHEN** el nombre de la herramienta contiene un espacio de anchura cero, o una clave de argumento un control bidireccional
