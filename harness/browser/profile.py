@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 
 from harness.browser.errors import ProfileRejected
+from harness.storage.private import private_dir
 
 PROFILE_MARKER = "ai-harness-profile.txt"
 MARKER_TEXT = (
@@ -35,7 +36,7 @@ def prepare_profile(path: Path) -> Path:
             f"{path} is not an ai-harness Edge profile: it has files and no {PROFILE_MARKER}. "
             "Set HARNESS_EDGE_PROFILE to a new or empty directory"
         )
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    private_dir(path)  # and its missing parents (security review 2026-11-27, F-08)
     os.chmod(path, 0o700)  # mkdir's mode yields to the umask, and an older profile may be wider
     if not marker.is_file():
         marker.write_text(MARKER_TEXT, encoding="utf-8")

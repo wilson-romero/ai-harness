@@ -14,9 +14,11 @@ Estado (revisado el 2026-11-26, rama `feature/copilot-web-provider`): **Corte 1 
 ## Instalación
 
 ```sh
-uv sync
+uv sync --locked
 uv run pytest
 ```
+
+`--locked` instala exactamente lo que fija `uv.lock` y falla si el lock no corresponde a `pyproject.toml`, en lugar de reescribirlo.
 
 ## Uso
 
@@ -90,40 +92,77 @@ Al entrar se ve el proveedor, la sesión y el proyecto. Una línea normal es una
 
 ### Aspecto
 
-En una consola, la conversación ocupa la pantalla completa ([Textual](https://textual.textualize.io/), la única librería de terminal del proyecto): la conversación con su propio desplazamiento, un panel con la sesión a la derecha, la entrada fija abajo y los atajos al pie. Así se ve en 100 × 30, con el Mock, el vault sintético y una respuesta sintética (captura de texto de la pantalla tomada con el `Pilot` de Textual, sin colores):
+En una consola, la conversación ocupa la pantalla completa ([Textual](https://textual.textualize.io/), la única librería de terminal del proyecto): la conversación con su propio desplazamiento, un panel con la sesión a la derecha, la entrada fija abajo y los atajos al pie. Así se ve en 100 × 30, con el Mock, el vault sintético y una respuesta sintética, tras `/new --project demo-alpha Demo` (captura de texto de la pantalla tomada con el `Pilot` de Textual, sin colores):
 
 ```text
- ai-harness  -  mock  session 01a219d9                            │ Session
- -------------------------------------                            │  Demo
- Enter sends a question. /help lists the commands; Tab completes  │  01a219d9-d8d0-708a-922b-854b44
- them.                                                            │ 3d1ba5
- Ctrl+C interrupts a question (never resent). /exit or end of     │ Project
- input leaves.                                                    │  demo-alpha
-                                                                  │ Provider
- █ /new --project demo-alpha Demo                                 │  mock
- new session 01a219d9-d8d0-708a-922b-854b443d1ba5 (Demo), project │ Sends
- demo-alpha                                                       │  1
-                                                                  │ Last request
- █ revisa este requerimiento                                      │  completed
- context: demo-alpha, 7 note(s) included, 0 truncated, 0 omitted, │ Memory
- 1556 of 8192 bytes, 1 entry skipped, 0 credential(s) redacted    │  7 note(s) in the last question
-                                                                  │   projects/demo-alpha/_project.
- ╭─ mock ───────────────────────────────────────────────────────╮ │ md
- │ ## Resumen                                                   │ │   Decisiones/alpha-mensajeria.m
- │ El requerimiento pide **avisar** de pedidos con              │ │ d
- │ `order.created`.                                             │ │   Lecciones/2026-11-10-reintent
- │                                                              │ │ os-idempotentes.md
- │ ## Preguntas pendientes                                      │ │   Memoria-CC/project_alpha-inte
- │ - ¿Qué pasa con un evento que no se publica?                 │ │ graciones.md
- │ [@click=app.quit]esto no es un enlace[/]                     │ │   projects/demo-alpha/sessions/
- ╰──────────────────────────────────────────────────────────────╯ │ 2026-11-21-121500.md
+ session Demo (01a21c5e): this pane shows what happened in it     │ Session
+ since the conversation opened; /history lists its stored         │  Demo
+ messages                                                         │  01a21c5e-41cc-74b5-bc79-d2a2a2
+                                                                  │ c55f75
+ █ revisa este requerimiento                                      │ Project
+ context: demo-alpha, 7 note(s) included, 0 truncated, 0 omitted, │  demo-alpha
+ 1556 of 8192 bytes, 1 entry skipped, 0 credential(s) redacted    │ Provider
+                                                                  │  mock
+ ╭─ mock ───────────────────────────────────────────────────────╮ │ Sends
+ │ ## Resumen                                                   │ │  1
+ │ El requerimiento pide **avisar** de pedidos con              │ │ Last request
+ │ `order.created`.                                             │ │  completed
+ │                                                              │ │ Memory
+ │ ## Preguntas pendientes                                      │ │  7 note(s) in the last question
+ │ - ¿Qué pasa con un evento que no se publica?                 │ │   projects/demo-alpha/_project.
+ │ [@click=app.quit]esto no es un enlace[/]                     │ │ md
+ ╰──────────────────────────────────────────────────────────────╯ │   Decisiones/alpha-mensajeria.m
+                                                                  │ d
+                                                                  │   Lecciones/2026-11-10-reintent
+                                                                  │ os-idempotentes.md
+                                                                  │   Memoria-CC/project_alpha-inte
+                                                                  │ graciones.md
+                                                                  │   projects/demo-alpha/sessions/
+                                                                  │ 2026-11-21-121500.md
+                                                                  │   projects/demo-alpha/sessions/
+                                                                  │ 2026-11-20-111500.md
+▊▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▎
 ▊  Type a question, or / for a command                                                             ▎
- ctrl+p commands  ctrl+c interrupts  ctrl+n new session  ctrl+q leaves
+▊▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▎
+ ctrl+p commands  ctrl+c interrupts  ctrl+q leaves  ctrl+n new  esc blocks  ctrl+o open/close
 ```
 
-- **Bloques:** lo que escribes (con una barra a la izquierda), las líneas del harness (en gris) y el texto ajeno, siempre dentro de un recuadro cuyo título pone el harness (el nombre del proveedor). Lo de dentro del recuadro se muestra como caracteres: `[@click=…]`, `[link=…]` o una secuencia de escape no hacen nada. El resaltado de Markdown es el de siempre: colorea sin quitar ni añadir un carácter.
+- **Bloques:** lo que escribes (con una barra a la izquierda), las líneas del harness (en gris) y el texto ajeno, siempre dentro de un recuadro cuyo título pone el harness (el nombre del proveedor); plegado, de él solo queda un extracto de una línea tras `| `. Lo de dentro del recuadro se muestra como caracteres: `[@click=…]`, `[link=…]` o una secuencia de escape no hacen nada. El resaltado de Markdown es el de siempre: colorea sin quitar ni añadir un carácter.
+- **Bloques que se pliegan** (`collapsible-blocks`): cada turno (tu línea y lo que vino después) y cada bloque de un turno se abren y se cierran. Al llegar, una respuesta que cabe en el panel se ve entera; una más larga muestra sus primeras filas y el borde de abajo dice cuántas líneas faltan (`… 30 more lines · enter/click to expand`). Los pasos de una Skill quedan en una línea. Siempre enteros: los errores y avisos, las líneas `omitted:` y `attached:` (la nota que no cupo, el fichero que sí se envió), cómo terminó una Skill (`skill: run … is completed`) y lo que aplicó (`applied:`) y lo que muestra `/context`, que es exactamente lo que se envía. Al enviar una pregunta, los turnos anteriores al penúltimo se pliegan a una línea (`▸ you → mock · 42 lines · completed  › revisa el HLS`), salvo los que abriste o cerraste tú (tu elección se mantiene) y los que tuvieron un error o un aviso; plegado a mano, un turno así lo dice (`completed · 1 warning`). Plegado, un bloque dice quién es, cuántas líneas tiene y, tras `| `, los títulos de la respuesta (`## Resumen · ## Riesgos`) o su primera línea; lo del harness va sobre un fondo propio que el texto ajeno no puede tener. Teclas: `Esc` recorre los bloques (flechas, `enter` o espacio abre y cierra, `+`/`-` todo, `end` el último, `Esc` o cualquier letra vuelve a escribir y la letra se escribe; abrirse la caja de aprobación o la paleta también); desde la entrada, `alt+↑`/`alt+↓` eligen bloque y `ctrl+o` abre o cierra el elegido o la última respuesta. Un clic en la cabecera o el pie de un bloque lo abre o cierra; en el texto, nada. En la paleta: «Browse blocks», «Open or close the block», «Expand all blocks», «Collapse all blocks», «Jump to latest». Al abrir o cerrar, la cabecera no se mueve de su fila, y lo que llega mientras recorres o lees más arriba no mueve el panel. Cada sesión tiene sus bloques: `/new` y `/resume` muestran los de la sesión tomada. Nada de esto se guarda. Tras dos preguntas largas, `Esc` y `home` (100 × 30, sintético; la primera, plegada; la segunda, abierta a mano):
+
+  ```text
+   ▸ harness · 4 lines · done  ai-harness - mock session 01a21c5d   │  chat 2026-11-27 04:37
+                                                                    │  01a21c5d-eb10-736a-98c3-28e8b9
+   ▸ you → mock · 2 lines · completed  › ¿está claro el alcance?    │ d286ca
+                                                                    │ Project
+   █ revisa el HLS sintético                                        │  -
+                                                                  ▃ │ Provider
+   ╭─ mock · 41 lines ───────────────────────────────────────────╮  │  mock
+   │ ## Resumen del HLS                                          │  │ Sends
+   │ El requerimiento sintético pide **avisar** de cada pedido.  │  │  3
+   │                                                             │  │ Last request
+   │ ## Riesgos                                                  │  │  completed
+   │ - Riesgo sintético 1: el evento `order.created` puede       │  │ Memory
+   │ llegar dos veces.                                           │  │  0 note(s) in the last question
+   │ - Riesgo sintético 2: el evento `order.created` puede       │  │
+   │ llegar dos veces.                                           │
+   │ - Riesgo sintético 3: el evento `order.created` puede       │
+   │ llegar dos veces.                                           │
+   │ - Riesgo sintético 4: el evento `order.created` puede       │
+   │ llegar dos veces.                                           │
+   │ - Riesgo sintético 5: el evento `order.created` puede       │
+   │ llegar dos veces.                                           │
+   │ - Riesgo sintético 6: el evento `order.created` puede       │
+   │ llegar dos veces.                                           │
+   │ - Riesgo sintético 7: el evento `order.created` puede       │
+   │ llegar dos veces.                                           │
+  ▊▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▎
+  ▊  browsing the blocks: esc or any letter goes back to typing                                      ▎
+  ▊▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▎
+   up/down move  enter open/close  +/- all  end latest  esc back to typing
+  ```
 - **Panel:** sesión (nombre e identificador completo), proyecto, proveedor, peticiones enviadas en esta sesión, estado de la última y las notas de memoria que llevó la última pregunta. Sale solo del estado del harness y siempre describe la sesión tomada.
-- **Teclas:** `ctrl+p` abre la paleta de órdenes (solo órdenes del harness: estado, sesión nueva, cambiar de sesión, historial, contexto, elegir Skill, adjuntar fichero, buscar en la memoria…). «Switch session...» lista las sesiones y elige con el teclado; «Choose a skill...» rellena `/skill NOMBRE `; «Attach a file...» lista los ficheros de la carpeta de trabajo. `ctrl+n` sesión nueva. Flechas arriba y abajo: lo escrito en esta ejecución (solo en memoria). Tab completa los comandos `/`. `ctrl+c` interrumpe la pregunta en curso; sin nada en curso no sale. `ctrl+q`, `ctrl+d` con la entrada vacía o `/exit` salen: se cierra el proveedor y la terminal vuelve a como estaba.
+- **Teclas:** `ctrl+p` abre la paleta de órdenes (solo órdenes del harness: estado, sesión nueva, cambiar de sesión, historial, contexto, elegir Skill, adjuntar fichero, buscar en la memoria…). «Switch session...» lista las sesiones y elige con el teclado; «Choose a skill...» rellena `/skill NOMBRE `; «Attach a file...» lista los ficheros de la carpeta de trabajo. `ctrl+n` sesión nueva. Flechas arriba y abajo: lo escrito en esta ejecución (solo en memoria); `Esc` cambia las flechas a recorrer los bloques. Tab completa los comandos `/`. `ctrl+c` interrumpe la pregunta en curso; sin nada en curso no sale. `ctrl+q`, `ctrl+d` con la entrada vacía o `/exit` salen: se cierra el proveedor y la terminal vuelve a como estaba.
 - **Mientras el proveedor trabaja** se ve `mock: thinking (N s), ctrl+c interrupts` y la entrada no envía (lo escrito se queda en ella).
 - **La aprobación** se abre en su propia caja: la cabecera del motor (destino, hash, caducidad), el contenido propuesto en un recuadro de texto ajeno y, fija abajo, la fila **[Approve] [Reject]** (desde el 2026-11-27, `approval-buttons`). Cómo funciona:
   - El foco empieza en la propuesta, que se recorre con `AvPág`/`RePág`, flechas, `Inicio`, `Fin` o la rueda. La caja dice cuántas líneas quedan debajo o que la propuesta se ha mostrado entera.
@@ -207,7 +246,7 @@ uv run python main.py memory maintain --dry-run
 - `memory search QUERY [--project SLUG] [--limit N]` busca las notas que contienen **todos** los términos, sin distinguir mayúsculas. Una línea por nota: ruta relativa, `updated`, coincidencias y un fragmento de una línea (con credenciales enmascaradas y sin caracteres de control). Orden: coincidencias, después `updated` y después ruta. 20 resultados por defecto, 200 como máximo.
 - `memory context SLUG` imprime **exactamente** el bloque que `ask --project` enviaría (con otro marcador aleatorio) y, por stderr, cuántas notas entraron, cuántas se recortaron u omitieron, los bytes y las credenciales enmascaradas.
 - `ask SESSION_ID PROMPT --project SLUG` envía ese bloque antes de la pregunta. La sesión tiene que haberse creado con `session create ... --project SLUG` y con el mismo proyecto. Si se rechaza (identificador no válido, vault sin configurar, proyecto inexistente o distinto del de la sesión), no se registra ninguna solicitud ni ningún contenido: solo un evento de auditoría `memory.context denied`, sin rutas ni texto. Sin `--project`, `ask` no lee el vault.
-- `memory maintain --dry-run` informa, sin tocar nada, de lo que un mantenimiento encontraría: `sync_conflicts`, `broken_links` (con la corrección si hay un único candidato), `index_dangling` e `index_orphans` (índices `Memoria-CC/MEMORY*.md`), `duplicate_candidates`, `invalid_frontmatter`, `secrets_found` (ruta y tipo, nunca el valor) y `skipped`. Nombra rutas, nunca texto de las notas, y dos ejecuciones sobre el mismo vault dan la misma salida byte a byte. Una fecha `created` o `updated` posterior a hoy cuenta como frontmatter no válido. Sin `--dry-run` es un error de uso (código 2): este corte no repara nada.
+- `memory maintain --dry-run` informa, sin tocar nada, de lo que un mantenimiento encontraría: `sync_conflicts`, `broken_links` (con la corrección si hay un único candidato), `index_dangling` e `index_orphans` (índices `Memoria-CC/MEMORY*.md`), `duplicate_candidates`, `invalid_frontmatter`, `secrets_found` (ruta y tipo, nunca el valor) y `skipped`. Nombra rutas, nunca texto de las notas, y dos ejecuciones sobre el mismo vault dan la misma salida byte a byte. Una fecha `created` o `updated` posterior a hoy cuenta como frontmatter no válido. Sin `--dry-run` es un error de uso (código 2): este corte no repara nada. Comparar nombres tiene un tope de 100 000 pares por pasada (la búsqueda de la corrección de cada enlace roto, una vez por nombre, y los pares de notas de `Memoria-CC/`, unas 450 notas): pasado el tope, esa pasada se detiene, lo que encontró hasta ahí se mantiene y un aviso por stderr dice que `duplicate_candidates` o las correcciones de `broken_links` están incompletos (revisión de seguridad del 2026-11-27).
 
 ### Qué se lee y qué no
 
@@ -290,7 +329,7 @@ Errores de uso (una opción mal escrita, `--input-file` demasiado grande): códi
 
 ### Aprobación
 
-Al llegar a un paso `approval`, el harness calcula la propuesta (Skill con versión y hash, ejecución, paso, alcance, destino y SHA-256 y tamaño del contenido) y su hash. **Solo se aprueba en una terminal interactiva**: el harness muestra la propuesta entera y hay que escribir los **8 primeros caracteres del hash**; `n` rechaza y cancela la ejecución. Tres códigos equivocados o el fin de la entrada la dejan pendiente. La pregunta bloquea la sesión hasta que contestas; si contestas después de la caducidad, la aprobación queda caducada y no se aplica nada. Sin terminal (stdin redirigido, un script, un agente), `skill run` y `skill resume` dejan la ejecución en `awaiting_approval` y terminan con código 3 indicando `skill resume RUN_ID`, el identificador de la aprobación y su caducidad.
+Al llegar a un paso `approval`, el harness calcula la propuesta (Skill con versión y hash, ejecución, paso, alcance, destino y SHA-256 y tamaño del contenido) y su hash. **Solo se aprueba en una terminal interactiva**: el harness muestra la propuesta entera y hay que escribir los **8 primeros caracteres del hash**. El contenido propuesto sale entre las dos reglas con `| ` delante de cada línea y cortado en filas más estrechas que la terminal (cada fila que continúa la anterior empieza por `|+`), también en `skill run` y `skill resume` desde la línea de órdenes (revisión de seguridad del 2026-11-27): así el modelo no puede dibujar dentro del contenido una regla ni un segundo aviso que parezcan del harness. Lo que se aprueba y su hash no cambian; `n` rechaza y cancela la ejecución. Tres códigos equivocados o el fin de la entrada la dejan pendiente. La pregunta bloquea la sesión hasta que contestas; si contestas después de la caducidad, la aprobación queda caducada y no se aplica nada. Sin terminal (stdin redirigido, un script, un agente), `skill run` y `skill resume` dejan la ejecución en `awaiting_approval` y terminan con código 3 indicando `skill resume RUN_ID`, el identificador de la aprobación y su caducidad.
 
 Lo que se muestra es lo que se aprueba y lo que se aplica: el contenido sin caracteres de control ni de formato, con las credenciales conocidas redactadas, como máximo 32 KiB, y con cualquier otro carácter invisible escrito como `<U+XXXX>` (un emoji con selector de variación se ve como `❤<U+FE0F>`). Un destino con caracteres invisibles o que no está en NFC hace fallar el paso sin preguntar.
 
@@ -517,7 +556,7 @@ Límite: un proceso que el servidor lance en **otra sesión o grupo** (`setsid`,
   - bytes del resultado y duración.
 
   **Nunca** guarda los argumentos ni el resultado.
-- El stderr del servidor va a `HARNESS_DATA_DIR/logs/mcp/<servidor>.stderr.log`, nunca a la terminal. Se guarda línea a línea, con las credenciales de formato conocido sustituidas por `[REDACTED:<tipo>]` antes de escribirse (revisado el 2026-11-25), aunque un token llegue partido en varias lecturas. Una línea termina en LF, CRLF o un CR suelto (una barra de progreso). Una línea de más de 16 KiB no se redacta por partes: se descarta entera y en su lugar queda una marca que lo dice, así que una credencial en ella no llega al log, pero el resto de la línea tampoco. Una clave privada PEM se sustituye por una marca y se descartan las líneas siguientes hasta su línea END; si END no llega en 32 KiB, una marca lo dice y el log sigue en la línea siguiente. Lo que **no** cubre: una credencial de formato desconocido; una clave de más de 32 KiB; una credencial cuyo comienzo se tragó otra (una clave de Anthropic o de Slack que acaba en la cabecera de un JWT deja en claro el resto del JWT); y si el harness mata el proceso de sesión al vencer su plazo, la última línea sin final y el recuento se pierden. Cada sesión escribe como mucho 1 MiB, entrega al log como mucho 65 536 líneas (un CRLF es una) y pasa a la redacción como mucho 4 MiB; la primera línea que pasaría cualquiera de los tres no se escribe, ni nada después, y una línea final anota cuántos bytes del stderr no están en el log de ninguna forma y por qué. Así, una ráfaga de líneas vacías o de CR (64 KiB de saltos) termina el log para el resto de la sesión. Un fallo del propio registro no corta la sesión ni escribe nada sin redactar: el log dice dónde se paró, salvo si lo que falla es escribir en el log. Una cadena hecha a mano de más de cuatro credenciales pegadas puede dejar las primeras en claro. Antes de cada sesión, un fichero de más de 1 MiB pasa a `.1` (que sustituye al anterior), así que los dos ficheros de un servidor no pasan de unos 4 MiB. En macOS y Linux la carpeta es `0700` y los ficheros `0600`.
+- El stderr del servidor va a `HARNESS_DATA_DIR/logs/mcp/<servidor>.stderr.log`, nunca a la terminal. Se guarda línea a línea, con las credenciales de formato conocido sustituidas por `[REDACTED:<tipo>]` antes de escribirse (revisado el 2026-11-25), aunque un token llegue partido en varias lecturas. Una línea termina en LF, CRLF o un CR suelto (una barra de progreso). Una línea de más de 16 KiB no se redacta por partes: se descarta entera y en su lugar queda una marca que lo dice, así que una credencial en ella no llega al log, pero el resto de la línea tampoco. Una clave privada PEM se sustituye por una marca y se descartan las líneas siguientes hasta su línea END; si END no llega en 32 KiB, una marca lo dice y el log sigue en la línea siguiente. Lo que **no** cubre: una credencial de formato desconocido; una clave de más de 32 KiB; una credencial cuyo comienzo se tragó otra (una clave de Anthropic o de Slack que acaba en la cabecera de un JWT deja en claro el resto del JWT); y si el harness mata el proceso de sesión al vencer su plazo, la última línea sin final y el recuento se pierden. Cada sesión escribe como mucho 1 MiB, entrega al log como mucho 65 536 líneas (un CRLF es una) y pasa a la redacción como mucho 4 MiB; la primera línea que pasaría cualquiera de los tres no se escribe, ni nada después, y una línea final anota cuántos bytes del stderr no están en el log de ninguna forma y por qué. Así, una ráfaga de líneas vacías o de CR (64 KiB de saltos) termina el log para el resto de la sesión. Las secuencias de escape de la terminal (colores, títulos) se quitan de cada línea antes de redactarla, para que una credencial pegada a un color no se escape (revisión de seguridad del 2026-11-27); el resto de caracteres de control se guarda como lo escribió el servidor. Un fallo del propio registro no corta la sesión ni escribe nada sin redactar: el log dice dónde se paró, salvo si lo que falla es escribir en el log. Una cadena hecha a mano de más de cuatro credenciales pegadas puede dejar las primeras en claro. Antes de cada sesión, un fichero de más de 1 MiB pasa a `.1` (que sustituye al anterior), así que los dos ficheros de un servidor no pasan de unos 4 MiB. En macOS y Linux la carpeta es `0700` y los ficheros `0600`.
 - Una llamada `running` cuyo comando ya no existe (se cortó la luz, se mató el proceso) se marca `failed`/`interrupted` en el siguiente `mcp call`. "Ya no existe" lo dice un bloqueo que el comando mantiene mientras vive, no la antigüedad de la fila.
 - Todo lo que se imprime (resultado, descripciones, nombres y errores del servidor) sale sin caracteres de control, de formato ni secuencias de escape. Las credenciales conocidas salen como `[REDACTED:<tipo>]`. Imágenes y audio se sustituyen por `[<tipo> withheld: N bytes of base64]`, y los recursos por `[<tipo> withheld]`.
 
@@ -527,7 +566,7 @@ Por variables de entorno (ver `.env.example`):
 
 | Variable | Por defecto | Para qué |
 |---|---|---|
-| `HARNESS_DATA_DIR` | `./data` | Dónde viven SQLite y los bloqueos. Debe ser un **disco local**: en una unidad de red los bloqueos de fichero no son fiables. No puede estar dentro de `HARNESS_VAULT_ROOT`. |
+| `HARNESS_DATA_DIR` | `./data` | Dónde viven SQLite, los bloqueos, la clave de los HMAC de MCP (`keys/`), los logs de stderr de los servidores MCP (`logs/mcp/`) y, con Copilot, el perfil dedicado de Edge (`edge-profile/`) y `copilot/`. En macOS y Linux, lo que el harness crea ahí (la carpeta y las que le falten por encima, la base y sus `-wal`/`-shm`, `locks/` y sus ficheros, `copilot/login.json`) es solo de su dueño (`0700`/`0600`); lo que ya existía conserva sus permisos. En Windows esos modos no se usan: lo creado hereda los permisos de la carpeta y el harness no fija ninguna ACL. Debe ser un **disco local**: en una unidad de red los bloqueos de fichero no son fiables. No puede estar dentro de `HARNESS_VAULT_ROOT`. |
 | `HARNESS_PROVIDER` | `mock` | Proveedor de las sesiones nuevas: `mock` o `copilot_web`. |
 | `HARNESS_REQUEST_TIMEOUT_S` | `120` | Plazo de cada pregunta. Con Copilot cubre todo: esperar el navegador, arrancarlo, enviar y recibir la respuesta. La sonda propone un valor. |
 | `HARNESS_COPILOT_URL` | (vacía) | Dirección del chat de Copilot, la que se abre para una conversación nueva. Solo en tu `.env` local. |

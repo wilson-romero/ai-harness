@@ -53,12 +53,22 @@ _HARNESS_STYLES = (
 )
 
 
+EMOJI_PRESENTATION = "\ufe0f"  # VS16: draws the character before it as a two-column emoji
+
+
 def _char_columns(char: str) -> int:
     """Columns a character takes at a terminal: 0 for combining and format characters, 2 for
     wide and full-width ones, 8 for a tab (the most it can take), 1 otherwise. Ambiguous-width
-    characters count 1, as Western terminals show them (a limit, design D9)."""
+    characters count 1, as Western terminals show them (a limit, design D9).
+
+    VS16 counts 1 (security review 2026-11-27, F-09): it turns a one-column character such as
+    U+2764 into a two-column emoji, as Rich and current terminals draw it; counted 0, a row of
+    such emoji was wider than the terminal, which wrapped it into a row without the mark. After
+    a character already wide it over-counts, which only cuts the row earlier."""
     if char == "\t":
         return 8
+    if char == EMOJI_PRESENTATION:
+        return 1
     if unicodedata.combining(char) or unicodedata.category(char) in ("Mn", "Me", "Cf"):
         return 0
     return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1

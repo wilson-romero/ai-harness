@@ -110,19 +110,28 @@ def test_a_jwt_whose_header_another_credential_swallowed_is_a_documented_limit(p
     assert redact(text).text.endswith(jwt_rest)
 
 
+GOOGLE = "AI" + "za"
+
+
 def glued_chain(tokens: int) -> str:
-    """GitLab tokens whose 20-character body ends in `-`, then an AWS key: each token finds its
-    end only once the next one is a marker, one pass each."""
-    return "".join(GITLAB + "G" * 19 + "-" for _ in range(tokens)) + "AK" + "IA" + "C" * 16
+    """Google API keys whose 35-character body ends in `-`, then a Slack token: each key finds
+    its end only once the next one is a marker, one pass each. (GitLab tokens were the example
+    until their body became variable on 2026-11-27: such a chain is now one GitLab token.)"""
+    return "".join(GOOGLE + "D" * 34 + "-" for _ in range(tokens)) + SLACK + "1234567890ab"
 
 
 def test_a_chain_of_glued_credentials_longer_than_the_passes_is_a_documented_limit():
-    """Fourth review, finding 2: four passes mask three such tokens and the key; with four
-    tokens the first stays in clear (one pass, as before, masked only the key)."""
-    assert redact(glued_chain(3)).text == "[REDACTED:gitlab]" * 3 + "[REDACTED:aws]"
+    """Fourth review, finding 2: four passes mask three such keys and the token; with four
+    keys the first stays in clear (one pass, as before, masked only the token)."""
+    assert redact(glued_chain(3)).text == "[REDACTED:google]" * 3 + "[REDACTED:slack]"
     four = redact(glued_chain(4))
-    assert four.text == GITLAB + "G" * 19 + "-" + "[REDACTED:gitlab]" * 3 + "[REDACTED:aws]"
-    assert develop_redact(glued_chain(4)).kinds == ("aws",)
+    assert four.text == GOOGLE + "D" * 34 + "-" + "[REDACTED:google]" * 3 + "[REDACTED:slack]"
+    assert develop_redact(glued_chain(4)).kinds == ("slack",)
+
+
+def test_a_chain_of_gitlab_tokens_is_now_one_token():
+    chain = "".join(GITLAB + "G" * 19 + "-" for _ in range(4)) + "AK" + "IA" + "C" * 16
+    assert redact(chain).text == "[REDACTED:gitlab]"
 
 
 def test_a_credential_nested_in_a_private_key_block_is_masked_with_it():

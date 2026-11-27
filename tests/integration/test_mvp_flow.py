@@ -31,7 +31,13 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import HARNESS_VARS, REPO_ROOT, fingerprint, note_header
-from tests.skill_support import ApprovingTerminal, FakeTerminal, ScriptedProvider, all_text
+from tests.skill_support import (
+    ApprovingTerminal,
+    FakeTerminal,
+    ScriptedProvider,
+    all_text,
+    unmark_rows,
+)
 
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "mvp"
 REVIEW_KEY = "tarea: hls-review/review"
@@ -160,7 +166,7 @@ def shown_note(terminal: FakeTerminal) -> str:
     lines = text.split("\n")
     first = lines.index(RULE)
     last = len(lines) - 1 - lines[::-1].index(RULE)
-    return "\n".join(lines[first + 1:last])
+    return unmark_rows(lines[first + 1:last])
 
 
 def shown_target(terminal: FakeTerminal) -> str:
