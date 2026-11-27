@@ -354,8 +354,7 @@ async def test_programmatic_values_open_no_list(tmp_path):
         prompt, listing = await _open(tui, pilot)
         prompt.value = "/s"
         await pilot.pause(0.1)
-        # What was typed stays, and so does its list: ctrl+n does not touch the input.
-        assert prompt.value == "/" and listing.showing
+        assert not listing.showing
         prompt.value = ""
         await tui.send(pilot, "/exit")
     assert isinstance(prompt, Input)
