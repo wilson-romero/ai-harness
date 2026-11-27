@@ -521,3 +521,42 @@ async def test_the_list_sits_on_the_input_at_every_size(tmp_path, size):
         assert RUNNING + "/skill demo-echo --file text=nota.md" in tui.screen()
         prompt.value = ""
         await tui.send(pilot, "/exit")
+
+
+# -- the list and a reply being placed (reply-rendering D6, merged 2026-11-27) -------------------
+
+
+async def test_the_list_neither_cancels_nor_misplaces_a_reply_being_placed(tmp_path):
+    """A reply arrives while the person types a command: opening the list, taking a row with
+    Tab and closing it with Esc are not sending a line nor browsing the blocks, so the newest
+    reply is still placed with its start at the top of the pane."""
+    from harness.shell.render import foreign_rows
+    from harness.shell.tui import UNCUT
+    from tests.unit.test_shell_tui_blocks import _replies, long_reply
+
+    tui = _skills_tui(tmp_path)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        prompt, listing = await _open(tui, pilot)
+        app = tui.app
+        app.start_turn("pregunta sintética")
+        await pilot.pause(0.1)
+        app.show_rows(foreign_rows(long_reply(80), UNCUT, markdown=True)[0], "mock")
+        reply = _replies(tui)[-1]
+        assert app._arriving is reply  # being placed, not laid out yet
+        prompt.insert_text_at_cursor("/")
+        prompt.insert_text_at_cursor("s")
+        prompt.insert_text_at_cursor("k")
+        await pilot.press("tab")  # takes /skill and lists the skills
+        await tui.until(pilot, lambda: listing.showing)
+        await pilot.press("escape")  # closes the list: not browsing
+        assert not listing.showing and not prompt.browsing
+        await pilot.pause(0.3)
+        log = app._log()
+        assert reply.outer_size.height > log.size.height  # a long reply, placed from its start
+        assert 0 <= reply.region.y - log.region.y <= 1
+        assert prompt.value == "/skill "
+        await pilot.press("escape")  # now Esc starts browsing, as before
+        assert prompt.browsing
+        await pilot.press("escape")
+        prompt.value = ""
+        await tui.send(pilot, "/exit")
