@@ -26,7 +26,9 @@ DEADLINE_S = 60.0  # generous: the events are ordered by what the child prints, 
 
 class TerminalChild:
     def __init__(self, data_dir, *args: str, **env: str) -> None:
-        environment = subprocess_env(data_dir, **env)
+        # The plain terminal (shell-appearance D4): these tests read its exact text. The styled
+        # one is driven by tests/integration/test_chat_styled_terminal.py.
+        environment = subprocess_env(data_dir, **{"HARNESS_PLAIN": "1", **env})
         pid, fd = pty.fork()
         if pid == 0:  # the child: becomes `main.py` with the pseudo-terminal as its console
             os.chdir(REPO_ROOT)

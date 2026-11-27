@@ -84,6 +84,14 @@ Un paso `validate` SHALL comprobar la salida de un paso anterior solo con reglas
 - **WHEN** la respuesta guionizada no contiene el encabezado `## Preguntas pendientes` que exige el paso
 - **THEN** el paso queda `failed` con la regla incumplida, la ejecución queda `failed` y el proveedor recibió una sola pregunta
 
+#### Scenario: Encabezado solo dentro de un bloque de código
+- **WHEN** la respuesta contiene el encabezado exigido solo dentro de un bloque de código (por ejemplo, entre dos líneas de tres acentos graves), o después de una valla que no se cierra
+- **THEN** el encabezado no cuenta y el paso queda `failed` con la regla `required_headings` (añadido el 2026-11-26)
+
+#### Scenario: Bloque json con una valla más larga
+- **WHEN** la respuesta lleva prosa y un único bloque `json` abierto y cerrado con cuatro acentos graves (o con virgulillas)
+- **THEN** se analiza el interior de ese bloque; dos bloques `json` o uno sin cerrar dejan el paso `failed` con `json_block` (añadido el 2026-11-26)
+
 #### Scenario: JSON con campo extra o tipo erróneo
 - **WHEN** la respuesta es un objeto JSON con un campo no declarado o con un número donde se espera texto
 - **THEN** el paso queda `failed` nombrando el campo

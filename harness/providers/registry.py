@@ -19,6 +19,7 @@ def provider_factory(settings: Settings) -> ProviderFactory:
             settings.mock_delay_ms,
             load_responses(settings.mock_responses) if settings.mock_responses else None,
         ),
+        "copilot_web": lambda: _copilot(settings),
     }
 
     def build(name: str) -> LLMProvider:
@@ -30,3 +31,11 @@ def provider_factory(settings: Settings) -> ProviderFactory:
         return builder()
 
     return build
+
+
+def _copilot(settings: Settings) -> LLMProvider:
+    # Playwright is imported only when a Copilot provider is actually built. Building it opens
+    # nothing: the browser starts in `ask`, after `check` passed.
+    from harness.providers.copilot_web import CopilotWebProvider
+
+    return CopilotWebProvider(settings)

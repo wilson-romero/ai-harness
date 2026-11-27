@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "complete": true,
+  "missing": [],
+  "measured_at": "2026-11-24T00:00:00Z",
+  "edge_version": "0.0.0-synthetic",
+  "platform": "synthetic",
+  "locators": {
+    "composer": {"css": "#synthetic-composer"},
+    "send": {"role": "button", "name": "Send synthetic message", "exact": true},
+    "new_conversation": {"css": "#synthetic-new-chat"},
+    "user_turn": {"css": "#synthetic-thread .turn.user"},
+    "assistant_turn": {"css": "#synthetic-thread .turn.assistant"},
+    "stop": {"role": "button", "name": "Stop synthetic reply", "exact": true},
+    "response_done_control": {"css": ".synthetic-copy"},
+    "login_indicator": {"css": "#synthetic-login-form"},
+    "code_language": {"test_id": "synthetic-code-identity"}
+  },
+  "conversation_ref": {"kind": "path_segment", "index": 1, "prefix": ["c"]},
+  "identity_recoverable": true,
+  "turns_visible_after_reopen": [4, 4, 4],
+  "turns_sent_per_conversation": 4,
+  "end_signal": {"name": "stop_hidden"},
+  "stability_window_ms": 300,
+  "max_prompt_chars": 8000,
+  "startup_ms": [900, 800, 850],
+  "longest_response_ms": 1500,
+  "recommended_timeout_s": 30,
+  "login": {"hosts": ["localhost"], "indicator_seen": true}
+}

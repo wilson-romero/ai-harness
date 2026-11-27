@@ -74,4 +74,6 @@ from harness.cli import main  # noqa: E402 - after the hook, so the SDK import i
 code = main(argv)
 if mode == "sockets":
     (state / "binds.json").write_text(json.dumps(binds), encoding="utf-8")
+    (state / "binds-environment.json").write_text(json.dumps(socket_origin.environment()),
+                                                  encoding="utf-8")
 sys.exit(code)

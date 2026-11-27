@@ -153,3 +153,54 @@ def insert_request_context(
         " VALUES (?, ?, ?, ?, ?)",
         (str(request_id), note_path, sha256, size_bytes, int(truncated)),
     )
+
+
+class RemoteRefTaken(Exception):
+    """The remote conversation is already bound to another session (migration 007)."""
+
+
+def bind_remote_ref(conn: sqlite3.Connection, session_id: UUID, remote_ref: str) -> bool:
+    """Store the remote conversation of a session that has none. False if it already has one:
+    a reference, once bound, never changes. Raises RemoteRefTaken if another session holds
+    it: one remote conversation belongs to one session at most."""
+    try:
+        cursor = conn.execute(
+            "UPDATE sessions SET remote_ref = ?, updated_at = ?"
+            " WHERE session_id = ? AND remote_ref IS NULL",
+            (remote_ref, utc_now(), str(session_id)),
+        )
+    except sqlite3.IntegrityError:
+        raise RemoteRefTaken from None
+    return cursor.rowcount == 1
+
+
+def completed_in_remote(conn: sqlite3.Connection, session_id: UUID) -> int:
+    """Completed requests that went into the session's remote conversation: from the request
+    that bound it onwards. Questions completed before the binding (when the identifier did
+    not arrive) are in other remote conversations, not in this one."""
+    row = conn.execute(
+        "SELECT count(*) FROM requests WHERE session_id = ? AND status = ? AND started_at >= ("
+        " SELECT r.started_at FROM audit_events a JOIN requests r ON r.request_id = a.request_id"
+        " WHERE a.session_id = ? AND a.event_type = 'session.bound' AND a.outcome = 'ok'"
+        " ORDER BY a.created_at DESC LIMIT 1)",
+        (str(session_id), RequestStatus.COMPLETED.value, str(session_id)),
+    ).fetchone()
+    return int(row[0])
+
+
+def completed_requests(conn: sqlite3.Connection, session_id: UUID) -> int:
+    row = conn.execute(
+        "SELECT count(*) FROM requests WHERE session_id = ? AND status = ?",
+        (str(session_id), RequestStatus.COMPLETED.value),
+    ).fetchone()
+    return int(row[0])
+
+
+def session_requests(conn: sqlite3.Connection, session_id: UUID) -> list[tuple[str, str, str]]:
+    """(request id, status, started at) of every request of a session, oldest first."""
+    rows = conn.execute(
+        "SELECT request_id, status, started_at FROM requests WHERE session_id = ?"
+        " ORDER BY started_at, request_id",
+        (str(session_id),),
+    )
+    return [(row["request_id"], row["status"], row["started_at"]) for row in rows]

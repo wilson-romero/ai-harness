@@ -21,7 +21,6 @@ import os
 import shutil
 import sqlite3
 import stat
-import unicodedata
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -45,10 +44,31 @@ from harness.memory.paths import resolve_project, validate_project_slug
 from harness.memory.search import DEFAULT_LIMIT, parse_query, search_vault
 from harness.providers.base import LLMProvider, close_resources, open_resources
 from harness.shell.parser import Command, Empty, LineError, Question, parse_line
-from harness.shell.terminal import ConversationTerminal, WaitInterrupted
+from harness.shell.render import (  # noqa: F401 - re-exported: the names tests and docs use
+    CONTINUATION_PREFIX,
+    FOREIGN_PREFIX,
+    MAX_SHOWN_CHARS,
+    MIN_COLUMNS,
+    STATUS,
+    Row,
+    foreign_lines,
+    foreign_rows,
+    harness_rows,
+    plain_rows,
+    status_line,
+    wrap_rows,
+)
+from harness.shell.terminal import (
+    ApprovalTerminal,
+    ConversationTerminal,
+    PanelState,
+    ShellState,
+    StyledTerminal,
+    WaitInterrupted,
+)
 from harness.skills.approvals import APPROVAL_RULE, Proposal, approval_header
 from harness.skills.config import SkillSettings
-from harness.skills.definition import skills_root
+from harness.skills.definition import _SKILL_NAME_RE, skills_root
 from harness.skills.effects import Effect, default_effects
 from harness.skills.engine import MAX_INPUT_BYTES, OPEN_RUN_STATES, RunOutcome, SkillEngine
 from harness.storage.locks import SessionLock
@@ -60,13 +80,14 @@ from harness.text.safe_text import (
 )
 
 PROMPT = "> "
-FOREIGN_PREFIX = "| "  # no harness line starts with "|"
-CONTINUATION_PREFIX = "|+"  # a row that continues the line above it (cut to the terminal width)
-MIN_COLUMNS = 20
 INTERRUPTED_EXIT = 130  # Ctrl+C stopped the provider's opening: the usual code of an interrupt
 MAX_QUESTION_BYTES = 64 * 1024
-MAX_SHOWN_CHARS = 256 * 1024  # of one foreign text; the rest is counted, not shown
 MAX_FILE_BYTES = MAX_INPUT_BYTES
+MAX_COMPLETIONS = 200
+STYLED_HINT = (
+    "Enter sends a question. /help lists the commands; Tab completes them.",
+    "Ctrl+C interrupts a question (never resent). /exit or end of input leaves.",
+)
 INTERRUPT_HINT = (
     "interrupted: the conversation is still open; type /exit or end the input "
     "(Ctrl+D, or Ctrl+Z and Enter on Windows) to leave"
@@ -117,70 +138,6 @@ class ConversationDeps:
     effects: Mapping[str, Effect] | None = None
     engine_options: Mapping[str, object] | None = None  # extra SkillEngine options (tests)
     columns: Callable[[], int] = terminal_columns  # asked before each output
-
-
-def _char_columns(char: str) -> int:
-    """Columns a character takes at a terminal: 0 for combining and format characters, 2 for
-    wide and full-width ones, 8 for a tab (the most it can take), 1 otherwise. Ambiguous-width
-    characters count 1, as Western terminals show them (a limit, design D9)."""
-    if char == "\t":
-        return 8
-    if unicodedata.combining(char) or unicodedata.category(char) in ("Mn", "Me", "Cf"):
-        return 0
-    return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
-
-
-def wrap_rows(line: str, columns: int | None, first: str = "") -> list[str]:
-    """`line` as terminal rows, each narrower than the terminal (review 2026-11-25).
-
-    The terminal would wrap a longer line by itself, and the part it moves to the next row
-    would start that row with whatever the text says there: a foreign line could start a row
-    without its prefix. So every row is cut here, below `columns`: the first row starts with
-    `first`, every other with CONTINUATION_PREFIX. A row ends after its last space when it has
-    one, so that words (an identifier, a command) stay whole; the rows put back together are
-    the line. `columns` None: no cut. Linear: a character moves to the next row at most once.
-    """
-    if columns is None:
-        return [first + line]
-    limit = max(columns, MIN_COLUMNS) - 1  # never the last column: some terminals wrap there
-    lead = len(CONTINUATION_PREFIX)
-    rows: list[str] = []
-    current: list[str] = [first]
-    widths: list[int] = [len(first)]
-    used = len(first)
-    space, used_to_space = -1, 0  # the row's last space: its index in `current`, width up to it
-    for char in line:
-        width = _char_columns(char)
-        if used + width > limit and len(current) > 1:
-            cut = len(current)
-            if space > 0 and lead + used - used_to_space + width <= limit:
-                cut = space + 1  # after the space; what follows it goes to the next row
-            rows.append("".join(current[:cut]))
-            current, widths = [CONTINUATION_PREFIX, *current[cut:]], [lead, *widths[cut:]]
-            used, space = sum(widths), -1
-        current.append(char)
-        widths.append(width)
-        used += width
-        if char == " ":
-            space, used_to_space = len(current) - 1, used
-    rows.append("".join(current))
-    return rows
-
-
-def foreign_lines(text: str, columns: int | None = None) -> tuple[list[str], int]:
-    """Text from outside the harness as printable rows, and how many characters were left out.
-
-    Bounded first (MAX_SHOWN_CHARS), then cleaned and redacted (`safe_foreign_text`: no escape
-    sequences, controls or invisible format characters), then every line is prefixed and cut
-    into rows narrower than `columns` (`wrap_rows`). Linear.
-    """
-    hidden = max(0, len(text) - MAX_SHOWN_CHARS)
-    shown = text[:MAX_SHOWN_CHARS] if hidden else text
-    clean = safe_foreign_text(shown).text
-    rows: list[str] = []
-    for line in clean.split("\n"):
-        rows += wrap_rows(line, columns, FOREIGN_PREFIX)
-    return rows, hidden
 
 
 def read_text_file(raw_path: str, max_bytes: int = MAX_FILE_BYTES) -> tuple[str, str]:
@@ -256,24 +213,29 @@ class Conversation:
         self._attachment: tuple[str, str] | None = None  # (name, block) for the next question
         self._loop: asyncio.AbstractEventLoop | None = None
         self._current: asyncio.Task | None = None
+        self._notes: tuple[str, ...] = ()  # memory notes of the last question (shell-tui D4)
 
     # -- output ---------------------------------------------------------------------------------
 
     def _say(self, text: str) -> None:
         """A harness line (or lines). Its first row never starts with `|`; a row that continues
         it starts with CONTINUATION_PREFIX."""
-        self._terminal.show("\n".join(self._harness_rows(text.split("\n"))))
+        self._emit(harness_rows(text.split("\n"), self._deps.columns()))
 
     def _harness_rows(self, lines: list[str]) -> list[str]:
-        columns = self._deps.columns()
-        rows: list[str] = []
-        for line in lines:
-            rows += wrap_rows(" " + line if line.startswith("|") else line, columns)
-        return rows
+        return plain_rows(harness_rows(lines, self._deps.columns()))
 
-    def _foreign(self, text: str) -> None:
-        lines, hidden = foreign_lines(text, self._deps.columns())
-        self._terminal.show("\n".join(lines))
+    def _emit(self, rows: list[Row]) -> None:
+        """Rows to the terminal: styled where it can show styles, else their plain text, which
+        is the same characters (shell-appearance D3)."""
+        if isinstance(self._terminal, StyledTerminal):
+            self._terminal.show_rows(rows)
+        else:
+            self._terminal.show("\n".join(plain_rows(rows)))
+
+    def _foreign(self, text: str, *, markdown: bool = False) -> None:
+        rows, hidden = foreign_rows(text, self._deps.columns(), markdown=markdown)
+        self._emit(rows)
         if hidden:
             self._say(f"[{hidden} more character(s) not shown]")
 
@@ -289,7 +251,11 @@ class Conversation:
         for line in proposal.content.split("\n"):
             content += wrap_rows(line, columns, FOREIGN_PREFIX)
         rule = self._harness_rows([APPROVAL_RULE])
-        return "\n".join([*self._harness_rows(header), *rule, *content, *rule])
+        header_rows = self._harness_rows(header)
+        shown = "\n".join([*header_rows, *rule, *content, *rule])
+        if isinstance(self._terminal, ApprovalTerminal):
+            self._terminal.expect_approval(shown, header, content)
+        return shown
 
     # -- interruption (D6, D7) --------------------------------------------------------------------
 
@@ -318,6 +284,14 @@ class Conversation:
         self, session_id: str | None = None, project: str | None = None, name: str | None = None
     ) -> int:
         self._loop = asyncio.get_running_loop()
+        if isinstance(self._terminal, StyledTerminal):
+            self._terminal.bind(ShellState(
+                status=self._status_line,
+                resume_count=lambda: len(self._listed),
+                skill_names=self._skill_names,
+                panel=self._panel,
+                sessions=self._session_choices,
+            ))
         if session_id is not None:
             self._switch_to(self._take_existing(session_id))
         else:
@@ -512,6 +486,7 @@ class Conversation:
         self._release()
         self._session, self._lock = taken
         self._attachment = None
+        self._notes = ()
 
     def _release(self) -> None:
         if self._lock is not None:
@@ -521,14 +496,69 @@ class Conversation:
     def _header(self) -> None:
         session = self._session
         assert session is not None
+        hint = ("Type a question and press Enter. /help lists the commands; /exit or end of input "
+                "leaves. Ctrl+C interrupts a question; nothing is resent.")
+        if isinstance(self._terminal, StyledTerminal):
+            columns = self._deps.columns()
+            status = self._status_line()
+            rule = "-" * min(max(columns, MIN_COLUMNS) - 1, len(status))
+            self._emit(harness_rows([status], columns, STATUS) + harness_rows([rule], columns))
+            self._say("\n".join(STYLED_HINT))
+            return
         self._say("\n".join([
             "ai-harness conversation",
             f"provider: {self._deps.provider_name}",
             f"session:  {session.session_id} ({terminal_safe(session.name)})",
             f"project:  {session.project_id or '-'}",
-            "Type a question and press Enter. /help lists the commands; /exit or end of input "
-            "leaves. Ctrl+C interrupts a question; nothing is resent.",
+            hint,
         ]))
+
+    def _status_line(self) -> str:
+        """From the session held now and the configured provider: nothing foreign (D5)."""
+        session = self._session
+        if session is None:
+            return status_line(None, self._deps.provider_name, "-")
+        return status_line(session.project_id, self._deps.provider_name, session.session_id)
+
+    def _panel(self) -> PanelState:
+        """The side panel (shell-tui D4): the session held now, from the database and the
+        configuration only. Called in the conversation's thread, between actions."""
+        session = self._service.require_session(str(self._session_id))
+        (sends,) = self._deps.conn.execute(
+            "SELECT COUNT(*) FROM requests WHERE session_id = ?", (str(session.session_id),)
+        ).fetchone()
+        last = self._last_request()
+        return PanelState(
+            session_name=terminal_safe(session.name),
+            session_id=str(session.session_id),
+            project=terminal_safe(session.project_id or "-"),
+            provider=terminal_safe(self._deps.provider_name),
+            notes=self._notes,
+            sends=int(sends),
+            last_request=last[1] if last is not None else "-",
+        )
+
+    def _session_choices(self) -> list[str]:
+        """What /sessions lists, one line each, numbered as /resume takes them: it sets the
+        numbers exactly as /sessions does (shell-tui D5)."""
+        sessions = self._service.list_sessions()
+        self._listed = [s.session_id for s in sessions]
+        return [f"{'*' if s.session_id == self._session_id else ' '}{number:>3}  "
+                f"{s.session_id}  {s.project_id or '-'}  {terminal_safe(s.name)}"
+                for number, s in enumerate(sessions, start=1)]
+
+    def _skill_names(self) -> list[str]:
+        """Names of the skill folders, for completion only: never read further, never shown
+        unless they have the shape of a skill name."""
+        try:
+            root = skills_root(self._deps.skills().skills_dir)
+            if root is None:
+                return []
+            names = sorted(entry.name for entry in root.iterdir()
+                           if _SKILL_NAME_RE.fullmatch(entry.name) and entry.is_dir())
+        except (HarnessError, OSError):
+            return []
+        return names[:MAX_COMPLETIONS]
 
     # -- memory (5.1) -----------------------------------------------------------------------------
 
@@ -543,6 +573,7 @@ class Conversation:
 
     def _context_for_question(self, text: str) -> ProjectContext | None:
         """Same checks, refusals and audit as `ask --project` with the session's project."""
+        self._notes = ()
         session = self._service.require_session(str(self._session_id))
         if session.project_id is None:
             return None
@@ -553,6 +584,8 @@ class Conversation:
             self._service.deny_project_question(str(session.session_id))
             raise
         self._context_summary(context)
+        # The names the context already lists, cleaned and redacted (shell-tui D4).
+        self._notes = tuple(safe_line(note.relative).text for note in context.included)
         return context
 
     def _context_summary(self, context: ProjectContext) -> None:
@@ -582,15 +615,20 @@ class Conversation:
         attachment, self._attachment = self._attachment, None
         if attachment is not None:
             self._say(f"attached: {attachment[0]}")
-        self._say("waiting for the provider (Ctrl+C interrupts)")
-        response = await self._service.ask_taken(
+        ask = self._service.ask_taken(
             self._session_id, self._deps.provider, text, context,
             attachment=attachment[1] if attachment is not None else None,
         )
+        if isinstance(self._terminal, StyledTerminal):
+            async with self._terminal.working(self._deps.provider_name):
+                response = await ask
+        else:
+            self._say("waiting for the provider (Ctrl+C interrupts)")
+            response = await ask
         for warning in response.warnings:
             self._say(f"warning: {warning}")
         if response.status is RequestStatus.COMPLETED and response.text is not None:
-            self._foreign(response.text)
+            self._foreign(response.text, markdown=True)
             return
         detail = safe_line(response.detail or "").text
         self._say(f"error: request {response.request_id} ended as {response.status}: {detail}")
@@ -668,7 +706,7 @@ class Conversation:
             if entry.content is None:
                 self._say("(content not stored)")
             else:
-                self._foreign(entry.content)
+                self._foreign(entry.content, markdown=True)
 
     def _cmd_memory(self, *terms: str) -> None:
         parsed = parse_query(" ".join(terms))
@@ -750,7 +788,7 @@ class Conversation:
             self._say(f"skill: {outcome.run_id}: {safe_line(outcome.message).text}")
         if outcome.status == "completed":
             if outcome.output is not None:
-                self._foreign(outcome.output)
+                self._foreign(outcome.output, markdown=True)
             for target in outcome.applied:
                 self._say(f"applied: {safe_line(target).text}")
         self._say(f"skill: run {outcome.run_id} is {outcome.status}")

@@ -102,6 +102,20 @@ Lo que **no** garantiza:
 - La lista local se rechaza si otro usuario, el grupo u otros pueden escribirla en macOS y Linux. En Windows no se comprueban las ACL.
 - La marca de recursión (`AI_HARNESS_MCP_CHILD`) evita encadenamientos accidentales. No detiene a un servidor malicioso que la borre.
 
+## Perfil dedicado de Edge (Copilot Web)
+
+Estado (2026-11-26): el proveedor de Copilot Web existe en la rama `feature/copilot-web-provider`, probado contra la página real solo en macOS. No está en `develop` ni en `main`.
+
+El harness lanza Edge con su sandbox activado y sin las opciones de Playwright que solo apagan protecciones de fondo (bloqueo de ventanas emergentes, actualización de componentes y de listas de protección). Coste medido (macOS, Edge 158): con la red en segundo plano activa, Edge tarda unos 10 s en cerrarse en cada pregunta con `ask` (en una conversación de `main.py chat`, una vez al salir), frente a 0,1 s con `--disable-background-networking`. Volver a poner esa opción ahorra ese tiempo, pero Edge deja de actualizar en segundo plano sus listas de protección. Lo decide Wilson. Dos opciones predeterminadas de Playwright se mantienen por decisión de Wilson (2026-11-25), para conservar la sesión iniciada: `--password-store=basic` y `--use-mock-keychain`. En macOS hacen que las cookies del perfil dedicado, y con ellas la sesión de Copilot, se cifren con una clave fija en vez de con el llavero del sistema. Consecuencia: **quien pueda leer el directorio del perfil puede descifrar las cookies de sesión y usar la sesión**. Por eso:
+
+- Mantén `HARNESS_DATA_DIR` (el perfil está en `HARNESS_DATA_DIR/edge-profile`) en un disco local, legible solo por tu usuario, y fuera de copias de seguridad compartidas y de carpetas sincronizadas.
+- El harness crea el directorio del perfil con permisos solo para su dueño (0700) y estrecha a 0700 uno suyo que ya existiera. Eso no protege de otro proceso que corra con tu mismo usuario.
+- En Windows no aplica la clave fija: el cifrado usa DPAPI, y el directorio hereda las ACL de su carpeta padre.
+
+**Qué queda en disco (precisión del 2026-11-26).** La base de datos del harness no guarda preguntas ni respuestas de Copilot, y sus logs tampoco. **El perfil dedicado es un perfil de navegador**: Edge guarda en él su caché, IndexedDB, almacenamiento local, historial y cookies, y la página de Copilot puede dejar ahí el texto de las conversaciones. El harness no lo lee ni lo borra. Protege la carpeta del perfil como protegerías el perfil de tu navegador, y bórrala entera (con Edge cerrado) si quieres quitar lo que contiene; después hará falta `copilot login` otra vez.
+
+La decisión se puede revisar cuando la sesión caduque y haya que iniciar sesión de nuevo de todas formas.
+
 ## Si algo se filtra
 
 Un secreto publicado se da por comprometido aunque se borre el commit: primero se **revoca o rota**, después se limpia el historial. Para avisar de un problema de seguridad, usa los *security advisories* privados de GitHub en este repositorio, no un issue público.

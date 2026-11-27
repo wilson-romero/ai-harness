@@ -21,6 +21,10 @@ class SessionBusy(HarnessError):
     pass
 
 
+class SessionClosed(HarnessError):
+    """The session's remote conversation was lost; the session takes no more questions."""
+
+
 class UnknownProvider(HarnessError):
     pass
 

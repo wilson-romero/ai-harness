@@ -70,13 +70,62 @@ def _check(step: ValidateStep, text: str) -> tuple[str, dict[str, Any] | None]:
     return canonical, data
 
 
+# Fenced code blocks as CommonMark reads them (revised 2026-11-26, after the Copilot reader
+# began writing fences longer than three backticks): an opening line of three or more
+# backticks or tildes, indented at most three spaces (a backtick fence's info string has no
+# backtick); it is closed by a line of the same character, at least as long, indented at most
+# three spaces, with nothing else; a fence never closed runs to the end of the text.
+_OPEN_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+_CLOSE_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})[ \t]*")
+# An ATX heading: one to six `#`, indented at most three spaces (four or more is code), then a
+# space or the end of the line.
+_HEADING = re.compile(r" {0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*")
+
+
+@dataclass(frozen=True)
+class _Fence:
+    info: str  # the info string, trimmed: its first word is the language
+    body: list[str]
+    closed: bool
+
+
+def _split(text: str) -> tuple[list[str], list[_Fence]]:
+    """The lines outside fenced code blocks, and the fenced blocks, in order."""
+    lines = text.split("\n")
+    outside: list[str] = []
+    fences: list[_Fence] = []
+    i = 0
+    while i < len(lines):
+        opening = _OPEN_FENCE.fullmatch(lines[i])
+        if opening is None or (opening.group(1)[0] == "`" and "`" in opening.group(2)):
+            outside.append(lines[i])
+            i += 1
+            continue
+        marker = opening.group(1)
+        body: list[str] = []
+        i += 1
+        closed = False
+        while i < len(lines):
+            closing = _CLOSE_FENCE.fullmatch(lines[i])
+            if closing and closing.group(1)[0] == marker[0] and len(closing.group(1)) >= len(marker):
+                closed = True
+                i += 1
+                break
+            body.append(lines[i])
+            i += 1
+        fences.append(_Fence(opening.group(2).strip(), body, closed))
+    return outside, fences
+
+
 def _headings(step: ValidateStep, text: str) -> None:
+    """Headings count only outside fenced code blocks: a heading inside code is code."""
     found = set()
-    for line in text.split("\n"):
-        stripped = line.strip()
-        level = len(stripped) - len(stripped.lstrip("#"))
-        if 1 <= level <= 6 and stripped[level : level + 1] == " ":
-            found.add(stripped[level:].strip().rstrip("#").strip().casefold())
+    outside, _ = _split(text)
+    for line in outside:
+        match = _HEADING.fullmatch(line)
+        if match:
+            title = re.sub(r"(?:^|[ \t]+)#+[ \t]*$", "", match.group(2) or "")  # closing #s
+            found.add(title.strip().casefold())
     for heading in step.required_headings:
         if heading.strip().casefold() not in found:
             raise _Fail("required_headings", heading)
@@ -104,18 +153,15 @@ def _json(step: ValidateStep, text: str) -> dict[str, Any]:
 
 
 def _json_body(text: str) -> str:
-    """The inside of the only ```json block, or the whole text if there is none."""
-    lines = text.split("\n")
-    opens = [i for i, line in enumerate(lines) if line.strip().casefold() == "```json"]
-    if not opens:
+    """The inside of the only fenced block labelled `json` (any fence length, backticks or
+    tildes), or the whole text if there is none. Two such blocks, or one never closed, fail."""
+    _, fences = _split(text)
+    blocks = [f for f in fences if [w.casefold() for w in f.info.split()[:1]] == ["json"]]
+    if not blocks:
         return text
-    if len(opens) > 1:
+    if len(blocks) > 1 or not blocks[0].closed:
         raise _Fail("json_block")
-    start = opens[0] + 1
-    for end in range(start, len(lines)):
-        if lines[end].strip() == "```":
-            return "\n".join(lines[start:end])
-    raise _Fail("json_block")
+    return "\n".join(blocks[0].body)
 
 
 def _field(name: str, spec: FieldSpec, value: Any) -> Any:

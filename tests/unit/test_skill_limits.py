@@ -109,3 +109,33 @@ def test_step_deadline_is_bounded_by_the_run_time_left(conn, data_dir, tmp_path)
     session = sessions.create_session("Demo")
     outcome = _run(engine, session)  # the step declares 30 s; only 0.5 s were left
     assert outcome.status == "uncertain"
+
+
+class _CutProvider(ScriptedProvider):
+    """Reports, as the Copilot provider does, that only part of the answer was read."""
+
+    def __init__(self, cut: bool) -> None:
+        super().__init__()
+        self.cut = cut
+
+    async def ask(self, request, on_sent, *, events) -> str:
+        text = await super().ask(request, on_sent)
+        if self.cut:
+            events.truncated()
+        return text
+
+
+def test_a_truncated_answer_is_never_a_steps_output(conn, data_dir):
+    """Review 2026-11-26: a reply read only in part (the character cap, or the walk bound
+    of the page reader) is refused like one that is too large, never checked as complete."""
+    engine, sessions, _ = build(conn, data_dir, provider=_CutProvider(cut=True))
+    assert _run(engine, sessions.create_session("Demo")).status == "failed"
+    _check_failed_draft(conn, "limit:response_truncated")
+    assert _limits(conn) == [("response_truncated", "step=draft;limit=response_truncated")]
+
+
+def test_control_the_same_answer_read_whole_passes_the_llm_step(conn, data_dir):
+    engine, sessions, _ = build(conn, data_dir, provider=_CutProvider(cut=False))
+    _run(engine, sessions.create_session("Demo"))
+    assert conn.execute("SELECT status FROM skill_steps WHERE step_key = 'draft'"
+                        ).fetchone()[0] == "completed"

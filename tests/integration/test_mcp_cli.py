@@ -31,6 +31,7 @@ from tests.mcp_support import (
     result_lines,
     run_bounded,
     server_entry,
+    unexpected_sockets,
     write_config,
 )
 
@@ -562,10 +563,15 @@ def test_no_socket_is_bound_during_a_call(ws, data_dir, tmp_path, socketpair):
         env, tmp_path / "run", deadline_s=60,
     )
     assert code == 0, err
-    binds = json.loads((server.state / "binds.json").read_text(encoding="utf-8"))
-    assert [bind for bind in binds if not bind["self_pipe"]] == []
-    assert {bind["address"] for bind in binds} <= LOOPBACK_PORT_ZERO
+    binds = [{"event": "socket.bind", **bind}
+             for bind in json.loads((server.state / "binds.json").read_text(encoding="utf-8"))]
+    report = {"argv": ["driver.py", "sockets"], "environment": json.loads(
+        (server.state / "binds-environment.json").read_text(encoding="utf-8"))}
+    foreign = [bind for bind in binds if not bind["self_pipe"]]
+    assert foreign == [], unexpected_sockets(report, foreign)
+    outside = [bind for bind in binds if bind["address"] not in LOOPBACK_PORT_ZERO]
+    assert outside == [], unexpected_sockets(report, outside)
     if socketpair == "fallback":
-        assert binds  # the emulation really ran, and was recognised
+        assert binds, report  # the emulation really ran, and was recognised
     print(f"\nsocket binds: {len(binds)} (the event loop's own pair only)")
     assert server.stopped()

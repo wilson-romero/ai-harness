@@ -53,11 +53,12 @@ def args_key(data_dir: Path) -> bytes:
     turned into b"\\r\\n") is set aside as `mcp-args.key.damaged-<random>` and replaced
     (hotfix 0.2.1). No digest was ever computed with such a key, because every read checks the
     length, so no stored digest changes meaning; the old file is kept, not deleted.
+
+    Revised on 2026-11-26: every read of the key file is done under the same lock as its
+    recovery. Where the system refuses to rename a file another handle has open (Windows), a
+    read outside the lock made a concurrent recovery's rename fail (WinError 32).
     """
     path = data_dir / ARGS_KEY
-    key = _read_key(path)
-    if key is not None and len(key) == KEY_BYTES:
-        return key
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if hasattr(os, "getuid"):
         os.chmod(path.parent, 0o700)
@@ -71,9 +72,9 @@ def args_key(data_dir: Path) -> bytes:
         if key is not None:
             path.rename(path.with_name(f"{path.name}.damaged-{secrets.token_hex(8)}"))
         _create_key(path)
+        key = path.read_bytes()
     finally:
         lock.release()
-    key = path.read_bytes()
     if len(key) != KEY_BYTES:
         raise OSError("the MCP argument key is damaged")
     return key

@@ -100,3 +100,15 @@ def test_skills_dir_must_be_absolute(tmp_path):
     assert load_skill_settings({"HARNESS_SKILLS_DIR": str(tmp_path)}).skills_dir == tmp_path
     default = load_skill_settings({}).skills_dir
     assert default.name == "skills" and (default.parent / "harness").is_dir()
+
+
+def test_a_responses_file_written_by_windows_powershell_loads(tmp_path):
+    """`Set-Content -Encoding utf8` in Windows PowerShell 5.1 writes a BOM, and CRLF line
+    ends: the file loads like every UTF-8 file the harness reads (read_text_limited drops a
+    BOM). What 5.1's ConvertTo-Json makes of `(Get-Content -Raw)`, an object, is refused."""
+    path = tmp_path / "respuestas.json"
+    path.write_bytes('\ufeff{\r\n  "tarea: x": "línea\\nsegunda"\r\n}\r\n'.encode())
+    assert load_responses(str(path)) == {"tarea: x": "línea\nsegunda"}
+    path.write_text('{"tarea: x": {"value": "texto", "PSPath": "C:\\\\x"}}', encoding="utf-8")
+    with pytest.raises(InvalidInput, match="non-empty texts to texts"):
+        load_responses(str(path))

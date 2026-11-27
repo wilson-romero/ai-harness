@@ -158,17 +158,31 @@ def demo() -> list[str]:
         print("exit: code 0 and the session is free")
 
         step("(g) a real Ctrl+C at a (pseudo-)terminal")
-        result = subprocess.run(
+        # Revised on 2026-11-26: where the system has no pseudo-terminal module the test is
+        # skipped at import and pytest collects nothing (exit 5). The demo asks the same
+        # question the test does (can `pty` be imported?) and reports the step as not run with
+        # that reason; where it can, the test must run and pass.
+        try:
+            import pty  # noqa: F401, PLC0415 - the capability the test needs, nothing else
+        except ImportError as exc:
+            print(f"NOT RUN: no pseudo-terminal module on this system ({type(exc).__name__})")
+            skipped.append("(g) no pseudo-terminal here: try Ctrl+C by hand (below)")
+            pty_available = False
+        else:
+            pty_available = True
+        result = None if not pty_available else subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "-rs", "-p", "no:cacheprovider",
-             "tests/integration/test_chat_terminal.py"],
+             "tests/integration/test_chat_terminal.py",
+             "tests/integration/test_chat_tui_terminal.py"],
             cwd=ROOT, env=base_env(), capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=600,
         )
-        last = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else result.stderr
-        print(last)
-        check(result.returncode == 0, "the pseudo-terminal test failed")
-        if "skipped" in last:
-            skipped.append("(g) no pseudo-terminal here: try Ctrl+C by hand (below)")
+        if result is not None:
+            out = result.stdout.strip()
+            last = out.splitlines()[-1] if out else result.stderr
+            print(last)
+            check(result.returncode == 0 and "passed" in last and "skipped" not in last,
+                  "the pseudo-terminal test failed")
 
         step("by hand at a real terminal (the approval and Ctrl+C need a person)")
         print("Follow README.md > Conversación > Paso a paso (PowerShell and zsh): enter with")

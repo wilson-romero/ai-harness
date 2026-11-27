@@ -4,7 +4,7 @@ Copiloto de arquitectura que se ejecuta en local. Mantiene varias conversaciones
 
 **Es un proyecto educativo:** sirve para aprender a construir un harness, no está pensado para uso en producción. Se ejercita solo con prompts sintéticos y no guarda contenido real. Quien lo use para automatizar un servicio real es responsable de cumplir las condiciones de uso de ese servicio.
 
-Estado (revisado el 2026-11-25): **Corte 1 · Esqueleto**, **Corte 3 · Memoria**, **Corte 4 · Skills**, **Corte 9 · Interfaz conversacional** ([Conversación](#conversación)) y, del Corte 5, la **pasarela MCP** (`mcp-gateway`); la lectura de Enterprise Architect (`ea-read`) está en pausa. Sesiones, historial y recuperación funcionan con un proveedor Mock, el único disponible hoy: el proveedor de Copilot Web está en desarrollo y no forma parte de esta versión. El harness lee una segunda memoria en Markdown compatible con `claude-memory-system`, ejecuta Skills declarativos y llama por stdio a herramientas de solo lectura de servidores MCP declarados en una lista local (ver [Herramientas MCP](#herramientas-mcp)). Su única escritura en esa memoria es una nota de decisión nueva en `Decisiones/`, después de una aprobación humana (ver [Skills de arquitectura](#skills-de-arquitectura)). El plan de entregas está en [`docs/plan/2026-11-24-ai-harness-cortes.md`](docs/plan/2026-11-24-ai-harness-cortes.md).
+Estado (revisado el 2026-11-26, rama `feature/copilot-web-provider`): **Corte 1 · Esqueleto**, **Corte 3 · Memoria**, **Corte 4 · Skills**, **Corte 9 · Interfaz conversacional** ([Conversación](#conversación)) y, del Corte 5, la **pasarela MCP** (`mcp-gateway`); la lectura de Enterprise Architect (`ea-read`) está en pausa. Sesiones, historial y recuperación funcionan con el proveedor Mock y, en esta rama, con el proveedor de **Copilot Web** (Corte 2, ver [Copilot Web](#copilot-web)). Copilot Web se ha probado contra la página real solo en macOS y con una cuenta de prueba: preguntas completadas en sesiones distintas, la misma conversación desde otro proceso, un plazo vencido que queda `uncertain` sin reenviar, el historial sin contenido y una respuesta sin las sugerencias de seguimiento que la página dibuja debajo, y respuestas con encabezados y con un bloque `json` que pasan las comprobaciones de los Skills `hls-review` y `architecture-memory`. La conversación con Edge abierto todo el rato está probada solo contra el chat sintético. Faltan la demo de Wilson (tarea 7.5) y la prueba en Windows. Con `ask`, cada pregunta abre y cierra Edge (en `chat`, una vez por conversación); cerrarlo cuesta unos 10 s mientras siga activa la red en segundo plano de Edge (ver `SECURITY.md`). El harness lee una segunda memoria en Markdown compatible con `claude-memory-system`, ejecuta Skills declarativos y llama por stdio a herramientas de solo lectura de servidores MCP declarados en una lista local (ver [Herramientas MCP](#herramientas-mcp)). Su única escritura en esa memoria es una nota de decisión nueva en `Decisiones/`, después de una aprobación humana (ver [Skills de arquitectura](#skills-de-arquitectura)). El plan de entregas está en [`docs/plan/2026-11-24-ai-harness-cortes.md`](docs/plan/2026-11-24-ai-harness-cortes.md).
 
 ## Requisitos
 
@@ -28,6 +28,31 @@ uv run python main.py history SESSION_ID
 ```
 
 `session create` imprime el identificador de la sesión. Los comandos aceptan solo el UUID completo, no un prefijo. Los resultados salen por stdout; los avisos y los errores, por stderr, siempre en UTF-8 (también con la salida redirigida en Windows). Código de salida: 0 hecho, 1 error controlado, 2 uso incorrecto, 130 interrumpido con Ctrl+C.
+
+## Copilot Web
+
+Con `HARNESS_PROVIDER=copilot_web`, cada sesión pregunta a Microsoft Copilot Web en su propia conversación, a través de un Edge con un **perfil dedicado** (nunca tu Edge personal). Requisitos: Microsoft Edge instalado, haber iniciado sesión una vez con `main.py copilot login` y haber medido la interfaz con la sonda (`ui.json`). Los pasos, en [`docs/runbook/copilot.md`](docs/runbook/copilot.md).
+
+```sh
+export HARNESS_PROVIDER=copilot_web
+export HARNESS_COPILOT_URL='https://copilot.cloud.microsoft/chat'   # la dirección donde aparece tu chat
+uv run python main.py session create "Integraciones"
+uv run python main.py ask SESSION_ID "Pregunta"
+uv run python main.py history SESSION_ID
+```
+
+En PowerShell, `$env:HARNESS_PROVIDER = "copilot_web"` y `$env:HARNESS_COPILOT_URL = "https://copilot.cloud.microsoft/chat"`; los comandos son los mismos.
+
+- Cada `ask` abre Edge con una ventana, escribe la pregunta en el chat, espera la respuesta, la imprime y cierra Edge. Tarda unos segundos más que la respuesta (medido en macOS: arranque de unos 4 a 8 s).
+- En una [conversación](#conversación) (`main.py chat`), Edge se abre una sola vez al entrar y se cierra al salir; cada pregunta, también con `/new` y `/resume`, carga la conversación de su sesión en ese mismo Edge. Mientras dure, otro comando que necesite el navegador recibe «the harness browser is in use by another command». Tras una pregunta interrumpida con Ctrl+C, la siguiente usa una pestaña nueva.
+- La respuesta sale como Markdown reconstruido desde la página (encabezados, listas, tablas, bloques de código con su lenguaje), sin los botones ni las sugerencias de seguimiento, para que los Skills puedan comprobar sus encabezados y su JSON.
+- La primera pregunta de una sesión abre una conversación nueva. Copilot le da un identificador unos segundos después de responder; el harness lo guarda y las preguntas siguientes de esa sesión, también desde otra terminal, van a esa misma conversación. Antes de escribir comprueba que la página abierta es esa conversación; si ya no existe, no envía nada y la sesión queda `closed`.
+- Si Copilot pide iniciar sesión, la pregunta termina en `authentication_required` sin escribir nada en la página: ejecuta `main.py copilot login` y vuelve a preguntar.
+- Un prompt más largo que el máximo medido (o que `HARNESS_COPILOT_MAX_PROMPT_CHARS`) se rechaza antes de abrir Edge.
+- **Qué se guarda:** de una sesión de Copilot, solo la sesión, el identificador de su conversación, cada solicitud con su estado y sus fechas, y la auditoría. **Nunca** el texto de las preguntas ni de las respuestas: la respuesta solo sale por stdout, sin caracteres de control ni invisibles. `history` muestra el identificador y las solicitudes, sin texto.
+- No actives `DEBUG=pw:api` con contenido real: Playwright escribiría en la terminal lo que se teclea y se lee.
+
+Para verlo sin Copilot, contra un chat sintético local y sin ventana: `uv run python scripts/demo_copilot_provider.py` (termina en `demo: PASS`).
 
 ## Conversación
 
@@ -58,10 +83,52 @@ Al entrar se ve el proveedor, la sesión y el proyecto. Una línea normal es una
 | `/exit` | Sale. El fin de entrada (Ctrl+D; en Windows, Ctrl+Z e Intro) también. |
 
 - **Ctrl+C** durante una pregunta la interrumpe: queda `uncertain` si el prompt ya había salido, `failed` si no, nunca se reenvía y la conversación sigue. Ctrl+C mientras se espera una línea solo recuerda cómo salir. Ctrl+C durante `/skill` lo detiene: si el paso del modelo estaba en curso, queda `uncertain` (no se reenvía) y la conversación escribe los dos comandos que lo continúan o lo cancelan, que se usan tras dejar la sesión. Ctrl+C en el aviso de aprobación lo deja sin decidir: no se aplica nada. Ctrl+C mientras el proveedor abre sus recursos, al entrar, termina la conversación (código 130) sin preguntar nada; mientras los cierra, al salir, deja de esperar y avisa de que algo puede haber quedado abierto.
-- **Lo que se escribe mientras nadie lee se queda en la terminal** y es la primera línea que recibe la lectura siguiente, también el aviso de aprobación. No puede aprobar (el código sale de un hash que aún no se había mostrado). Tampoco rechaza sola: en la conversación, tras `n` el aviso pide la palabra `reject` completa, y cualquier otra respuesta deja la aprobación pendiente (sin cancelar la ejecución; se continúa con `skill resume` tras dejar la sesión) y no se envía ni se ejecuta. Solo un pegado que contenga `n` y `reject` rechaza. `skill run` desde la línea de órdenes sigue rechazando con `n`.
+- **Lo que se escribe mientras nadie lee se queda en la terminal** y es la primera línea que recibe la lectura siguiente, también el aviso de aprobación. No puede aprobar (el código sale de un hash que aún no se había mostrado). Tampoco rechaza sola: en la conversación, tras `n` el aviso pide la palabra `reject` completa, y cualquier otra respuesta deja la aprobación pendiente (sin cancelar la ejecución; se continúa con `skill resume` tras dejar la sesión) y no se envía ni se ejecuta. En texto plano (`--plain`), un pegado que contenga `n` y `reject` rechaza; en la pantalla completa, la caja de aprobación no admite pegar, y lo escrito mientras el núcleo trabaja no se envía. `skill run` desde la línea de órdenes sigue rechazando con `n`.
 - **La conversación ocupa su sesión** mientras está abierta: otro `chat` o un `ask` sobre esa sesión reciben «in use by another process» / «question in progress». Si el proceso muere, la sesión queda libre sola. Una ejecución de Skill que quede esperando aprobación se continúa con `skill resume` cuando la conversación ya no tiene esa sesión (`/new`, `/resume` o `/exit`).
 - **Lo que no es del harness lleva `| ` delante**: respuestas del proveedor, historial, notas de memoria y salida de Skills salen saneadas (sin secuencias de escape ni caracteres de control o invisibles, con las credenciales conocidas enmascaradas) y con ese prefijo, que ninguna línea del propio harness usa. Una pregunta de más de 64 KiB se rechaza sin registrar nada. El contenido dentro del aviso de aprobación también lleva `| ` (la cabecera, las reglas y la pregunta no). Una línea más ancha que la terminal se corta en filas, y cada fila que continúa la anterior empieza por `|+`: así la terminal nunca parte por su cuenta una línea ajena en una fila sin marca.
-- **Qué no hace esta versión:** ni paneles, ni colores, ni barra de estado; la respuesta aparece entera, no poco a poco; el modelo no ejecuta herramientas por su cuenta ni hay llamadas MCP desde la conversación (`mcp call` sigue siendo una orden suelta); no hay edición avanzada de la línea, autocompletado ni historial de lo escrito entre ejecuciones.
+- **Qué no hace esta versión:** la respuesta aparece entera, no poco a poco; el modelo no ejecuta herramientas por su cuenta ni hay llamadas MCP desde la conversación (`mcp call` sigue siendo una orden suelta); el historial de lo escrito no se guarda entre ejecuciones.
+
+### Aspecto
+
+En una consola, la conversación ocupa la pantalla completa ([Textual](https://textual.textualize.io/), la única librería de terminal del proyecto): la conversación con su propio desplazamiento, un panel con la sesión a la derecha, la entrada fija abajo y los atajos al pie. Así se ve en 100 × 30, con el Mock, el vault sintético y una respuesta sintética (captura de texto de la pantalla tomada con el `Pilot` de Textual, sin colores):
+
+```text
+ ai-harness  -  mock  session 01a219d9                            │ Session
+ -------------------------------------                            │  Demo
+ Enter sends a question. /help lists the commands; Tab completes  │  01a219d9-d8d0-708a-922b-854b44
+ them.                                                            │ 3d1ba5
+ Ctrl+C interrupts a question (never resent). /exit or end of     │ Project
+ input leaves.                                                    │  demo-alpha
+                                                                  │ Provider
+ █ /new --project demo-alpha Demo                                 │  mock
+ new session 01a219d9-d8d0-708a-922b-854b443d1ba5 (Demo), project │ Sends
+ demo-alpha                                                       │  1
+                                                                  │ Last request
+ █ revisa este requerimiento                                      │  completed
+ context: demo-alpha, 7 note(s) included, 0 truncated, 0 omitted, │ Memory
+ 1556 of 8192 bytes, 1 entry skipped, 0 credential(s) redacted    │  7 note(s) in the last question
+                                                                  │   projects/demo-alpha/_project.
+ ╭─ mock ───────────────────────────────────────────────────────╮ │ md
+ │ ## Resumen                                                   │ │   Decisiones/alpha-mensajeria.m
+ │ El requerimiento pide **avisar** de pedidos con              │ │ d
+ │ `order.created`.                                             │ │   Lecciones/2026-11-10-reintent
+ │                                                              │ │ os-idempotentes.md
+ │ ## Preguntas pendientes                                      │ │   Memoria-CC/project_alpha-inte
+ │ - ¿Qué pasa con un evento que no se publica?                 │ │ graciones.md
+ │ [@click=app.quit]esto no es un enlace[/]                     │ │   projects/demo-alpha/sessions/
+ ╰──────────────────────────────────────────────────────────────╯ │ 2026-11-21-121500.md
+▊  Type a question, or / for a command                                                             ▎
+ ctrl+p commands  ctrl+c interrupts  ctrl+n new session  ctrl+q leaves
+```
+
+- **Bloques:** lo que escribes (con una barra a la izquierda), las líneas del harness (en gris) y el texto ajeno, siempre dentro de un recuadro cuyo título pone el harness (el nombre del proveedor). Lo de dentro del recuadro se muestra como caracteres: `[@click=…]`, `[link=…]` o una secuencia de escape no hacen nada. El resaltado de Markdown es el de siempre: colorea sin quitar ni añadir un carácter.
+- **Panel:** sesión (nombre e identificador completo), proyecto, proveedor, peticiones enviadas en esta sesión, estado de la última y las notas de memoria que llevó la última pregunta. Sale solo del estado del harness y siempre describe la sesión tomada.
+- **Teclas:** `ctrl+p` abre la paleta de órdenes (solo órdenes del harness: estado, sesión nueva, cambiar de sesión, historial, contexto, elegir Skill, adjuntar fichero, buscar en la memoria…). «Switch session...» lista las sesiones y elige con el teclado; «Choose a skill...» rellena `/skill NOMBRE `; «Attach a file...» lista los ficheros de la carpeta de trabajo. `ctrl+n` sesión nueva. Flechas arriba y abajo: lo escrito en esta ejecución (solo en memoria). Tab completa los comandos `/`. `ctrl+c` interrumpe la pregunta en curso; sin nada en curso no sale. `ctrl+q`, `ctrl+d` con la entrada vacía o `/exit` salen: se cierra el proveedor y la terminal vuelve a como estaba.
+- **Mientras el proveedor trabaja** se ve `mock: thinking (N s), ctrl+c interrupts` y la entrada no envía (lo escrito se queda en ella).
+- **La aprobación** se abre en su propia caja: la cabecera del motor (destino, hash, caducidad), el contenido propuesto en un recuadro de texto ajeno y una entrada solo para el código. Esa entrada no guarda historial, no admite pegar ni copiar (tampoco con `ctrl+v` o `ctrl+x`) y no acepta una respuesta en el primer medio segundo. Una propuesta larga se recorre con `AvPág`/`RePág`, flechas, `Inicio` y `Fin` mientras se escribe en la entrada; la caja dice cuántas líneas quedan debajo y no toma el código hasta que el final de la propuesta se ha visto en pantalla. `n` pide escribir `reject`, como en texto plano, y rechazar no exige leer hasta el final; `ctrl+c` la deja sin decidir.
+- **Lo que la pantalla no hace:** capturas, guardar ficheros, abrir enlaces, suspenderse ni copiar al portapapeles de la terminal. Si falla por dentro, imprime una línea fija sin nada de la conversación. Si la consola no admite la pantalla completa, lo dice en una línea y sigue en texto plano.
+- **Un pegado de varias líneas** en la entrada se queda con la primera.
+- **Para quitarlo:** `main.py chat --plain`, o `HARNESS_PLAIN=1`, `NO_COLOR=1` o `TERM=dumb` en el entorno: la conversación de texto plano de siempre (la que usan los tests y las demos). También se usa sola sin consola, si Textual no carga o si hay puesta una variable de depuración de Textual (`TEXTUAL`, `TEXTUAL_LOG`, `TEXTUAL_SCREENSHOT`…), que guardaría o enviaría lo que se ve.
 
 ### Paso a paso con el Mock
 
@@ -72,13 +139,17 @@ $w = Join-Path $env:TEMP "ai-harness-chat"
 Remove-Item -Recurse -Force $w -ErrorAction SilentlyContinue
 New-Item -ItemType Directory $w | Out-Null
 Copy-Item -Recurse tests\fixtures\vault-synthetic "$w\vault"
-@{ "tarea: architecture-memory/extract" = (Get-Content -Raw -Encoding utf8 tests\fixtures\skill-inputs\decision-ok.json) } | ConvertTo-Json | Set-Content -Encoding utf8 "$w\respuestas.json"
+$answer = [IO.File]::ReadAllText((Resolve-Path tests\fixtures\skill-inputs\decision-ok.json).Path, [Text.Encoding]::UTF8)
+$json = @{ "tarea: architecture-memory/extract" = $answer } | ConvertTo-Json
+[IO.File]::WriteAllText("$w\respuestas.json", $json, (New-Object Text.UTF8Encoding $false))
 $env:HARNESS_DATA_DIR = "$w\data"
 $env:HARNESS_VAULT_ROOT = "$w\vault"
 $env:HARNESS_MOCK_RESPONSES = "$w\respuestas.json"
 $env:HARNESS_MOCK_DELAY_MS = "0"
 uv run python main.py
 ```
+
+Las tres líneas de `respuestas.json` valen igual en Windows PowerShell 5.1 y en PowerShell 7. En 5.1, `ConvertTo-Json` convierte en un objeto el texto que devuelve `Get-Content -Raw`, porque ese texto lleva propiedades añadidas (`PSPath`…), y el Mock lo rechaza. `[IO.File]::ReadAllText` devuelve un texto sin nada más. El fichero se escribe en UTF-8 sin BOM. Uno con BOM, el que escribe `Set-Content -Encoding utf8` en 5.1, también carga, como cualquier fichero UTF-8 que lee el harness.
 
 En zsh o bash:
 
@@ -109,7 +180,7 @@ $env:HARNESS_MOCK_DELAY_MS = "60000"
 uv run python main.py chat --session SESSION_ID
 ```
 
-(en zsh: `HARNESS_MOCK_DELAY_MS=60000 uv run python main.py chat --session SESSION_ID`). Se escribe una pregunta, se pulsa Ctrl+C durante `waiting for the provider` y se ve `interrupted: request … is uncertain: the prompt may have reached the provider; it was not resent`; la conversación sigue. `/history` muestra las preguntas anteriores, el marcador del Skill y la pregunta interrumpida como `[uncertain]`. `/exit` sale con código 0.
+(en zsh: `HARNESS_MOCK_DELAY_MS=60000 uv run python main.py chat --session SESSION_ID`). Se escribe una pregunta, se pulsa Ctrl+C mientras se ve `mock: thinking` (en texto plano, `waiting for the provider`) y se ve `interrupted: request … is uncertain: the prompt may have reached the provider; it was not resent`; la conversación sigue. `/history` muestra las preguntas anteriores, el marcador del Skill y la pregunta interrumpida como `[uncertain]`. `/exit` sale con código 0.
 
 ## Memoria del proyecto
 
@@ -449,8 +520,12 @@ Por variables de entorno (ver `.env.example`):
 | Variable | Por defecto | Para qué |
 |---|---|---|
 | `HARNESS_DATA_DIR` | `./data` | Dónde viven SQLite y los bloqueos. Debe ser un **disco local**: en una unidad de red los bloqueos de fichero no son fiables. No puede estar dentro de `HARNESS_VAULT_ROOT`. |
-| `HARNESS_PROVIDER` | `mock` | Proveedor de las sesiones nuevas. Hoy solo existe `mock`. |
-| `HARNESS_REQUEST_TIMEOUT_S` | `120` | Plazo de cada pregunta. |
+| `HARNESS_PROVIDER` | `mock` | Proveedor de las sesiones nuevas: `mock` o `copilot_web`. |
+| `HARNESS_REQUEST_TIMEOUT_S` | `120` | Plazo de cada pregunta. Con Copilot cubre todo: esperar el navegador, arrancarlo, enviar y recibir la respuesta. La sonda propone un valor. |
+| `HARNESS_COPILOT_URL` | (vacía) | Dirección del chat de Copilot, la que se abre para una conversación nueva. Solo en tu `.env` local. |
+| `HARNESS_EDGE_PROFILE` | `HARNESS_DATA_DIR/edge-profile` | Carpeta del perfil dedicado de Edge. Nunca la de tu Edge personal: el harness la rechaza. |
+| `HARNESS_COPILOT_READY_TIMEOUT_S` | `60` | Cuánto esperar a que el chat esté listo antes de rendirse sin enviar nada. |
+| `HARNESS_COPILOT_MAX_PROMPT_CHARS` | el máximo medido | Solo puede bajar el máximo que midió la sonda. |
 | `HARNESS_MOCK_BEHAVIOR` | `ok` | `ok`, `fail`, `timeout_before_send` o `timeout_after_send`. Solo para pruebas y demos. |
 | `HARNESS_MOCK_DELAY_MS` | `0` | Espera del Mock después de enviar. Sirve para interrumpir una pregunta a mitad. |
 | `HARNESS_VAULT_ROOT` | (vacía) | Ruta **absoluta** del vault. Solo la leen `memory …` y `ask --project`; si falta o no es un directorio, esos comandos terminan con error sin leer nada. |
@@ -467,10 +542,13 @@ Por variables de entorno (ver `.env.example`):
 |---|---|
 | `completed` | El proveedor respondió. |
 | `failed` | El proveedor informó de un error. |
+| `authentication_required` | Copilot pidió iniciar sesión; no se envió nada. La sesión queda igual hasta la siguiente pregunta completada. |
 | `timeout` | Venció el plazo **antes** de que el prompt saliera. No llegó a ningún sitio. |
 | `uncertain` | Venció el plazo o murió el proceso **después** de que el prompt saliera. Pudo haber llegado. |
 
 El harness nunca reenvía una solicitud por su cuenta. Una solicitud `uncertain` se queda así en el historial; si repites la pregunta, es una solicitud nueva. La sesión aparece como `uncertain` hasta que la siguiente pregunta se completa.
+
+Una sesión de Copilot queda `closed` cuando su conversación remota ya no se encuentra: no acepta más preguntas (crea una sesión nueva). Si una pregunta queda `uncertain`, la siguiente avisa si la conversación tiene más turnos de los completados: la pregunta incierta pudo llegar, y su respuesta está en Edge.
 
 Solo una pregunta a la vez por sesión: una segunda pregunta mientras la primera sigue en curso se rechaza. Sesiones distintas sí pueden preguntar a la vez.
 
@@ -488,5 +566,6 @@ Solo una pregunta a la vez por sesión: una segunda pregunta mientras la primera
 - Git flow: ramas `feature/<change>` desde `develop`.
 - El repositorio es público: lee [`SECURITY.md`](SECURITY.md) y activa el hook una vez por clon con `git config core.hooksPath .githooks`.
 - Sin código condicionado por plataforma fuera de Enterprise Architect: lo que pasa en macOS es lo que corre en Windows.
+- Copilot Web (Corte 2): perfil dedicado de Edge, login manual, sonda y uso real en [`docs/runbook/copilot.md`](docs/runbook/copilot.md).
 - Puerta local antes de un merge: `scripts/verify.sh` sobre el árbol limpio.
-- Demos, iguales en macOS y Windows (PowerShell incluido): `uv run python scripts/demo_session_core.py` (Corte 1), `uv run python scripts/demo_project_memory.py` (Corte 3), `uv run python scripts/demo_skill_engine.py` (Corte 4, motor de Skills), `uv run python scripts/demo_architecture_skills.py` (Corte 4, Skills de arquitectura), `uv run python scripts/demo_mcp_gateway.py` (Corte 5, pasarela MCP), `uv run python scripts/demo_mvp_without_ea.py` (Puerta MVP sin EA) y `uv run python scripts/demo_interactive_shell.py` (Corte 9, conversación). Terminan en `demo: PASS`.
+- Demos, iguales en macOS y Windows (PowerShell incluido): `uv run python scripts/demo_session_core.py` (Corte 1), `uv run python scripts/demo_copilot_provider.py` (Corte 2, proveedor de Copilot contra el chat sintético), `uv run python scripts/demo_project_memory.py` (Corte 3), `uv run python scripts/demo_skill_engine.py` (Corte 4, motor de Skills), `uv run python scripts/demo_architecture_skills.py` (Corte 4, Skills de arquitectura), `uv run python scripts/demo_mcp_gateway.py` (Corte 5, pasarela MCP), `uv run python scripts/demo_mvp_without_ea.py` (Puerta MVP sin EA) y `uv run python scripts/demo_interactive_shell.py` (Corte 9, conversación). Terminan en `demo: PASS`.
