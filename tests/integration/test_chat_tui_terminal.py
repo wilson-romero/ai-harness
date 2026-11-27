@@ -18,6 +18,7 @@ import time
 
 import pytest
 
+from harness.core.answer_style import CONCISE_NOTICE
 from tests.conftest import REPO_ROOT, query, run_main, subprocess_env, wait_for_running
 
 pty = pytest.importorskip("pty", reason="no pseudo-terminal module on this system")
@@ -112,7 +113,9 @@ def test_a_question_on_the_full_screen_and_ctrl_q(data_dir):
         child.read_until(READY)
         assert ALT_SCREEN_ON in child.raw
         child.type("hola\r")
-        child.read_until("Received 4 characters")
+        # The Mock reports what it received: the concise-answer notice (prompt-economy D3, on
+        # by default), a blank line and the question, so the notice reaches the full screen.
+        child.read_until(f"Received {len(CONCISE_NOTICE) + 2 + len('hola')} characters")
         child.type("\x11")  # ctrl+q
         assert child.wait() == 0
     finally:

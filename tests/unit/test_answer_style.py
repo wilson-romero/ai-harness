@@ -123,3 +123,29 @@ def test_a_note_cannot_switch_it_off_or_change_it(cli, vault, recorder):
     nonce = NONCE_RE.search(sent).group(1)
     assert sent.index(f"<<<MEMORIA {nonce}") < sent.index("mucho detalle") < sent.index(
         f"MEMORIA {nonce}>>>")
+
+
+class _CheckingProvider(CountingProvider):
+    """A provider with the size check of `copilot_web` (`check(prompt)` before anything is
+    recorded), to see that the notice is inside what any size limit measures."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__()
+        self.limit = limit
+        self.checked: list[str] = []
+
+    def check(self, prompt: str) -> None:
+        self.checked.append(prompt)
+        if len(prompt) > self.limit:
+            raise InvalidInput(f"the prompt has {len(prompt)} characters; the limit is {self.limit}")
+
+
+def test_the_providers_size_check_counts_the_notice(conn, data_dir):
+    question = "pregunta"
+    provider = _CheckingProvider(limit=len(question) + 10)  # the question alone fits
+    service = _service(conn, data_dir, provider, CONCISE_NOTICE)
+    session = service.create_session("S")
+    with pytest.raises(InvalidInput, match="limit"):
+        asyncio.run(service.ask(str(session.session_id), question))
+    assert provider.checked == [CONCISE_NOTICE + "\n\n" + question] and provider.prompts == []
+    assert query(data_dir, "SELECT count(*) FROM requests") == [(0,)]

@@ -148,8 +148,14 @@ def test_the_minified_fixture_is_the_indented_one_on_one_line():
     assert json.loads(MINIFIED) == json.loads(INDENTED)
 
 
-@pytest.mark.parametrize("reply", [MINIFIED, INDENTED, "```json\n" + INDENTED + "\n```"],
-                         ids=["minified", "indented", "one-fenced-block"])
+@pytest.mark.parametrize("reply", [
+    MINIFIED,
+    INDENTED,
+    "```json\n" + INDENTED + "\n```",
+    # The Copilot provider rebuilds a code box as a fence long enough for its content; a fence
+    # of four backticks around the minified line, after prose, is still the one json block.
+    "Aquí va:\n\n````json\n" + MINIFIED + "\n````\n",
+], ids=["minified", "indented", "one-fenced-block", "fenced-with-four-backticks"])
 def test_minified_indented_or_fenced_reply_prepares_the_same_note(conn, data_dir, vault, reply):
     # The strict validator is not loosened: the forms asked for before still pass, and all of
     # them canonicalise to the same validated output, so the same note.
