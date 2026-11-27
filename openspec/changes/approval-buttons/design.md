@@ -141,6 +141,66 @@ Lo que existe, medido en `develop` (`5af28ed`) el 2026-11-27:
 - **Alternativas rechazadas:** abrir aquí el canal más fuerte (un diálogo del sistema o un segundo dispositivo). Wilson lo descartó para el MVP el 2026-11-24.
 - **Impacto:** `README.md`, `SECURITY.md`; tarea 4.3.
 
+### D7 · La caja sobre una escala de espaciado (grid de 8 puntos en celdas)
+
+- **Qué:** una escala con nombre en un solo sitio, `harness/shell/spacing.py`, que el CSS de la pantalla declara como variables de Textual (`$box-x`, `$row`, `$button-w`…; los colores de la caja van por alias del tema: `$approval-frame`, `$approval-fill`, `$foreign-frame`, `$box-fill`). Columnas 1/2/4/8; filas 1/2, y **1 fila = 2 columnas**. Se aplica solo a la caja de aprobación:
+  - **Botones:** los cuatro miden 16 columnas (`BUTTON_WIDTH`, dos pasos de 8, que además es el `min-width` de Textual) y 3 filas (unos 48 px, el objetivo táctil mínimo habitual). El texto va centrado.
+  - **Separación entre botones:** 8 columnas (`BUTTON_GAP`), mayor que el relleno alrededor de cualquier etiqueta (como mucho 5 columnas en «Reject»: interno ≤ externo). La pareja va centrada.
+  - **Relleno de la caja:** 2 columnas entre el borde y el contenido a cualquier tamaño (antes, 1).
+  - **Filas en blanco según la altura** (`VERTICAL_BREAKPOINTS` de la pantalla):
+    - menos de 30 filas (`-tight`): ninguna fila en blanco; todas van al contenido;
+    - de 30 a 39 (`-snug`): una fila en blanco encima de los botones. Las dos líneas de pista («N more line(s)…» y la pregunta) quedan juntas, como un grupo. La fila en blanco que antes había entre ellas se mueve debajo, así que no cuesta ninguna fila;
+    - 40 o más (`-roomy`): además, `padding: 1 2` en la caja y una fila en blanco antes y después de la propuesta.
+  - **Confirmación de Reject:** su pregunta va en su propia línea centrada, en el lugar de la pregunta del motor, con [Back] [Yes, reject] debajo y la misma rejilla. Antes iba a la izquierda en la misma fila que los botones, y a 80, 100 y 120 columnas «Yes, reject» quedaba fuera de la caja y de la pantalla. Medido el 2026-11-27: en x=97, x=96 y x=98, con 16 de ancho.
+  - **Estados sin depender del color:**
+    - deshabilitado → tachado;
+    - habilitado → negrita;
+    - enfocado → negrita invertida.
+
+    Antes, deshabilitado y habilitado solo se distinguían por la opacidad, un color.
+- **Por qué:**
+  - **Fuentes del grid.**
+    - Spec.fm, «8-Point Grid»: múltiplos de 8 para dimensiones, rellenos y márgenes; la rejilla «blanda» y la media rejilla de 4 pt para el texto.
+    - Material Design: rejilla de 8 dp, de 4 dp para iconos y texto, y objetivos táctiles de 48×48 dp separados al menos 8 dp.
+    - La regla interno ≤ externo: Cieden, «Spacing best practices».
+    - El estudio del repositorio `docs/estudios/2026-11-27-sistema-de-diseno-tui.md` (§3 y §5).
+  - **La celda.** Mide unos 8×16 px, así que una columna es un paso y una fila son dos. No hay media fila, de modo que el espacio vertical se gasta en filas enteras y solo donde sobran.
+  - **Medido antes y después** (Pilot, propuesta de 43 líneas), en filas de propuesta visibles:
+
+    | Tamaño | Antes | Después |
+    |---|---|---|
+    | 80×24 | 0 | 0 |
+    | 100×30 | 7 | 7 |
+    | 120×40 | 17 | 13 |
+
+    - 80×24 sigue en el caso «ventana demasiado pequeña», que ahora se ve entero con la pregunta. Antes los botones tapaban la pregunta.
+    - 120×40 cede 4 filas a los huecos.
+- **Alternativas rechazadas:**
+  - **Botones `compact` de 1 fila por debajo de 30 filas** (estudio §5.5). Darían 2 filas a 80×24, pero la propuesta seguiría sin sitio útil: 1 fila, por la cabecera de 12. Además se pierde el relieve y el objetivo de 48 px. Compactar la cabecera queda para otra iteración.
+  - **Botones de etiqueta + 2×2 columnas alineados a la derecha** (estudio §5.5): anchos distintos por etiqueta. El encargo pide anchos iguales en múltiplos de 8 y la pareja centrada.
+  - **Relleno `0 1` en modo denso** (estudio §3): a lo ancho no falta sitio (66 columnas de propuesta a 80). Con 2 columnas la propuesta se separa igual del borde grueso a cualquier tamaño.
+  - **Huecos verticales a cualquier altura:** a 100×30 costarían 3 de las 7 filas de la propuesta.
+- **Impacto:**
+  - spec `interactive-shell`: el requisito «Botones dentro de la caja y distinguibles sin color»;
+  - `tui.py` (CSS, `ApprovalScreen.compose` y `_confirming`) y `spacing.py`;
+  - pruebas en `tests/unit/test_shell_tui_grid.py`.
+
+  El resto de la pantalla (registro, panel, entrada y pie) no cambia aquí: va en una segunda fase con la misma escala, después de `collapsible-blocks`.
+
+### D8 · El código en línea del modelo no se pinta como un aviso del harness
+
+- **Qué:** `MD_CODE` pasa de `#e5c07b` a `$text-secondary`, una variable del tema que ningún estado del harness usa. Una prueba comprueba que ningún estilo de texto ajeno (`FOREIGN` y `MD_*`) lleva el color de `HARNESS_ERROR` ni el de `HARNESS_WARNING`, ni fondo, ni `reverse`. Otra dibuja una respuesta con `` `warning: disk full` `` y mira el color en pantalla.
+- **Por qué:**
+  - `MD_CODE` y `HARNESS_WARNING` tenían el mismo color (estudio, §4). Un `` `warning: …` `` del modelo se veía como un aviso del harness, aunque fuera dentro del recuadro.
+  - Es imitación de chrome, lo mismo que D2 evita para los botones.
+- **Alternativas rechazadas:**
+  - Pasar ahora todo `STYLES` a variables del tema: es la segunda fase, junto con el resto de la pantalla.
+  - Negrita para el código: `MD_STRONG` y `STATUS` ya la usan.
+- **Impacto:**
+  - `tui.py` (`STYLES`);
+  - pruebas en `tests/unit/test_shell_tui_styles.py`;
+  - spec `interactive-shell`: el requisito «El texto ajeno no se pinta como un aviso del harness».
+
 ## Risks / Trade-offs
 
 - [Aprobar es más fácil que con el código: un Tab y un Enter] → lo aceptó Wilson el 2026-11-27. Las protecciones de D2 cierran lo accidental, y lo deliberado sigue ligado al hash, con caducidad y uso único.

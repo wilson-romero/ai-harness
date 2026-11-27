@@ -77,9 +77,53 @@
 
 - [ ] 5.1 Al archivar: este delta pasa a MODIFIED sobre «Caja de aprobación en la pantalla completa», «Entrada de la aprobación» y «La propuesta entera antes del código» (de `shell-tui`), y sobre «Solo una persona en una terminal interactiva aprueba» y «Auditoría de aprobaciones sin contenido» (de `skill-engine`), después de archivar esos dos changes.
 
-## 6. Demo
+## 6. La caja sobre la escala de espaciado (D7, D8)
 
-- [ ] 6.1 Demo (Wilson, macOS): con el Mock, `/skill architecture-memory` en la pantalla completa (pasos en el informe del change).
+- [x] 6.1 La escala vive en `harness/shell/spacing.py` y se declara como variables CSS. La caja la usa:
+  - botones de 16×3, separados 8 columnas y centrados;
+  - 2 columnas de relleno;
+  - filas en blanco según la altura (`-tight`, `-snug` y `-roomy`);
+  - la confirmación de Reject en dos líneas, la pregunta encima de los botones;
+  - estados por atributo del texto.
+
+  Ninguna protección cambia: las pruebas de la caja pasan sin tocar una sola aserción.
+  - Oráculo: `tests/unit/test_shell_tui_grid.py`, con 13 pruebas a 80×24, 100×30 y 120×40, y las pruebas sin cambios de `test_shell_tui_buttons.py`, `test_shell_tui.py` y `test_shell_tui_review.py`.
+  - Recibo (2026-11-27, macOS arm64):
+    - Sobre el `tui.py` de `e65d250` las 13 fallan: 13 failed.
+      - El hueco real entre los botones era de 4 columnas, porque Textual funde los márgenes `0 4`.
+      - «Yes, reject» quedaba fuera de la pantalla.
+      - Faltaban la fila en blanco y el relleno de 2 columnas.
+      - Los tres estados tenían solo 2 estilos de texto.
+    - Con el cambio: 15 passed (grid y estilos) y 72 passed con las otras pruebas de la caja.
+    - Controles negativos (`PYTHONPYCACHEPREFIX` nuevo por mutante): 12 de 12 mutantes fallan.
+      - Hueco de 4 → 6 failed.
+      - Ancho de 15 → 6 failed.
+      - «Reject» más ancho → 3 failed.
+      - Sin la fila sobre los botones → 2 failed.
+      - Sin la regla `-tight` → 1 failed.
+      - Sin la regla `-roomy` → 1 failed.
+      - `-roomy` a cualquier altura → 5 failed.
+      - Sin tachado → 1 failed.
+      - Sin vídeo inverso → 1 failed.
+      - Confirmación en una fila → 3 failed.
+      - Relleno de 1 → 2 failed.
+      - `MD_CODE` amarillo → 2 failed.
+  - Filas de propuesta, medidas con Pilot con una propuesta de 43 líneas:
+
+    | Tamaño | Antes | Después |
+    |---|---|---|
+    | 80×24 | 0 | 0 |
+    | 100×30 | 7 | 7 |
+    | 120×40 | 17 | 13 |
+- [x] 6.2 `MD_CODE` con `$text-secondary`: el código en línea del modelo no lleva el color de un aviso del harness (D8).
+  - Oráculo: `tests/unit/test_shell_tui_styles.py`, con 2 pruebas: los estilos y el color dibujado en pantalla.
+  - Recibo (2026-11-27): con `#e5c07b`, 2 failed (`md.code`: `Color(229, 192, 123)` es el de `harness.warning`); con el cambio, 2 passed.
+- [ ] 6.3 Las dos tandas, una vez cada una con `caffeinate -i`, después del merge de `develop`: `-m "not edge and not copilot"` y `-m edge`. Después, `openspec validate --all --strict` y `scripts/check_public_safety.py`.
+  - Oráculo: código 0 en cada tanda; 0 errores de validación; `public-safety: PASS`.
+
+## 7. Demo
+
+- [ ] 7.1 Demo (Wilson, macOS): con el Mock, `/skill architecture-memory` en la pantalla completa (pasos en el informe del change).
   - Qué comprobar:
     - Enter al abrir no hace nada;
     - con una propuesta larga, Approve espera al final;

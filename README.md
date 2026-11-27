@@ -127,7 +127,7 @@ En una consola, la conversación ocupa la pantalla completa ([Textual](https://t
 - **Mientras el proveedor trabaja** se ve `mock: thinking (N s), ctrl+c interrupts` y la entrada no envía (lo escrito se queda en ella).
 - **La aprobación** se abre en su propia caja: la cabecera del motor (destino, hash, caducidad), el contenido propuesto en un recuadro de texto ajeno y, fija abajo, la fila **[Approve] [Reject]** (desde el 2026-11-27, `approval-buttons`). Cómo funciona:
   - El foco empieza en la propuesta, que se recorre con `AvPág`/`RePág`, flechas, `Inicio`, `Fin` o la rueda. La caja dice cuántas líneas quedan debajo o que la propuesta se ha mostrado entera.
-  - Durante el primer medio segundo los dos botones están deshabilitados.
+  - Durante el primer medio segundo los dos botones están deshabilitados. Un botón deshabilitado se ve tachado y el enfocado, invertido, también en una terminal sin color. Los botones miden lo mismo y van centrados, y la caja deja filas en blanco solo cuando la terminal tiene 30 filas o más (escala en `harness/shell/spacing.py`).
   - «Approve» se habilita cuando el final de la propuesta ha estado en pantalla. Se pulsa con el ratón, o con Tab y Enter.
   - «Reject» pregunta otra vez dentro de la caja, con el foco en «Back»; solo «Yes, reject» rechaza.
   - Escape no decide. `ctrl+c` y `ctrl+q` la dejan sin decidir.

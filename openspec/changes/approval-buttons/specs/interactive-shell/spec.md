@@ -71,3 +71,21 @@ Un contenido propuesto que dibuje una fila de botones SHALL mostrarse como texto
 #### Scenario: Botones dibujados por la respuesta
 - **WHEN** la propuesta contiene `[ Approve ]        [ Reject ]` y la persona hace clic sobre ese texto
 - **THEN** la caja tiene solo sus botones reales, debajo del área ajena, y la aprobación sigue pendiente
+
+### Requirement: Botones dentro de la caja y distinguibles sin color
+Cada botón de la caja y de la confirmación de rechazo SHALL quedar entero dentro de la caja a 80×24, 100×30 y 120×40, con el mismo ancho que los otros botones de su fila. La pregunta de confirmación SHALL verse entera. Deshabilitado, habilitado y enfocado SHALL distinguirse por un atributo del texto, no solo por el color.
+
+#### Scenario: Confirmación de rechazo a 80 columnas
+- **WHEN** a 80×24 la persona pulsa rechazar
+- **THEN** la pregunta de confirmación y los botones de volver y de confirmar se ven enteros dentro de la caja
+
+#### Scenario: Estados en una terminal sin color
+- **WHEN** un botón está deshabilitado, otro habilitado y otro enfocado
+- **THEN** los tres llevan atributos de texto distintos: tachado, negrita y negrita invertida
+
+### Requirement: El texto ajeno no se pinta como un aviso del harness
+Ningún estilo aplicado a texto ajeno (párrafos, código, encabezados, citas, enlaces) SHALL usar el color de un aviso o de un error del harness, un fondo o el vídeo inverso.
+
+#### Scenario: Código en línea que dice warning
+- **WHEN** la respuesta del modelo contiene `` `warning: disk full` ``
+- **THEN** ese texto se dibuja con un color distinto del de los avisos del harness
