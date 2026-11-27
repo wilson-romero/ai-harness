@@ -107,6 +107,7 @@ from harness.shell.render import (
     row_text,
     rows_of_plain_text,
 )
+from harness.shell import spacing
 from harness.shell.terminal import PanelState, ShellState, WaitInterrupted
 from harness.skills.approvals import ButtonPress
 from harness.text.safe_text import terminal_safe
@@ -152,7 +153,9 @@ STYLES: dict[str, str] = {
     MD_QUOTE: "italic #98c379",
     MD_RULE: "dim",
     MD_FENCE: "dim",
-    MD_CODE: "#e5c07b",
+    # A theme colour no harness status uses: inline code written by the model, such as
+    # `warning: ...`, must not look like the harness's own warning (approval-buttons D8).
+    MD_CODE: "$text-secondary",
     MD_STRONG: "bold",
     MD_EM: "italic",
     MD_LINK: "underline #56b6c2",
@@ -1214,6 +1217,9 @@ class ApprovalScreen(ModalScreen[None]):
     confirmation inside the box. Escape does nothing; ctrl+c and ctrl+q leave the approval
     pending."""
 
+    # Blank rows between the parts of the box only where the rows allow (approval-buttons D7).
+    VERTICAL_BREAKPOINTS: ClassVar = [(0, "-tight"), (spacing.SNUG_ROWS, "-snug"),
+                                      (spacing.ROOMY_ROWS, "-roomy")]
     BINDINGS: ClassVar = [
         Binding("escape", "escape", show=False),
         Binding("pagedown", "scroll_proposal('page_down')", show=False, priority=True),
@@ -1258,12 +1264,15 @@ class ApprovalScreen(ModalScreen[None]):
                                      disabled=True)
                 yield ApprovalButton(plain(REJECT_LABEL), id="reject", variant="error",
                                      disabled=True)
-            with Horizontal(id="approval-confirm"):
+            # The confirmation takes the place of the question: its text above, its buttons
+            # below, so both buttons stay inside the box at any width (approval-buttons D7).
+            with Vertical(id="approval-confirm"):
                 yield Static(plain(CONFIRM_REJECT, "bold"), markup=False,
                              id="approval-confirm-text")
-                yield ApprovalButton(plain(CONFIRM_BACK), id="reject-back", disabled=True)
-                yield ApprovalButton(plain(CONFIRM_YES), id="reject-yes", variant="error",
-                                     disabled=True)
+                with Horizontal(id="approval-confirm-buttons"):
+                    yield ApprovalButton(plain(CONFIRM_BACK), id="reject-back", disabled=True)
+                    yield ApprovalButton(plain(CONFIRM_YES), id="reject-yes", variant="error",
+                                         disabled=True)
 
     def on_mount(self) -> None:
         self.query_one("#approval-confirm").display = False
@@ -1330,6 +1339,7 @@ class ApprovalScreen(ModalScreen[None]):
     def _confirming(self, on: bool) -> None:
         """Reject asks once more, inside the box; the focus goes to Back (approval-buttons D3)."""
         self.query_one("#approval-buttons").display = not on
+        self.query_one("#approval-question").display = not on
         self.query_one("#approval-confirm").display = on
         for name in ("#reject-back", "#reject-yes"):
             self.query_one(name, Button).disabled = not on
@@ -1457,7 +1467,13 @@ class HarnessApp(App[int]):
         Binding("ctrl+q", "leave", show=False, priority=True),
         Binding("ctrl+n", "new_session", show=False, priority=True),
     ]
-    CSS = """
+    # The spacing scale and the colour roles first (approval-buttons D7): the rules of the
+    # approval box name them, never a bare number or a colour of their own.
+    CSS = spacing.css_variables() + """
+    $approval-frame: $warning;
+    $approval-fill: $warning-muted;
+    $foreign-frame: $secondary;
+    $box-fill: $surface;
     Screen { layout: vertical; }
     #main { height: 1fr; }
     #log { width: 1fr; padding: 0 1; scrollbar-size-vertical: 1; }
@@ -1484,18 +1500,28 @@ class HarnessApp(App[int]):
                                                          padding: 0 1; }
     #prompt.-browsing { border: tall $warning; }
     #approval { align: center middle; }
-    #approval-box { width: 90%%; height: 90%%; border: heavy $warning; padding: 0 1;
-                    border-title-color: $warning; border-title-style: bold;
-                    background: $surface; }
+    #approval-box { width: 90%%; height: 90%%; border: heavy $approval-frame;
+                    padding: 0 $box-x;
+                    border-title-color: $approval-frame; border-title-style: bold;
+                    background: $box-fill; }
     #approval-header { height: auto; }
-    #approval-content { height: 1fr; border: round $secondary; }
-    #approval-question { height: auto; margin: 1 0 0 0; }
-    #approval-message { height: auto; }
+    #approval-content { height: 1fr; border: round $foreign-frame; }
     #approval-more { height: auto; }
-    #approval-buttons, #approval-confirm { dock: bottom; height: 3; align: center middle;
-                                           background: $warning-muted; }
-    #approval-buttons Button, #approval-confirm Button { margin: 0 4; }
-    #approval-confirm-text { width: auto; height: 3; content-align: center middle; }
+    #approval-question { height: auto; margin: 0 0 $row 0; }
+    #approval-message { height: auto; }
+    #approval-buttons, #approval-confirm { dock: bottom; height: auto;
+                                           background: $approval-fill; }
+    #approval-buttons, #approval-confirm-buttons { height: $button-rows; align: center middle; }
+    #approval-confirm-text { width: 1fr; height: auto; text-align: center;
+                             margin: 0 0 $row 0; }
+    #approval Button { width: $button-w; min-width: $button-w; height: $button-rows;
+                       margin: 0; text-style: bold; }
+    #approval #reject, #approval #reject-yes { margin: 0 0 0 $button-gap; }
+    #approval Button:focus { text-style: bold reverse; }
+    #approval Button:disabled { text-style: strike; }
+    #approval.-tight #approval-question, #approval.-tight #approval-confirm-text { margin: 0; }
+    #approval.-roomy #approval-box { padding: $row $box-x; }
+    #approval.-roomy #approval-content { margin: $row 0; }
     .picker { align: center middle; }
     #picker-box { width: 80%%; height: 70%%; border: round $accent; background: $surface; }
     """ % SIDE_COLUMNS
