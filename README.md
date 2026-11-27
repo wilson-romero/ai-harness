@@ -51,6 +51,7 @@ En PowerShell, `$env:HARNESS_PROVIDER = "copilot_web"` y `$env:HARNESS_COPILOT_U
 - La primera pregunta de una sesión abre una conversación nueva. Copilot le da un identificador unos segundos después de responder; el harness lo guarda y las preguntas siguientes de esa sesión, también desde otra terminal, van a esa misma conversación. Antes de escribir comprueba que la página abierta es esa conversación; si ya no existe, no envía nada y la sesión queda `closed`.
 - Si Copilot pide iniciar sesión, la pregunta termina en `authentication_required` sin escribir nada en la página: ejecuta `main.py copilot login` y vuelve a preguntar.
 - Un prompt más largo que el máximo medido (o que `HARNESS_COPILOT_MAX_PROMPT_CHARS`) se rechaza antes de abrir Edge.
+- **Modo de respuesta** (`auto`, `quick`, `deep`): cada sesión recuerda el suyo, `auto` por defecto. Se elige con `/mode` en la conversación o con `ask SESSION_ID "Pregunta" --mode deep` (queda para las preguntas siguientes de la sesión). Cambiarlo no envía nada ni abre Edge. Antes de escribir cada pregunta, el harness pone el modo con el selector de la página y lo relee; si no puede confirmarlo, la pregunta termina en `failed` sin escribir nada. Tras la respuesta lo relee: si la página cambió de modo sola, la solicitud guarda el modo que quedó y lo avisa. `quick` y `deep` necesitan que la sonda haya medido el selector (`copilot_probe.py response-mode`, ver el runbook); sin esa medida se rechazan con un mensaje y `auto` deja la página como está. Una pregunta en `deep` tiene su propio plazo, `HARNESS_DEEP_REQUEST_TIMEOUT_S`. El modo se ve en el panel lateral, en `/status` y, cuando no es el automático sin cambios, en `/history` y `history`.
 - **Qué se guarda:** de una sesión de Copilot, solo la sesión, el identificador de su conversación, cada solicitud con su estado y sus fechas, y la auditoría. **Nunca** el texto de las preguntas ni de las respuestas: la respuesta solo sale por stdout, sin caracteres de control ni invisibles. `history` muestra el identificador y las solicitudes, sin texto.
 - No actives `DEBUG=pw:api` con contenido real: Playwright escribiría en la terminal lo que se teclea y se lee.
 
@@ -73,7 +74,7 @@ Al entrar se ve el proveedor, la sesión y el proyecto. Una línea normal es una
 | Comando | Qué hace |
 |---|---|
 | `/help` | Lista los comandos. |
-| `/status` | Sesión, proyecto, proveedor, última solicitud y adjunto pendiente. |
+| `/status` | Sesión, proyecto, proveedor, última solicitud, modo de respuesta y adjunto pendiente. |
 | `/new [--project SLUG] [NOMBRE]` | Pasa a una sesión nueva; la anterior queda libre y sin cambios. |
 | `/sessions` | Lista numerada de sesiones. |
 | `/resume N` | Pasa a la sesión número N de la última `/sessions` (un número, no un identificador). |
@@ -82,6 +83,7 @@ Al entrar se ve el proveedor, la sesión y el proyecto. Una línea normal es una
 | `/context` | Lo mismo que `memory context` para el proyecto de la sesión. |
 | `/skill NOMBRE [CLAVE=VALOR…] [--file CLAVE=RUTA…]` | Ejecuta un Skill en esta sesión, como `skill run`. Su aprobación se pide ahí mismo, con el aviso de siempre. |
 | `/file RUTA` | Adjunta un fichero de texto (hasta 64 KiB, UTF-8, un fichero normal: no un enlace, una tubería ni un dispositivo) a la **siguiente** pregunta. Va marcado como datos y no se guarda nunca. |
+| `/mode [auto\|quick\|deep]` | Sin argumento, el modo de respuesta de la sesión; con uno, lo cambia y lo recuerda. No envía nada. Ver [Copilot Web](#copilot-web). |
 | `/exit` | Sale. El fin de entrada (Ctrl+D; en Windows, Ctrl+Z e Intro) también. |
 
 - **Ctrl+C** durante una pregunta la interrumpe: queda `uncertain` si el prompt ya había salido, `failed` si no, nunca se reenvía y la conversación sigue. Ctrl+C mientras se espera una línea solo recuerda cómo salir. Ctrl+C durante `/skill` lo detiene: si el paso del modelo estaba en curso, queda `uncertain` (no se reenvía) y la conversación escribe los dos comandos que lo continúan o lo cancelan, que se usan tras dejar la sesión. Ctrl+C en el aviso de aprobación lo deja sin decidir: no se aplica nada. Ctrl+C mientras el proveedor abre sus recursos, al entrar, termina la conversación (código 130) sin preguntar nada; mientras los cierra, al salir, deja de esperar y avisa de que algo puede haber quedado abierto.
@@ -569,6 +571,7 @@ Por variables de entorno (ver `.env.example`):
 | `HARNESS_DATA_DIR` | `./data` | Dónde viven SQLite, los bloqueos, la clave de los HMAC de MCP (`keys/`), los logs de stderr de los servidores MCP (`logs/mcp/`) y, con Copilot, el perfil dedicado de Edge (`edge-profile/`) y `copilot/`. En macOS y Linux, lo que el harness crea ahí (la carpeta y las que le falten por encima, la base y sus `-wal`/`-shm`, `locks/` y sus ficheros, `copilot/login.json`) es solo de su dueño (`0700`/`0600`); lo que ya existía conserva sus permisos. En Windows esos modos no se usan: lo creado hereda los permisos de la carpeta y el harness no fija ninguna ACL. Debe ser un **disco local**: en una unidad de red los bloqueos de fichero no son fiables. No puede estar dentro de `HARNESS_VAULT_ROOT`. |
 | `HARNESS_PROVIDER` | `mock` | Proveedor de las sesiones nuevas: `mock` o `copilot_web`. |
 | `HARNESS_REQUEST_TIMEOUT_S` | `120` | Plazo de cada pregunta. Con Copilot cubre todo: esperar el navegador, arrancarlo, enviar y recibir la respuesta. La sonda propone un valor. |
+| `HARNESS_DEEP_REQUEST_TIMEOUT_S` | el triple de `HARNESS_REQUEST_TIMEOUT_S` | Plazo de una pregunta en modo `deep` (`/mode deep`, `ask --mode deep`), que razona antes de responder. No puede ser menor que `HARNESS_REQUEST_TIMEOUT_S`. Los estados no cambian: `timeout` si vence antes de enviar, `uncertain` después, sin reenvío. El triple es una cota sin medir: la sonda no envía en `deep`. Un paso de Skill conserva su propio plazo. |
 | `HARNESS_COPILOT_URL` | (vacía) | Dirección del chat de Copilot, la que se abre para una conversación nueva. Solo en tu `.env` local. |
 | `HARNESS_EDGE_PROFILE` | `HARNESS_DATA_DIR/edge-profile` | Carpeta del perfil dedicado de Edge. Nunca la de tu Edge personal: el harness la rechaza. |
 | `HARNESS_COPILOT_READY_TIMEOUT_S` | `60` | Cuánto esperar a que el chat esté listo antes de rendirse sin enviar nada. |

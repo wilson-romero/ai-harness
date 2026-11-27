@@ -179,6 +179,9 @@ Qué significa cada resultado:
 | `warning: … identifier did not reach the address in time` | Copilot respondió, pero la sesión se quedó sin conversación; la siguiente pregunta empezará otra, sin el contexto. |
 | `the prompt has N characters; the most Copilot takes here is M` | Prompt demasiado largo. No se abrió Edge ni se registró nada. |
 | `the harness browser is in use by another command` | Otro `ask` tiene Edge abierto: espera y repite. |
+| `the response mode … could not be confirmed on the page` | El selector no mostró el modo pedido. No se escribió ni se envió nada. Repite; si persiste, vuelve a medir el selector (`response-mode`, abajo) o usa `/mode auto`. |
+| `Copilot cannot set the response mode … yet` | Falta medir el selector. No se registró nada. `copilot_probe.py response-mode`. |
+| `the page changed its conversation while the response mode was set` | Elegir el modo cambió de conversación. No se escribió nada y la sesión conserva la suya. |
 | `did not finish … the harness stopped itself` (código 124) | Último recurso: algo bloqueó el proceso más allá del plazo y de su limpieza. El comando siguiente deja esa pregunta en `uncertain`; nada se reenvía. |
 
 `history` de una sesión de Copilot muestra el identificador de su conversación y, por solicitud, su estado y su hora (UTC), **sin texto**: la base de datos del harness no guarda preguntas ni respuestas de Copilot. El perfil dedicado es un perfil de navegador: Edge guarda en él caché, IndexedDB, historial y cookies, y ahí puede quedar texto de las conversaciones (ver `SECURITY.md`, «Qué queda en disco»).
@@ -190,5 +193,25 @@ uv run python scripts/copilot_probe.py code-language --session SESSION_ID
 ```
 
 Busca por estructura el elemento con `data-testid` que lleva la etiqueta de cada bloque, comprueba que con él el bloque sale con lenguaje y sin él sin lenguaje, y lo añade a `ui.json` (el anterior queda como `ui-<fecha>.json`). Un `measure` posterior lo conserva. Sin bloque de código en esa conversación, termina con `missing: code_language` y no cambia nada.
+
+### Modo de respuesta: medir el selector (sin enviar nada)
+
+Desde el 2026-11-27, `ui.json` admite `response_mode`: el selector del modo de respuesta de la página (automático, rápido, profundo). Sin él, `/mode quick` y `/mode deep` se rechazan y `auto` deja la página como está. Lo mide la sonda **con la persona** y **sin enviar nada**; necesita el perfil con la sesión iniciada (pasos 0 y 1):
+
+```sh
+uv run python scripts/copilot_probe.py response-mode
+```
+
+1. Se abre Edge con el perfil dedicado en la dirección configurada (un chat nuevo).
+2. La sonda pide: abre el selector del modo de respuesta **sin elegir nada** y pulsa Enter en la terminal.
+3. Lista las opciones que ve (su nombre accesible y su rol) y pregunta, con un número, cuál es `auto`, cuál `quick` y cuál `deep` (Enter si no existe). Solo lee dígitos.
+4. Elige cada modo, lo relee de la página de las dos formas posibles (la etiqueta del botón o la opción marcada) y se queda con la que acierta siempre. Al final deja la página en el modo en que estaba.
+5. Si todo se confirmó, añade `response_mode` a `ui.json` (el anterior queda como `ui-<fecha>.json`); un `measure` posterior lo conserva.
+
+Qué guarda (en `HARNESS_DATA_DIR/copilot/`, nunca en el repo): el localizador del botón que abre el selector (`data-testid`, o rol y nombre accesible), de cada opción su rol y su nombre accesible (cortado a 60 caracteres), qué opción es cada modo, cómo se lee el modo actual, y si elegir un modo cambió la dirección o los turnos (debe ser «no»). Ningún otro texto de la página, ninguna cuenta.
+
+El resumen dice `response mode: confirmed auto, quick, deep` (o los que existan) y `left as found: yes`. Si dice `not confirmed with any locator of the opener`, escribe a mano en `candidates.json` una entrada `response_mode_trigger` con el localizador del botón (codegen, anexo) y repite. Si dice `choosing a mode changed the conversation`, no se escribe nada: el harness no puede usar ese selector sin cambiar de conversación.
+
+Después, en la conversación: `/mode deep` y una pregunta. En `history`, la solicitud dice `mode deep` (o `mode quick (asked deep)` si la página cambió de modo sola).
 
 Pruebas reales (opcional, 5 envíos de prompts sintéticos fijos, con ventana): con las variables del paso 0, `uv run pytest -m copilot -p no:cacheprovider`. Sin esas variables se omiten con su motivo.
