@@ -148,8 +148,17 @@ async def test_ctrl_v_cannot_paste_the_code(tmp_path):
 # -- 4: nothing writes a file, opens a link or reaches the terminal's clipboard ----------------
 
 
-async def test_no_app_action_writes_opens_or_copies_out(tmp_path, monkeypatch):
+# A folder whose path has a backslash before a `U`, as every Windows profile path has (the
+# drive, then the Users folder): Textual reads action arguments with `ast.literal_eval`, where `\U` in
+# a plain literal is an escape. The path goes in with `repr`, so it is a valid literal on
+# every system (Windows 11 run of de089d1). On POSIX the backslashes are part of one name;
+# on Windows they separate folders, and the path has `\U` all the same.
+@pytest.mark.parametrize("folder", ["", "sub\\Users\\probe"])  # relative on both systems
+async def test_no_app_action_writes_opens_or_copies_out(tmp_path, monkeypatch, folder):
     monkeypatch.chdir(tmp_path)
+    target = tmp_path / folder if folder else tmp_path
+    target.mkdir(parents=True, exist_ok=True)
+    assert not folder or "\\U" in str(target)
     opened: list = []
     monkeypatch.setattr(webbrowser, "open", lambda *a, **k: opened.append(a))
     tui = Tui(tmp_path / "datos")
@@ -159,26 +168,31 @@ async def test_no_app_action_writes_opens_or_copies_out(tmp_path, monkeypatch):
         written: list[str] = []
         monkeypatch.setattr(tui.app._driver, "write", lambda data: written.append(data))
         reached: list = []
-        with monkeypatch.context() as patch:  # the action stops before delivering anything
+        refused: list = []
+        with monkeypatch.context() as patch:  # the action runs, and stops before delivering
             patch.setattr(tui.app, "deliver_screenshot", lambda *a, **k: reached.append(a))
-            await tui.app.run_action(f"screenshot('probe.svg', '{tmp_path}')")
-        assert reached == []
-        tui.app.deliver_screenshot("probe2.svg", str(tmp_path))
-        tui.app.deliver_text(__import__("io").StringIO("x"), save_directory=str(tmp_path),
+            patch.setattr(tui.app, "_refused", refused.append)
+            await tui.app.run_action(f"screenshot('probe.svg', {str(target)!r})")
+        assert reached == [] and refused == ["screenshots"]
+        tui.app.deliver_screenshot("probe2.svg", str(target))
+        tui.app.deliver_text(__import__("io").StringIO("x"), save_directory=str(target),
                              save_filename="probe.txt")
-        tui.app.deliver_binary(__import__("io").BytesIO(b"x"), save_directory=str(tmp_path),
+        tui.app.deliver_binary(__import__("io").BytesIO(b"x"), save_directory=str(target),
                                save_filename="probe.bin")
         tui.app.open_url("https://example.invalid/")
         tui.app.action_suspend_process()
         tui.app.copy_to_clipboard("texto")
         with pytest.raises(RuntimeError):
-            tui.app.save_screenshot("probe3.svg", str(tmp_path))
+            tui.app.save_screenshot("probe3.svg", str(target))
         await pilot.pause(0.2)
         assert not any("\x1b]52" in data for data in written)
         assert tui.app.clipboard == "texto"
         assert tui.app.is_running
         await tui.send(pilot, "/exit")
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["datos"]
+    top = target.relative_to(tmp_path).parts[:1]
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(["datos", *top])
+    if folder:
+        assert [p for p in target.rglob("*")] == []
     assert opened == []
 
 
