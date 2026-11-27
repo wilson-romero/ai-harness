@@ -284,7 +284,9 @@ Cada paso es un change de OpenSpec pequeño, demostrable con el Mock, y lleva su
 | 8 | **Vuelta del resultado (`/send`)** y **turno de cierre** sin catálogo; presupuesto de envíos visible (hook corte 2) | Con el Mock, un `/send` gasta exactamente 1 envío; superado el presupuesto, no se envía nada | Lección 5 del estudio de OpenCode; hooks §8.2 |
 | 9 | **Escrituras:** vista previa → lista exacta de efectos → hash → `Effect.apply`/`reconcile` | Solo cuando la pasarela acepte escrituras con aprobación (y EA vuelva) | `harness/skills/effects.py`; estudio de code mode §5.2 |
 
-**El siguiente paso más pequeño:** el paso 1 solo, sin tocar la conversación. Es una función pura que recibe el texto de la respuesta y el nonce y devuelve «sin propuesta», «propuesta válida» o «rechazada: motivo». Se prueba con unos quince textos de fixture. No necesita ninguna rama abierta. Puedes escribir el primer borrador del esquema en la lección 11 de la guía.
+**Paso 1, hecho en `feature/code-mode` (2026-11-27, tramo 1 de `openspec/changes/code-mode/`).** `harness/mcp/plan.py` lee el plan como función pura; nada lo usa todavía. Respecto a la fila 1 de la tabla, el esquema de la versión 1 **no** tiene `$ref`, `return` ni `for_each`: es una lista de llamadas con argumentos literales (design D2). Se comprueba con `uv run pytest tests/unit/test_mcp_plan.py`. El siguiente es el tramo 2 (filas 2 a 6).
+
+**El siguiente paso más pequeño (antes del tramo 1):** el paso 1 solo, sin tocar la conversación. Es una función pura que recibe el texto de la respuesta y el nonce y devuelve «sin propuesta», «propuesta válida» o «rechazada: motivo». Se prueba con unos quince textos de fixture. No necesita ninguna rama abierta. Puedes escribir el primer borrador del esquema en la lección 11 de la guía.
 
 ### Comprobación de salida (cuando exista)
 
