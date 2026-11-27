@@ -35,6 +35,7 @@ from harness.text.safe_text import safe_foreign_line
 from harness.providers.base import (
     AuthenticationRequired,
     LLMProvider,
+    PromptTooLong,
     ProviderError,
     ProviderUncertain,
     RemoteConversationLost,
@@ -59,6 +60,19 @@ def is_valid_unicode(text: str) -> bool:
 # A remote reference is an identifier the provider read from the remote side: only a plain
 # token is stored or ever printed (design D6).
 REMOTE_REF = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def _own_share(sent_text: str, prompt: str, context: ProjectContext | None,
+               notice: str | None) -> str:
+    """How much of an over-long prompt is the person's and how much the harness's own, so the
+    size error does not blame the question for the notice and the memory block."""
+    own = [name for name, present in (("the concise-answer notice", notice is not None),
+                                      ("the project memory", context is not None)) if present]
+    if not own:
+        return f"All {len(sent_text)} characters are your text"
+    hint = " (HARNESS_CONCISE_ANSWERS=off removes the notice)" if notice is not None else ""
+    return (f"Your text is {len(prompt)} characters; the other {len(sent_text) - len(prompt)} "
+            f"are the harness's own: {' and '.join(own)}{hint}")
 
 
 def accepts_events(provider: LLMProvider) -> bool:
@@ -350,7 +364,10 @@ class SessionService:
         sent_text = with_notice(notice, sent_text)
         check = getattr(provider, "check", None)
         if check is not None:
-            check(sent_text)  # configuration, measurement, size: before anything is recorded
+            try:
+                check(sent_text)  # configuration, measurement, size: before anything is recorded
+            except PromptTooLong as exc:
+                raise PromptTooLong(f"{exc}. {_own_share(sent_text, prompt, context, notice)}") from None
         with_events = accepts_events(provider)
         warnings: list[str] = []
         cut: list[bool] = []

@@ -11,6 +11,7 @@ from harness.config import Settings
 from harness.core.answer_style import CONCISE_ENV, CONCISE_NOTICE, answer_notice
 from harness.core.errors import InvalidInput
 from harness.core.service import SessionService
+from harness.providers.base import PromptTooLong
 from tests.conftest import query, write_note
 from tests.shell_support import CountingProvider
 
@@ -137,7 +138,7 @@ class _CheckingProvider(CountingProvider):
     def check(self, prompt: str) -> None:
         self.checked.append(prompt)
         if len(prompt) > self.limit:
-            raise InvalidInput(f"the prompt has {len(prompt)} characters; the limit is {self.limit}")
+            raise PromptTooLong(f"the prompt has {len(prompt)} characters; the limit is {self.limit}")
 
 
 def test_the_providers_size_check_counts_the_notice(conn, data_dir):
@@ -145,7 +146,12 @@ def test_the_providers_size_check_counts_the_notice(conn, data_dir):
     provider = _CheckingProvider(limit=len(question) + 10)  # the question alone fits
     service = _service(conn, data_dir, provider, CONCISE_NOTICE)
     session = service.create_session("S")
-    with pytest.raises(InvalidInput, match="limit"):
+    with pytest.raises(PromptTooLong) as raised:
         asyncio.run(service.ask(str(session.session_id), question))
+    # The error does not blame the question for the harness's own text.
+    assert str(raised.value) == (
+        f"the prompt has {len(CONCISE_NOTICE) + 10} characters; the limit is {len(question) + 10}. "
+        f"Your text is {len(question)} characters; the other {len(CONCISE_NOTICE) + 2} are the "
+        "harness's own: the concise-answer notice (HARNESS_CONCISE_ANSWERS=off removes the notice)")
     assert provider.checked == [CONCISE_NOTICE + "\n\n" + question] and provider.prompts == []
     assert query(data_dir, "SELECT count(*) FROM requests") == [(0,)]
