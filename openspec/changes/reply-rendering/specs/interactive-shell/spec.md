@@ -61,7 +61,7 @@ En la pantalla completa, una respuesta del proveedor SHALL llegar entera, salvo 
 - **THEN** la respuesta llega plegada a su vista previa con el pie de las líneas que faltan
 
 ### Requirement: El principio de la respuesta a la vista
-Cuando llega una respuesta más alta que el panel y el panel seguía el final, el panel SHALL mostrar el principio de la respuesta y el pie del harness SHALL decir cuántas filas quedan debajo, hasta que la persona llegue al final. Una respuesta que cabe SHALL dejar el final a la vista, sin ese aviso. Si la persona recorría los bloques o leía más arriba, el panel SHALL NOT moverse.
+Cuando llega una respuesta más alta que el panel y el panel seguía el final, el panel SHALL mostrar el principio de la respuesta y el pie del harness SHALL decir cuántas filas quedan debajo, hasta que la persona llegue al final. Una respuesta que cabe SHALL dejar el final a la vista, sin ese aviso.
 
 #### Scenario: Respuesta más alta que el panel
 - **WHEN** llega una respuesta más alta que el panel
@@ -74,3 +74,18 @@ Cuando llega una respuesta más alta que el panel y el panel seguía el final, e
 #### Scenario: Respuesta que cabe
 - **WHEN** llega una respuesta de dos líneas
 - **THEN** se ve el final del panel y el pie no dice que quedan filas debajo
+
+### Requirement: Cuándo se coloca una respuesta
+Si llegan varias respuestas seguidas, SHALL colocarse en su principio solo la última. Si la persona recorría los bloques o leía más arriba, o empieza a recorrerlos o envía una línea antes de que la respuesta se coloque, el panel SHALL NOT ir al principio de la respuesta.
+
+#### Scenario: Recorrer los bloques al final
+- **WHEN** la persona recorre los bloques con el panel en su final y llega una respuesta más alta que el panel
+- **THEN** el panel no se mueve, ni al final ni al principio de la respuesta
+
+#### Scenario: Línea enviada antes de colocar la respuesta
+- **WHEN** llega una respuesta más alta que el panel y la persona envía una línea antes de que la pantalla la haya colocado
+- **THEN** el panel queda en su final
+
+#### Scenario: Varias respuestas seguidas
+- **WHEN** llegan diez respuestas más altas que el panel antes de que la pantalla se redibuje
+- **THEN** la cabecera de la última está en la primera fila del panel
