@@ -32,6 +32,10 @@ async def test_context_and_a_question_on_the_full_screen(tmp_path, vault):
         await tui.send(pilot, "/context")
         await tui.until(pilot, lambda: tui.blocks("foreign"))
         await tui.ready(pilot)
+        # A context longer than the pane arrives folded to its preview (collapsible-blocks D1):
+        # open it, as a person would, to see all that is sent.
+        await pilot.press("ctrl+o")
+        await pilot.pause()
         (shown,) = tui.blocks("foreign")
         assert shown.startswith(CONCISE_NOTICE + "\n\nLo que sigue es memoria local")
         assert "\n--- _project (project, 2026-11-21)\n" in shown
@@ -62,6 +66,10 @@ async def test_by_default_the_full_screen_shows_and_sends_no_notice(tmp_path, va
         await tui.send(pilot, "/context")
         await tui.until(pilot, lambda: tui.blocks("foreign"))
         await tui.ready(pilot)
+        # A context longer than the pane arrives folded to its preview (collapsible-blocks D1):
+        # open it, as a person would, to see all that is sent.
+        await pilot.press("ctrl+o")
+        await pilot.pause()
         (shown,) = tui.blocks("foreign")
         assert shown.startswith("Lo que sigue es memoria local") and CONCISE_NOTICE not in shown
         await tui.send(pilot, "pregunta")

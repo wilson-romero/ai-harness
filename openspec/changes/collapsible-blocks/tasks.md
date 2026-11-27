@@ -56,6 +56,8 @@ Los controles negativos se aplicaron con un guion fuera del repositorio: aplica 
   - Recibo (2026-11-27, macOS arm64): capturas con un guion de `Pilot` fuera del repositorio sobre una copia de `tests/fixtures/vault-synthetic`; `public-safety: PASS`.
 - [x] 5.2 Ninguna aserción existente cambia. Oráculo: `git diff 5af28ed -- tests/unit/test_shell_tui.py tests/unit/test_shell_tui_review.py tests/unit/test_shell_render.py tests/tui_support.py` vacío. En `tests/integration/test_chat_tui_terminal.py` solo se añaden un `import` y una prueba al final. La prueba de la disposición (`test_the_layout_with_synthetic_content`) sigue buscando `ctrl+p commands` en el pie, que sigue al principio.
   - Recibo (2026-11-27, macOS arm64): el diff de esos ficheros está vacío.
+- [x] 5.3 Integrar `develop` con `prompt-economy` (`57c413d`). `git merge` no tuvo conflictos de texto, pero sí uno de conducta: las dos pruebas de `tests/unit/test_shell_tui_prompt_economy.py` leen el bloque de `/context` tal como se dibuja, y ese contexto, más largo que el panel, llega ahora plegado a su vista previa. Cambio en la prueba: un paso más, `ctrl+o`, para abrir el bloque antes de leerlo, como haría la persona. Su aserción («lo que se ve es lo que se envía») no cambia y se cumple con el bloque abierto. Oráculo: las dos pruebas pasan. Control negativo: sin el paso fallan (`2 failed`, la vista previa no incluye las notas de sesión).
+  - Recibo (2026-11-27, macOS arm64): sin el paso → `2 failed` en la tanda sin Edge; con el paso → `2 passed`.
 
 ## 6. Cierre
 
