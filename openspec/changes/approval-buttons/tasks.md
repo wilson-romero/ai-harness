@@ -179,6 +179,7 @@ Wilson ejecutó `develop` en Windows 11. Dos hallazgos son de esta caja: `test_k
     - M9, sin filtro en la propuesta: 1 failed;
     - M10, sin filtro en los botones: 2 failed.
     - M3, un Click sin exigir su MouseDown, sobrevivía: con el desarmado, un MouseUp leído antes también desarma y el Click encuentra el botón deshabilitado. Se añadió el caso en que el botón sube después de rearmarse: con M3, 1 failed; sin M3, pasa.
+  - Baterías sobre `7dd9894` (los arreglos, con `develop` `893694a` dentro), una vez cada una con `caffeinate -i`: `-m "not edge and not copilot"` 2070 passed en 377,92 s, código 0; `-m edge` 156 passed en 1563,70 s, código 0, ninguno repetido; `openspec validate --all --strict` 26 passed; `sec-matrix: PASS (15 rows, 138 tests)`; `public-safety: PASS (461 file(s))`.
 - [ ] 7.3 Confirmación en Windows (no es puerta). En PowerShell, en la rama:
   - `uv run pytest tests/unit/test_shell_tui_arming.py tests/unit/test_shell_tui_buttons.py -v` → todo pasa, también con la máquina cargada;
   - `uv run pytest tests/unit/test_shell_tui_grid.py tests/unit/test_shell_tui_blocks.py tests/unit/test_shell_tui.py -v`, tres veces, y la batería completa `uv run pytest -m "not edge and not copilot"` → ningún `NoMatches`;
