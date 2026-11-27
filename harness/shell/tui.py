@@ -106,8 +106,8 @@ READY_HINT = "Type a question, or / for a command"
 BUSY_HINT = "working: ctrl+c interrupts"
 BROWSE_HINT = "browsing the blocks: esc or any letter goes back to typing"
 # The keys that matter most first: a narrow terminal cuts the end of the line.
-FOOTER = ("ctrl+p commands  ctrl+c interrupts  ctrl+q leaves  ctrl+n new session  "
-          "esc blocks  ctrl+o open/close")
+FOOTER = ("ctrl+p commands  ctrl+c interrupts  ctrl+q leaves  ctrl+n new  esc blocks  "
+          "ctrl+o open/close")
 BROWSE_FOOTER = "up/down move  enter open/close  +/- all  end latest  esc back to typing"
 ARM_S = 0.5  # an approval answer submitted sooner than this after the box opened is refused
 HISTORY_MAX = 200  # lines typed at the conversation input, kept in memory only
@@ -1134,6 +1134,7 @@ class HarnessApp(App[int]):
     #prompt { dock: bottom; margin: 0 0 1 0; }
     #footer { dock: bottom; height: 1; background: $panel; color: $text-muted; padding: 0 1; }
     #working { height: auto; color: $text-muted; display: none; }
+    #conversation { height: auto; min-height: 100%%; }
     .you { margin: 1 0 0 0; padding: 0 1; border-left: thick $accent; }
     .harness { color: $text-muted; }
     .foreign { margin: 1 0 0 0; padding: 0 1; border: round $secondary;
@@ -1254,9 +1255,13 @@ class HarnessApp(App[int]):
     def on_mount(self) -> None:
         self.ui_loop = asyncio.get_running_loop()
         log = self.query_one("#log", VerticalScroll)
+        # At least as tall as the pane: the anchored pane then never scrolls above its top
+        # (Textual sets a negative scroll when the content is shorter than the pane).
+        conversation = Vertical(id="conversation")
+        log.mount(conversation)
         self._session_log = SessionLog()
-        log.mount(self._session_log)
-        log.mount(Static(plain(""), markup=False, id="working"))
+        conversation.mount(self._session_log)
+        conversation.mount(Static(plain(""), markup=False, id="working"))
         log.anchor()  # the end stays in view as blocks arrive (collapsible-blocks D3)
         self.query_one(PromptInput).focus()
         self.set_interval(TICK_S, self._tick)
@@ -1408,8 +1413,8 @@ class HarnessApp(App[int]):
             log = SessionLog()
             self.session_logs[key] = log
             self._session_log = log
-            screen_log = self._log()
-            screen_log.mount(log, before=screen_log.query_one("#working"))
+            conversation = self.query_one("#conversation", Vertical)
+            conversation.mount(log, before=conversation.query_one("#working"))
             self._add_rows(harness_rows([
                 f"session {panel.session_name} ({panel.session_id[:8]}): this pane shows "
                 "what happened in it since the conversation opened; /history lists its "

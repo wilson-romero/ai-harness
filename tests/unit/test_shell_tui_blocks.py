@@ -372,6 +372,9 @@ async def test_switching_session_shows_that_sessions_blocks(tmp_path):
         await tui.until(pilot, lambda: tui.app.session_log is not first_log)
         await tui.ready(pilot)
         assert not first_log.display and "pregunta en la primera" not in tui.screen()
+        # A short pane starts at its top (the anchored pane never scrolls above it).
+        assert tui.app._log().scroll_y >= 0
+        assert tui.screen().split("\n")[0].strip().startswith("session segunda")
         assert "this pane shows what happened in it" in tui.screen()
         await _ask(tui, pilot, "Respuesta en la segunda.", "pregunta en la segunda")
         await tui.send(pilot, "/sessions")
