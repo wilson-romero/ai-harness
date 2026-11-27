@@ -64,6 +64,7 @@ from harness.shell.blocks import (
     plural,
     preview_lines,
     rows_in_preview,
+    turn_has_alert,
     turn_state,
     turn_who,
 )
@@ -618,7 +619,7 @@ class ForeignBlock(FoldBlock):
         self.border_subtitle = plain(footer) if footer else None
 
 
-NOTICE_WHO = {CONTEXT: "context", SKILL: "skill steps", ALERT: "harness", NOTICE: "harness"}
+NOTICE_WHO = {CONTEXT: "context", SKILL: "skill steps"}
 
 
 class NoticeBlock(FoldBlock):
@@ -686,9 +687,18 @@ class Turn(Vertical):
     def total(self) -> int:
         return sum(block.total for block in self.items) + (1 if self.you is not None else 0)
 
+    def _state_lines(self) -> list[str]:
+        """The lines a turn's state is read from: the harness's own alerts and skill steps,
+        never a block that can carry a vault path or a listing (review 2026-11-27)."""
+        return [row_text(row) for block in self.items
+                if not block.foreign and block.kind in (ALERT, SKILL) for row in block.rows]
+
+    @property
+    def has_alert(self) -> bool:
+        return turn_has_alert(self._state_lines())
+
     def refresh_summary(self) -> None:
-        harness = [row_text(row) for block in self.items if not block.foreign
-                   for row in block.rows]
+        harness = self._state_lines()
         replies = [block for block in self.items if block.kind == REPLY]
         state = turn_state(harness, bool(replies), any(b.truncated for b in self.items))
         who = turn_who(self.line, replies[-1].who if replies else None)
@@ -834,7 +844,7 @@ class PromptInput(Input):
         self.set_browsing(False)  # any other key: back to typing, and the key types
 
     def _on_blur(self, event: Blur) -> None:
-        self.set_browsing(False)  # a box or the palette opened: browsing ends
+        self.set_browsing(False)  # the focus moved to another widget of the screen
 
     def remember(self, line: str) -> None:
         if line and (not self.history or self.history[-1] != line):
@@ -1297,10 +1307,13 @@ class HarnessApp(App[int]):
         """New output keeps the end of the pane in view (the pane is anchored to its bottom
         while the blocks are laid out), unless the person is browsing the blocks or scrolled
         up to read; sending a line or switching session always goes to the end."""
+        log = self._log()
+        if force:  # checked first: a line sent while browsing goes to the end too
+            log.anchor()
+            return
         if self.query_one(PromptInput).browsing:
             return
-        log = self._log()
-        if force or log.scroll_y >= log.max_scroll_y - 1:
+        if log.scroll_y >= log.max_scroll_y - 1:
             log.anchor()
 
     @property
@@ -1338,13 +1351,13 @@ class HarnessApp(App[int]):
 
     def start_turn(self, line: str) -> None:
         """The person sent `line`: a new turn. Older turns fold to their summary line by
-        themselves (D2), except the one before it, one the person opened or closed, and the
-        one holding the selection."""
+        themselves (D2), except the one before it, one the person opened or closed, the one
+        holding the selection and one with an error, a warning or an interruption."""
         turns = self.session_log.turns
         selected_turn = self._turn_of(self.selected)
         for turn in turns[: max(0, len(turns) - (KEEP_OPEN_TURNS - 1))]:
             if not turn.manual and not turn.closed and turn is not selected_turn and \
-                    not any(block.manual for block in turn.items):
+                    not any(block.manual for block in turn.items) and not turn.has_alert:
                 turn.set_closed(True, manual=False)
         self._mount_turn(Turn(line))
         self._follow(force=True)
@@ -1353,7 +1366,8 @@ class HarnessApp(App[int]):
         turn = self._turn()
         last = turn.last()
         if foreign:
-            kind = category("", foreign=True, label=label)
+            command = turn.line.split()[0] if turn.line and turn.line.split() else None
+            kind = category("", foreign=True, label=label, command=command)
             turn.add(ForeignBlock(rows, label or FOREIGN_TITLE, kind=kind,
                                   preview=self._preview(), height_of=self._height_of(True)))
         else:
@@ -1597,6 +1611,13 @@ class HarnessApp(App[int]):
         seconds = int(time.monotonic() - self._started)
         working.update(plain(f"{self._working}: thinking ({seconds} s), ctrl+c interrupts"))
         working.display = True
+
+    def push_screen(self, *args, **kwargs):  # type: ignore[override]
+        """Any screen over the conversation (the approval box, the palette, a picker) ends
+        browsing: Textual sends no Blur to the input it covers (review 2026-11-27)."""
+        for prompt in self.query(PromptInput):
+            prompt.set_browsing(False)
+        return super().push_screen(*args, **kwargs)
 
     def open_approval(self, header: list[str], content: list[str], question: str) -> None:
         screen = ApprovalScreen(header, content, question)

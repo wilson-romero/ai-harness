@@ -27,18 +27,29 @@ HeightOf = Callable[[Row], int]  # the screen rows a row takes in its block, onc
 
 # Categories of a block, from the harness's own first words (never from foreign text).
 REPLY = "reply"  # the provider's answer to a question
-FOREIGN = "foreign"  # other text from outside the harness (/history, /context, /memory, skills)
-CONTEXT = "context"  # what the memory added to a question: metadata, collapsed by default
+FOREIGN = "foreign"  # other text from outside the harness (/history, /memory, skills)
+EXACT = "exact"  # what `/context` shows: exactly what is sent, so never folded by default
+CONTEXT = "context"  # the summary line of what the memory added: metadata
+LISTING = "listing"  # the notes omitted and the files attached: never folded by default
 SKILL = "skill"  # a skill's step bookkeeping: metadata, collapsed by default
 ALERT = "alert"  # an error, a warning, an interruption: never folded by default
 NOTICE = "notice"  # any other harness output
 METADATA = frozenset({CONTEXT, SKILL})
+ALWAYS_WHOLE = frozenset({ALERT, LISTING, EXACT})
 
-_CONTEXT_WORDS = ("context:", "omitted:", "attached:")
+_CONTEXT_WORDS = ("context:",)
+_LISTING_WORDS = ("omitted:", "attached:")
 _SKILL_WORDS = ("skill:", "applied:")
 _ALERT_WORDS = ("error:", "warning:", "interrupted:", "Not confirmed", "That is not")
 _NOT_SHOWN = re.compile(r"\[\d+ more character\(s\) not shown\]")
-_SKILL_STATUS = re.compile(r"skill: run \S+ is ([a-z_]+)$")
+# The state of a turn comes from whole harness lines, matched from their first character: a
+# line that only contains these words (a note path after `omitted:`) never sets it (review
+# 2026-11-27, finding 5).
+_SKILL_STATUS = re.compile(r"skill: run \S+ is ([a-z_]+)")
+_UNCERTAIN = re.compile(r"interrupted: (?:request|skill run) \S+ is uncertain\b")
+# The hint of a Ctrl+C with nothing in flight (`conversation.INTERRUPT_HINT`): it interrupts
+# nothing, so it says nothing about the turn it lands in (finding 6).
+IDLE_INTERRUPT = "interrupted: the conversation is still open;"
 
 
 class Fold(enum.Enum):
@@ -136,14 +147,20 @@ def first_line(rows: list[Row], limit: int = EXCERPT_MAX) -> str:
     return ""
 
 
-def category(first_row_text: str, *, foreign: bool, label: str | None) -> str:
+def category(first_row_text: str, *, foreign: bool, label: str | None,
+             command: str | None = None) -> str:
     """The category of a block, from the harness's own words: a foreign block is the reply
-    when the provider was just asked (`label`), else other foreign text."""
+    when the provider was just asked (`label`), what `/context` shows when that is the
+    command of its turn (`command`, the person's own line), else other foreign text."""
     if foreign:
-        return REPLY if label else FOREIGN
+        if label:
+            return REPLY
+        return EXACT if command == "/context" else FOREIGN
     line = first_row_text.lstrip()
     if line.startswith(_CONTEXT_WORDS):
         return CONTEXT
+    if line.startswith(_LISTING_WORDS):
+        return LISTING
     if line.startswith(_SKILL_WORDS):
         return SKILL
     if line.startswith(_ALERT_WORDS) or _NOT_SHOWN.fullmatch(line):
@@ -158,33 +175,49 @@ def is_not_shown_notice(line: str) -> bool:
 
 def default_fold(kind: str, rows: list[Row], preview: int,
                  height_of: HeightOf = _one_row) -> Fold:
-    """Metadata collapsed to one line once it has more than one; alerts whole; anything else
-    whole unless it takes more of the pane than the preview (and its grace), then folded."""
-    if kind == ALERT:
+    """Metadata collapsed to one line once it has more than one; alerts, the omitted and
+    attached lines and what `/context` shows whole; anything else whole unless it takes more
+    of the pane than the preview (and its grace), then folded."""
+    if kind in ALWAYS_WHOLE:
         return Fold.EXPANDED
     if kind in METADATA:
         return Fold.COLLAPSED if len(rows) > 1 else Fold.EXPANDED
     return Fold.PREVIEW if folds_by_default(rows, preview, height_of) else Fold.EXPANDED
 
 
+def _own(harness_lines: list[str]) -> list[str]:
+    return [line.rstrip() for line in harness_lines if not line.startswith(IDLE_INTERRUPT)]
+
+
+def turn_has_alert(harness_lines: list[str]) -> bool:
+    """Whether the turn showed an error, a warning or an interruption: it never folds by
+    itself (review 2026-11-27, finding 2)."""
+    return any(line.startswith(_ALERT_WORDS) for line in _own(harness_lines))
+
+
 def turn_state(harness_lines: list[str], has_reply: bool, truncated: bool) -> str:
-    """The state of a turn, from the harness lines it showed (never from foreign text)."""
+    """The state of a turn, from the harness lines it showed (never from foreign text), and
+    how many warnings it had (`completed · 1 warning`)."""
+    lines = _own(harness_lines)
     status = ""
-    for line in harness_lines:
-        match = _SKILL_STATUS.search(line.strip())
+    for line in lines:
+        match = _SKILL_STATUS.fullmatch(line)
         if match:
             status = match.group(1)
-    if any(line.startswith("error:") for line in harness_lines):
-        return "failed"
-    if any(line.startswith("interrupted:") and "uncertain" in line for line in harness_lines):
-        return "uncertain"
-    if any(line.startswith("interrupted:") for line in harness_lines):
-        return "interrupted"
-    if status:
-        return status
-    if truncated:
-        return "truncated"
-    return "completed" if has_reply else "done"
+    if any(line.startswith("error:") for line in lines):
+        state = "failed"
+    elif any(_UNCERTAIN.match(line) for line in lines):
+        state = "uncertain"
+    elif any(line.startswith("interrupted:") for line in lines):
+        state = "interrupted"
+    elif status:
+        state = status
+    elif truncated:
+        state = "truncated"
+    else:
+        state = "completed" if has_reply else "done"
+    warnings = sum(line.startswith("warning:") for line in lines)
+    return f"{state} · {plural(warnings, 'warning')}" if warnings else state
 
 
 def turn_who(line: str | None, reply_label: str | None) -> str:

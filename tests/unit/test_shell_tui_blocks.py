@@ -616,3 +616,199 @@ def test_a_warning_before_the_reply_does_not_take_its_title():
     terminal.show_rows(foreign_rows("respuesta", UNCUT)[0])
     terminal.show_rows(foreign_rows("otra", UNCUT)[0])
     assert [args[1] for _, args in posted] == ["mock", "mock", None]
+
+
+# -- independent review, 2026-11-27 ------------------------------------------------------------
+
+
+def _turn_with(tui, line: str, harness: list[str], reply: str | None = "Respuesta.") -> Turn:
+    tui.app.start_turn(line)
+    if harness:
+        tui.app.show_rows(harness_rows(harness, None), None)
+    if reply is not None:
+        tui.app.show_rows(foreign_rows(reply, UNCUT, markdown=True)[0], "mock")
+    return _turns(tui)[-1]
+
+
+async def test_omitted_and_attached_lines_are_always_whole(tmp_path):
+    """What went (and did not go) with a question is never folded away: the omitted note and
+    the attached file stay on the screen next to the context line (review finding 1)."""
+    tui = Tui(tmp_path)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        await tui.ready(pilot)
+        _turn_with(tui, "pregunta", ["omitted: notes/nota-omitida-sintetica.md",
+                                     "context: demo, 1 note(s) included, 0 truncated, 1 omitted",
+                                     "attached: fichero-sintetico.txt"])
+        await pilot.pause(0.1)
+        screen = tui.screen()
+        assert "omitted: notes/nota-omitida-sintetica.md" in screen
+        assert "attached: fichero-sintetico.txt" in screen
+        assert "context: demo, 1 note(s) included" in screen
+        notices = [b for b in _turns(tui)[-1].items if isinstance(b, NoticeBlock)]
+        assert notices and all(b.fold is Fold.EXPANDED for b in notices)
+        await tui.send(pilot, "/exit")
+
+
+async def test_a_turn_with_a_warning_never_folds_by_itself_and_says_so(tmp_path):
+    """A warning is always whole: its turn does not fold by itself, and folded by hand its line
+    counts the warning; an error says `failed` (review findings 2 and 7)."""
+    tui = Tui(tmp_path)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        await tui.ready(pilot)
+        warned = _turn_with(tui, "con aviso", ["warning: synthetic request warning"])
+        failed = _turn_with(tui, "con error", ["error: synthetic failure"], reply=None)
+        plain_turn = _turn_with(tui, "sin aviso", [])
+        for n in range(3):
+            _turn_with(tui, f"más {n}", [])
+        await pilot.pause(0.1)
+        assert plain_turn.closed  # the control: an ordinary older turn folds
+        assert not warned.closed and not failed.closed
+        warned.set_closed(True, manual=True)
+        failed.set_closed(True, manual=True)
+        assert "· completed · 1 warning " in str(warned.summary_line.render())
+        assert "· failed " in str(failed.summary_line.render())
+        await tui.send(pilot, "/exit")
+
+
+async def test_context_output_always_arrives_whole(tmp_path):
+    """`/context` shows exactly what is sent: it never arrives folded (review finding 3)."""
+    tui = Tui(tmp_path)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        await tui.ready(pilot)
+        tui.app.start_turn("/context")
+        tui.app.show_rows(foreign_rows(long_reply(120), UNCUT, markdown=True)[0], None)
+        other = _turn_with(tui, "/history", [], reply=None)
+        tui.app.show_rows(foreign_rows(long_reply(120), UNCUT, markdown=True)[0], None)
+        await pilot.pause(0.1)
+        context = _turns(tui)[-2].items[0]
+        assert context.fold is Fold.EXPANDED and context.hidden_rows() == 0
+        assert other.items[0].fold is Fold.PREVIEW  # the control: other foreign text folds
+        await tui.send(pilot, "/exit")
+
+
+async def test_a_box_or_the_palette_ends_browsing(tmp_path):
+    """Opening the approval box or the palette leaves browsing: the next Enter sends a line
+    instead of toggling a block (review finding 4)."""
+    tui = Tui(tmp_path)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        await _ask(tui, pilot, long_reply(50), "primera")
+        prompt = tui.app.query_one(PromptInput)
+        await pilot.press("escape")
+        assert prompt.browsing
+        tui.app.open_approval(["hash: synthetic"], ["propuesta sintética"], "Approve?")
+        await tui.until(pilot, lambda: isinstance(tui.app.screen, ApprovalScreen))
+        await pilot.pause(0.1)
+        assert not prompt.browsing
+        tui.app.close_approval()
+        await tui.until(pilot, lambda: not isinstance(tui.app.screen, ApprovalScreen))
+        await pilot.press("escape")
+        assert prompt.browsing
+        await pilot.press("ctrl+p")
+        await pilot.pause(0.2)
+        assert not prompt.browsing
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        block = _replies(tui)[-1]
+        await tui.send(pilot, "/status")
+        await tui.until(pilot, lambda: any("last request:" in t for t in tui.blocks("harness")))
+        assert block.fold is Fold.PREVIEW  # Enter sent the line; it toggled nothing
+        await tui.send(pilot, "/exit")
+
+
+async def test_sending_while_browsing_goes_to_the_end(tmp_path):
+    """A line sent (`ctrl+n`, a palette entry) always goes to the end, browsing or not
+    (review finding 4)."""
+    tui = Tui(tmp_path)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        await tui.ready(pilot)
+        _fill(tui, 20, long_reply(40))
+        await pilot.pause(0.2)
+        await pilot.press("escape", "home")
+        await pilot.pause(0.1)
+        log = tui.app._log()
+        assert log.scroll_y < log.max_scroll_y
+        tui.app.start_turn("pregunta nueva")
+        await pilot.pause(0.2)
+        assert log.scroll_y == log.max_scroll_y
+        await pilot.press("escape")
+        await tui.send(pilot, "/exit")
+
+
+async def test_output_does_not_move_the_pane_while_browsing_at_the_end(tmp_path):
+    """Browsing at the end of the pane, new output does not scroll it (review finding 7: the
+    browse check of `_follow`)."""
+    tui = Tui(tmp_path)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        await tui.ready(pilot)
+        _fill(tui, 10, long_reply(40))
+        await pilot.pause(0.2)
+        await pilot.press("escape")  # the newest block, at the end
+        await pilot.pause(0.1)
+        log = tui.app._log()
+        before = log.scroll_y
+        assert before == log.max_scroll_y
+        tui.app.show_rows(foreign_rows(long_reply(40), UNCUT, markdown=True)[0], "mock")
+        await pilot.pause(0.2)
+        assert log.scroll_y == before < log.max_scroll_y
+        await pilot.press("escape")
+        await tui.send(pilot, "/exit")
+
+
+def test_only_the_harness_own_lines_set_a_turns_state():
+    """A note path that reads like a skill status, or an interrupted line that mentions
+    `uncertain`, does not set the state (review finding 5)."""
+    assert blocks.turn_state(["omitted: notes/x skill: run r1 is approved"], True,
+                             False) == "completed"
+    assert blocks.turn_state(["skill: run r1 is approved"], False, False) == "approved"
+    assert blocks.turn_state(["|+skill: run r1 is approved"], True, False) == "completed"
+    assert blocks.turn_state(["interrupted: /skill was stopped; uncertain"], False,
+                             False) == "interrupted"
+    assert blocks.turn_state(["interrupted: request 7 is uncertain: the prompt"], False,
+                             False) == "uncertain"
+
+
+async def test_a_vault_line_cannot_set_a_turns_state(tmp_path):
+    tui = Tui(tmp_path)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        await tui.ready(pilot)
+        turn = _turn_with(tui, "pregunta", ["omitted: notes/x skill: run r1 is approved"])
+        turn.set_closed(True, manual=True)
+        assert "approved" not in str(turn.summary_line.render()).split("›")[0]
+        await tui.send(pilot, "/exit")
+
+
+async def test_ctrl_c_with_nothing_in_flight_does_not_mark_the_last_turn(tmp_path):
+    """Ctrl+C at an idle prompt prints a hint, not an interruption of the last turn (review
+    finding 6)."""
+    tui = Tui(tmp_path)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        await _ask(tui, pilot, "Respuesta.", "pregunta")
+        await pilot.press("ctrl+c")
+        await tui.until(pilot, lambda: any("conversation is still open" in t
+                                           for t in tui.blocks("harness")))
+        turn = _turns(tui)[-1]
+        turn.set_closed(True, manual=True)
+        assert "· completed " in str(turn.summary_line.render())
+        await tui.send(pilot, "/exit")
+
+
+def test_harness_lines_of_different_kinds_are_separate_blocks():
+    """A run of one kind is one block; a line of another kind starts a new one (review
+    finding 7)."""
+    assert blocks.category("warning: x", foreign=False, label=None) == blocks.ALERT
+    assert blocks.category("omitted: x", foreign=False, label=None) != blocks.CONTEXT
+    assert blocks.category("attached: x", foreign=False, label=None) != blocks.CONTEXT
+
+
+async def test_harness_lines_of_different_kinds_are_separate_blocks_on_screen(tmp_path):
+    tui = Tui(tmp_path)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        await tui.ready(pilot)
+        tui.app.start_turn("/status")
+        tui.app.show_rows(harness_rows(["context: demo, 1 note(s)"], None), None)
+        tui.app.show_rows(harness_rows(["last request: synthetic"], None), None)
+        tui.app.show_rows(harness_rows(["more: synthetic"], None), None)
+        items = _turns(tui)[-1].items
+        assert [b.kind for b in items] == [blocks.CONTEXT, blocks.NOTICE]
+        assert items[1].total == 2  # the run of one kind, one block
+        await tui.send(pilot, "/exit")
