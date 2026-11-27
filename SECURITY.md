@@ -46,7 +46,7 @@ El guard reconoce formatos conocidos; no detecta un secreto con forma desconocid
 
 ## Aprobaciones de Skills
 
-Una aprobación se concede solo en una terminal interactiva, escribiendo los 8 primeros caracteres del hash de la propuesta, y se registra el usuario local del sistema operativo que la concedió. **Esa identidad no es una autenticación.**
+Una aprobación se concede solo en una terminal interactiva, escribiendo los 8 primeros caracteres del hash de la propuesta o, en la pantalla completa de `chat`, pulsando «Approve» en su caja (desde el 2026-11-27). Se registra el usuario local del sistema operativo que la concedió, y cómo se concedió (`means=code` o `means=button` en la auditoría). **Esa identidad no es una autenticación.**
 
 Se garantiza:
 
@@ -56,7 +56,17 @@ Se garantiza:
 - Una aprobación está ligada a una propuesta, caduca (una respuesta después de la caducidad no la concede) y se usa una vez. Un efecto interrumpido se reconcilia antes de seguir y nunca se aplica dos veces.
 - En la conversación (`chat`, desde el 2026-11-25) el aviso es el mismo y se contesta en la misma terminal. Una línea escrita en el indicador normal es una pregunta o un comando, nunca una aprobación, aunque sea el código; no hay comando `/approve`, y Ctrl+C en el aviso lo deja sin decidir. Lo prueban `tests/unit/test_shell_skills.py` (con su control negativo) y la terminal real se cubre con la demo manual: no hay pseudoterminal portable para probarla en Windows.
 
-**No** se garantiza que haya una persona delante. Un proceso que corre con tu misma cuenta y maneja una pseudoterminal puede leer la propuesta y escribir el código: puede hacerse pasar por ti. Si alguien o algo controla tu cuenta, las aprobaciones no lo detienen. Decidido el 2026-11-24: se acepta este límite para el MVP, también para el efecto que escribe en el vault; un canal más fuerte (un diálogo del sistema operativo, un segundo dispositivo) se abriría con un change propio.
+- En la pantalla completa, el botón responde a la misma pregunta del motor, ligado al mismo hash: la caducidad, el uso único y la comprobación antes del efecto son las mismas. La pulsación es un objeto que solo devuelve la caja que se abrió para ese hash; ningún texto (escrito, pegado, de un modelo o de un fichero) lo es, y en texto plano y en la CLI esa vía no existe. Lo que protegen las reglas de la caja:
+  - un Enter de más: el foco empieza en la propuesta;
+  - lo escrito por adelantado y el clic antes de leer: los botones están deshabilitados el primer medio segundo;
+  - aprobar sin haber visto el final: «Approve» espera a que el final se muestre;
+  - un pegado: no hay dónde escribir;
+  - un rechazo por un clic de más: «Reject» pregunta otra vez;
+  - el texto ajeno que dibuja botones: es texto en su recuadro, y los botones reales están fijos abajo.
+
+  Lo prueban `tests/unit/test_shell_tui_buttons.py` y `tests/unit/test_skill_approval_buttons.py`.
+
+**No** se garantiza que haya una persona delante. Un botón no lo cambia: un programa que maneje tu terminal con tu cuenta puede pulsarlo (Tab y Enter, o un clic enviado como secuencia de ratón) igual que podía escribir el código. Un proceso que corre con tu misma cuenta y maneja una pseudoterminal puede leer la propuesta y escribir el código: puede hacerse pasar por ti. Si alguien o algo controla tu cuenta, las aprobaciones no lo detienen. Decidido el 2026-11-24: se acepta este límite para el MVP, también para el efecto que escribe en el vault; un canal más fuerte (un diálogo del sistema operativo, un segundo dispositivo) se abriría con un change propio.
 
 ## La única escritura en el vault
 

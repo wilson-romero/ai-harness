@@ -77,6 +77,9 @@ Revisión sobre `develop` = `5af28ed`; el informe vive fuera del repositorio. Ca
 - [x] 6.2 La matriz, la deuda, el README y `SECURITY.md` describen `57c413d`, no `v0.2.0`. Oráculo: `grep -n "v0.2.0\|pendiente de merge\|sin mergear" docs/security/*.md` solo deja menciones históricas (el defecto de la clave HMAC de `v0.2.0`, la definición del estado) y `scripts/check_sec_matrix.py` pasa con SEC-06 fijado a `parcial` en `sec-states.json`. Hecho: ver D6.
   - Recibo (2026-11-27): `sec-matrix: PASS (15 rows, 135 tests)`; estados: `cubierto` SEC-02, 05, 12, 14, 15; `parcial` SEC-01, 03, 04, 06, 07, 08, 09, 10, 13; `BLOCKED` SEC-11. Los campos `Windows` citan la ejecución de `57c413d` en un PC personal con Windows y excluyen lo que no estaba en ese SHA. `scripts/demo_hardening.py` → `demo: PASS`.
 
+- [x] 6.3 Segundo merge de `develop` (`1b460ea`: guarda de SQL literal y botones de aprobación). Oráculo: merge sin perder ninguna de las dos conductas; `tests/unit/test_sql_literals.py`, `tests/unit/test_skill_approval_buttons.py` y `tests/security/test_audit_findings.py` en verde sin tocar sus aserciones.
+  - Recibo (2026-11-27): merge automático, sin conflictos. La caja de la pantalla completa no pasa por `render_for_terminal` (la conversación imprime su propio aviso con `_render_approval`), así que la marca de F-04 no le afecta; el código nuevo de esta rama no tiene llamadas `execute` con SQL no literal (el único SQL, en un test, es literal con `?`). Esos tres ficheros y los de aprobación, pantalla completa y MVP → `237 passed`; `sec-matrix: PASS (15 rows, 135 tests)`, ningún test citado renombrado. La deuda 1 y el límite de SEC-12 citan ya el botón como parte de `develop`.
+
 ## 7. Verificación y demo tras el merge
 
 - [x] 7.1 Guard público, OpenSpec, portabilidad. Oráculo: `uv run python scripts/check_public_safety.py` → PASS; `openspec validate --all --strict` sin errores; `tests/unit/test_portability.py` en verde.

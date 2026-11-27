@@ -1,13 +1,13 @@
 # Deuda conocida
 
-Lo que el harness no hace, no prueba o hace de forma más débil de lo que un lector supondría, con la decisión tomada o pendiente. Escrita el 2026-11-25 sobre `develop` = `ee550b6` (`v0.2.0`) y actualizada el 2026-11-27 tras mergear `develop` = `57c413d` y corregir los hallazgos de la revisión de seguridad de ese día. Complementa la [matriz SEC](sec-matrix.md); no repite el [`README.md`](../../README.md) ni [`SECURITY.md`](../../SECURITY.md).
+Lo que el harness no hace, no prueba o hace de forma más débil de lo que un lector supondría, con la decisión tomada o pendiente. Escrita el 2026-11-25 sobre `develop` = `ee550b6` (`v0.2.0`) y actualizada el 2026-11-27 tras mergear `develop` (`57c413d` y después `1b460ea`, con los botones de aprobación y la guarda de SQL literal) y corregir los hallazgos de la revisión de seguridad de ese día. Complementa la [matriz SEC](sec-matrix.md); no repite el [`README.md`](../../README.md) ni [`SECURITY.md`](../../SECURITY.md).
 
 Decisiones posibles: **aceptado** (se convive con ello, escrito), **arreglar** (en el change que se nombra), **pendiente de Wilson**, **aplazado (proyecto educativo)**. El dueño de todas las decisiones es Wilson.
 
 ## 1. La aprobación no prueba que haya una persona delante
 
 - **Qué:** una aprobación se concede escribiendo en una terminal interactiva los 8 primeros caracteres del hash de la propuesta. Se registra el usuario local, que no es una autenticación.
-- **Riesgo:** un programa que corre con tu misma cuenta y maneja una pseudoterminal puede leer la propuesta y escribir el código: puede aprobar en tu nombre, también la escritura de la nota en el vault. Un programa que maneja la terminal de la persona puede pulsar el botón o la tecla de aprobación de la pantalla completa exactamente igual que podría escribir el código: un botón no añade ninguna prueba de que haya una persona. Además, el camino real de la terminal (`isatty()` e `input()`) no lo ejercita ningún test automático: los tests usan una terminal inyectada.
+- **Riesgo:** un programa que corre con tu misma cuenta y maneja una pseudoterminal puede leer la propuesta y escribir el código: puede aprobar en tu nombre, también la escritura de la nota en el vault. Desde `develop` = `1b460ea`, la caja de aprobación de la pantalla completa aprueba o rechaza con botones (la auditoría anota `means=button` o `means=code`); el código escrito sigue en texto plano y en la línea de órdenes. Un programa que maneja la terminal de la persona puede pulsar ese botón exactamente igual que podría escribir el código: un botón no añade ninguna prueba de que haya una persona. Además, el camino real de la terminal (`isatty()` e `input()`) no lo ejercita ningún test automático: los tests usan una terminal inyectada.
 - **Decisión:** aceptado por Wilson el 2026-11-24 para el MVP. Un canal más fuerte (diálogo del sistema, segundo dispositivo) necesitaría un change propio.
 - **Dueño:** Wilson.
 
