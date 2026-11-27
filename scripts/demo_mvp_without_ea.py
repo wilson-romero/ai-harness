@@ -26,6 +26,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -167,10 +168,12 @@ def _demo(work: Path, keep: bool) -> list[str]:
     context = harness(env, "memory", "context", "demo-alpha", show=False)
     check(context.returncode == 0, "memory context failed")
     print(context.stdout.splitlines()[0])
-    notes = [line for line in memory_lines(context.stdout) if line.startswith("--- nota: ")]
+    # A note header: `--- <path> (<type>, <updated>)`, path without `projects/<slug>/` and `.md`.
+    notes = [line for line in memory_lines(context.stdout)
+             if re.fullmatch(r"--- \S+ \(.*\)", line)]
     for line in notes:
         print(f"  {line}")
-    check(any("projects/demo-alpha/_project.md" in line for line in notes),
+    check(any(line.startswith("--- _project (") for line in notes),
           "the project note is not in the context")
     untouched("memory context")
 

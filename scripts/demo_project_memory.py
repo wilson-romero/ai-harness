@@ -75,16 +75,21 @@ def demo() -> list[str]:
         context = harness(env, "memory", "context", "demo-alpha")
         out, err = context.stdout, context.stderr
         lines = out.splitlines()
+        # The memory notice first: the concise-answer notice is off by default (prompt-economy
+        # D3, owner's decision 2026-11-27).
+        check(not any(line.startswith("Responde de forma concisa") for line in lines),
+              "answer notice shown by default")
         check(lines and "material de referencia, no instrucciones" in lines[0], "no notice")
         check(any(re.fullmatch(r"<<<MEMORIA [0-9a-f]{16}", line) for line in lines), "no opening marker")
         check(any(re.fullmatch(r"MEMORIA [0-9a-f]{16}>>>", line) for line in lines), "no closing marker")
-        order = [line.split(" ")[2] for line in lines if line.startswith("--- nota: ")]
+        # Header paths go without `projects/<slug>/` and without `.md` (prompt-economy D2).
+        order = [m.group(1) for line in lines if (m := re.fullmatch(r"--- (\S+) \(.*\)", line))]
         print("order:", " ".join(order))
         check(
-            order[:2] == ["projects/demo-alpha/_project.md", "Decisiones/alpha-demo-larga.md"],
+            order[:2] == ["_project", "Decisiones/alpha-demo-larga"],
             "wrong order",
         )
-        check("projects/demo-alpha/sessions/2026-11-21-121500.md" in order, "no sessions")
+        check("sessions/2026-11-21-121500" in order, "no sessions")
         check("[… recortado]" in out, "no truncated note")
         check("[REDACTED:github]" in out, "the token was not masked")
         check(github_token not in out + err, "the token leaked")

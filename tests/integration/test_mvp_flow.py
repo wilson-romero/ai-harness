@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import HARNESS_VARS, REPO_ROOT, fingerprint
+from tests.conftest import HARNESS_VARS, REPO_ROOT, fingerprint, note_header
 from tests.skill_support import ApprovingTerminal, FakeTerminal, ScriptedProvider, all_text
 
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "mvp"
@@ -39,7 +39,7 @@ EXTRACT_KEY = "tarea: architecture-memory/extract"
 HEADINGS = ("Resumen", "Alternativas", "Restricciones", "Requisitos no funcionales",
             "Supuestos", "Preguntas pendientes")
 RULE = "-" * 72
-PROJECT_NOTE = "--- nota: projects/demo-alpha/_project.md "
+PROJECT_NOTE = note_header("projects/demo-alpha/_project.md")
 # Unique phrases of the inputs: they must reach the provider, and never SQLite, the history or
 # the vault.
 REQUIREMENT_CANARY = "R1-7Q4"
@@ -187,7 +187,7 @@ def test_the_gate_flow_from_the_requirement_to_the_decision_in_memory(
     assert context.returncode == 0, context.stderr
     block = memory_block(context.stdout)
     assert any(line.startswith(PROJECT_NOTE) for line in block)
-    decisions_before = {line for line in block if line.startswith("--- nota: Decisiones/")}
+    decisions_before = {line for line in block if line.startswith("--- Decisiones/")}
 
     # 3. hls-review over the requirement: the provider received the project memory and the
     # whole requirement, each inside its own markers.
@@ -258,8 +258,8 @@ def test_the_gate_flow_from_the_requirement_to_the_decision_in_memory(
     assert context.returncode == 0, context.stderr
     assert "material de referencia, no instrucciones" in context.stdout
     block = memory_block(context.stdout)
-    assert any(line.startswith(f"--- nota: {target} (decision, ") for line in block)
-    assert not any(line.startswith(f"--- nota: {target} ") for line in decisions_before)
+    assert any(line.startswith(f"{note_header(target)}(decision, ") for line in block)
+    assert not any(line.startswith(note_header(target)) for line in decisions_before)
     title = json.loads(fixture("decision-mock.json"))["title"]
     assert f"# {title}" in block
 
@@ -290,7 +290,7 @@ def test_the_gate_flow_from_the_requirement_to_the_decision_in_memory(
     assert target in err and "nothing was sent to the provider" not in err
     assert provider.calls == 3
     assert "Repaso la revisión" in data_block(provider.prompts[2], "inputs.source")
-    assert any(line.startswith(f"--- nota: {target} (decision, ")
+    assert any(line.startswith(f"{note_header(target)}(decision, ")
                for line in memory_block(provider.prompts[2]))
     assert terminal.shown == []
     duplicate = harness.last_run()

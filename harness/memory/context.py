@@ -21,7 +21,13 @@ from harness.memory.notes import (
     load_note,
     project_section,
 )
-from harness.memory.paths import PROJECTS_DIR, SkippedRead, resolve_project, walk_vault
+from harness.memory.paths import (
+    NOTE_SUFFIX,
+    PROJECTS_DIR,
+    SkippedRead,
+    resolve_project,
+    walk_vault,
+)
 from harness.text.safe_text import neutralise_delimiters, safe_line, safe_text
 
 NOTE_MAX_BYTES = 3000
@@ -72,6 +78,20 @@ def new_nonce() -> str:
     return secrets.token_hex(NONCE_HEX_CHARS // 2)
 
 
+def header_path(relative: str, slug: str) -> str:
+    """The path a note header shows (prompt-economy D2): without the `projects/<slug>/` prefix,
+    which the notice already names, and without `.md`, which every note has.
+
+    Nothing is lost: a project note is only ever `_project.md` or `sessions/<file>.md`, and a
+    curated note starts with its folder (`Decisiones/`, `Lecciones/`, `Memoria-CC/`), so the
+    vault path is always `projects/<slug>/` + the shown path when it does not start with a
+    curated folder, and the shown path otherwise, plus `.md`.
+    """
+    prefix = f"{PROJECTS_DIR}/{slug}/"
+    shown = relative[len(prefix):] if relative.startswith(prefix) else relative
+    return shown.removesuffix(NOTE_SUFFIX)
+
+
 def compose_prompt(context: ProjectContext, question: str) -> str:
     """What the provider receives: the marked block first, the user's question last."""
     return f"{context.text}\n\n{question}"
@@ -106,7 +126,7 @@ def build_context(
         share = remaining // (len(slots) - position)
         used = 0
         for slot in section_slots:
-            slot.rendered = _render(slot.note, share - used - 1, first=not used)
+            slot.rendered = _render(slot.note, share - used - 1, first=not used, slug=slug)
             if slot.rendered is None:
                 break  # the order inside a section is never skipped
             used += slot.cost
@@ -118,7 +138,7 @@ def build_context(
         for slot in section_slots:
             if slot.rendered is not None:
                 continue
-            slot.rendered = _render(slot.note, remaining - 1, first=False)
+            slot.rendered = _render(slot.note, remaining - 1, first=False, slug=slug)
             if slot.rendered is None:
                 break
             remaining -= slot.cost
@@ -128,7 +148,7 @@ def build_context(
             if slot.rendered is None or not slot.rendered[1] or remaining <= 0:
                 continue
             before = slot.cost
-            longer = _render(slot.note, before - 1 + remaining, first=True)
+            longer = _render(slot.note, before - 1 + remaining, first=True, slug=slug)
             if longer is not None and _bytes(longer[0]) + 1 > before:
                 slot.rendered = longer
                 remaining -= slot.cost - before
@@ -218,7 +238,9 @@ def _select(
     return [(name, notes) for name, notes in groups if notes], skipped, walk.truncated
 
 
-def _render(note: Note, room: int, *, first: bool) -> tuple[str, bool, int, str] | None:
+def _render(
+    note: Note, room: int, *, first: bool, slug: str
+) -> tuple[str, bool, int, str] | None:
     """Header and body of one note, cleaned, redacted, neutralised and cut to size.
 
     `room` is the number of bytes the note may take. The body is cut to NOTE_MAX_BYTES, and
@@ -231,7 +253,7 @@ def _render(note: Note, room: int, *, first: bool) -> tuple[str, bool, int, str]
     kind = fields.get("type")
     kind = kind if isinstance(kind, str) and kind else "-"
     # The whole header is one line: a newline in a file name or in `type` cannot add lines.
-    header = safe_line(f"--- nota: {note.relative} ({kind}, {note.updated or '-'})")
+    header = safe_line(f"--- {header_path(note.relative, slug)} ({kind}, {note.updated or '-'})")
     header_text = neutralise_delimiters(header.text)
     body = safe_text(note.body.strip("\n"))
     body_text = neutralise_delimiters(body.text)

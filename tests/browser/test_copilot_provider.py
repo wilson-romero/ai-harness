@@ -21,6 +21,7 @@ from playwright.async_api import Error as PlaywrightError
 
 from harness.browser.edge import EdgeLauncher
 from harness.config import Settings
+from harness.core.answer_style import CONCISE_NOTICE
 from harness.core.service import SessionService
 from harness.providers.copilot_ui import measurement_path
 from harness.providers.copilot_web import REPLY_MAX_CHARS, CopilotWebProvider
@@ -69,7 +70,13 @@ def app(copilot_app: SyntheticCopilot, data_dir: Path) -> SyntheticCopilot:
 
 @pytest.fixture
 def env(app: SyntheticCopilot, tmp_path: Path, data_dir: Path) -> dict[str, str]:
-    """Environment of a Copilot command against the synthetic chat."""
+    """Environment of a Copilot command against the synthetic chat.
+
+    These tests exercise the provider: what is typed, read, bound and refused. They compare
+    the typed text with the question, so the harness's concise-answer notice (prompt-economy
+    D3) must be off. It is off by default since 2026-11-27; it stays explicit here so that a
+    change of that default cannot change what these tests type. `notice_env` and the tests
+    that use it set it on, end to end through the page."""
     return {
         "HARNESS_DATA_DIR": str(data_dir),
         "HARNESS_PROVIDER": "copilot_web",
@@ -77,7 +84,14 @@ def env(app: SyntheticCopilot, tmp_path: Path, data_dir: Path) -> dict[str, str]
         "HARNESS_EDGE_PROFILE": str(tmp_path / "edge-profile"),
         "HARNESS_REQUEST_TIMEOUT_S": "40",
         "HARNESS_TEST_HEADLESS": "1",
+        "HARNESS_CONCISE_ANSWERS": "off",
     }
+
+
+@pytest.fixture
+def notice_env(env: dict[str, str]) -> dict[str, str]:
+    """The same environment with the concise-answer notice on, as in real use."""
+    return env | {"HARNESS_CONCISE_ANSWERS": "on"}
 
 
 @pytest.fixture
@@ -201,6 +215,46 @@ def test_prompt_at_the_limit_arrives_whole(cli, env, app):
     code, out, err = cli("ask", session_id, prompt, **env, HARNESS_COPILOT_MAX_PROMPT_CHARS="3000")
     assert code == 0, err
     assert [p.prompt for p in app.prompts] == [prompt]
+
+
+def test_with_the_notice_the_limit_counts_it_and_says_whose_text_is_long(cli, notice_env, data_dir,
+                                                                         app):
+    """The limit is on everything typed: the notice, a blank line and the question. A question
+    that fits only without the notice is refused, and the error says which part is whose."""
+    sent = len(CONCISE_NOTICE) + 2
+    session_id = new_session(cli, notice_env)
+    over = "x" * (3000 - sent + 1)
+    code, out, err = cli("ask", session_id, over, **notice_env,
+                         HARNESS_COPILOT_MAX_PROMPT_CHARS="3000")
+    assert code != 0 and out == ""
+    assert "the prompt has 3001 characters" in err and "is 3000" in err
+    assert f"Your text is {len(over)} characters; the other {sent} are the harness's own: " \
+           "the concise-answer notice (HARNESS_CONCISE_ANSWERS=off removes the notice)" in err
+    assert query(data_dir, "SELECT count(*) FROM requests") == [(0,)] and app.prompt_count == 0
+    at = ("limite " * 1000)[:3000 - sent]
+    code, out, err = cli("ask", session_id, at, **notice_env,
+                         HARNESS_COPILOT_MAX_PROMPT_CHARS="3000")
+    assert code == 0, err
+    assert [p.prompt for p in app.prompts] == [f"{CONCISE_NOTICE}\n\n{at}"]  # whole, 3000
+
+
+def test_with_the_notice_a_question_is_typed_after_it_and_bound(cli, notice_env, data_dir, app):
+    """Real use: the page receives the notice, a blank line and the question; the reply is
+    read whole and the session is bound to that conversation, where the next one goes too."""
+    session_id = new_session(cli, notice_env)
+    code, out, err = cli("ask", session_id, "primera ZQX-END-1", **notice_env)
+    assert code == 0, err
+    assert out.rstrip().endswith("ZQX-END-1") and "Responde de forma concisa" not in out
+    status, ref = session_row(data_dir, session_id)
+    assert status == "active" and re.fullmatch(r"[0-9a-f]{16}", ref)
+    code, out, err = cli("ask", session_id, "segunda ZQX-END-2", **notice_env)
+    assert code == 0, err
+    assert "ZQX-END-2" in out and "ZQX-END-1" not in out
+    assert session_row(data_dir, session_id) == ("active", ref)
+    assert prompts_in(app, ref) == [f"{CONCISE_NOTICE}\n\nprimera ZQX-END-1",
+                                    f"{CONCISE_NOTICE}\n\nsegunda ZQX-END-2"]
+    # Copilot's content is never stored (its D11), and the notice is not either.
+    assert query(data_dir, "SELECT count(*) FROM messages WHERE content IS NOT NULL") == [(0,)]
 
 
 

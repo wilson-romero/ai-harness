@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid7
 
+from harness.core.answer_style import with_notice
 from harness.core.contracts import (
     HistoryEntry,
     LLMRequest,
@@ -34,6 +35,7 @@ from harness.text.safe_text import safe_foreign_line
 from harness.providers.base import (
     AuthenticationRequired,
     LLMProvider,
+    PromptTooLong,
     ProviderError,
     ProviderUncertain,
     RemoteConversationLost,
@@ -58,6 +60,19 @@ def is_valid_unicode(text: str) -> bool:
 # A remote reference is an identifier the provider read from the remote side: only a plain
 # token is stored or ever printed (design D6).
 REMOTE_REF = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def _own_share(sent_text: str, prompt: str, context: ProjectContext | None,
+               notice: str | None) -> str:
+    """How much of an over-long prompt is the person's and how much the harness's own, so the
+    size error does not blame the question for the notice and the memory block."""
+    own = [name for name, present in (("the concise-answer notice", notice is not None),
+                                      ("the project memory", context is not None)) if present]
+    if not own:
+        return f"All {len(sent_text)} characters are your text"
+    hint = " (HARNESS_CONCISE_ANSWERS=off removes the notice)" if notice is not None else ""
+    return (f"Your text is {len(prompt)} characters; the other {len(sent_text) - len(prompt)} "
+            f"are the harness's own: {' and '.join(own)}{hint}")
 
 
 def accepts_events(provider: LLMProvider) -> bool:
@@ -87,12 +102,22 @@ class SessionService:
         provider_factory: ProviderFactory,
         default_provider: str,
         timeout_s: float,
+        *,
+        answer_notice: str | None = None,
     ) -> None:
         self._conn = conn
+        # Sent first with every plain question (`ask`, `ask_taken`), never with a Skill step
+        # (prompt-economy D3). None: no notice.
+        self._answer_notice = answer_notice
         self._data_dir = data_dir
         self._provider_factory = provider_factory
         self._default_provider = default_provider
         self._timeout_s = timeout_s
+
+    @property
+    def answer_notice(self) -> str | None:
+        """The notice plain questions carry, to show it where the memory block is shown."""
+        return self._answer_notice
 
     # -- recovery ---------------------------------------------------------------------------
 
@@ -235,7 +260,8 @@ class SessionService:
         if not lock.acquire():
             raise SessionBusy(f"session {session.session_id} already has a question in progress")
         try:
-            return await self._ask_locked(session.session_id, provider, prompt, context)
+            return await self._ask_locked(session.session_id, provider, prompt, context,
+                                          notice=self._answer_notice)
         finally:
             lock.release()
 
@@ -282,7 +308,7 @@ class SessionService:
             self._check_project(session, context.project)
         sent = prompt if attachment is None else f"{attachment}\n\n{prompt}"
         return await self._ask_locked(session.session_id, provider, sent, context,
-                                      stored_text=prompt)
+                                      stored_text=prompt, notice=self._answer_notice)
 
     def require_session(self, raw_session_id: str) -> Session:
         return self._require_session(raw_session_id)
@@ -320,6 +346,7 @@ class SessionService:
         *,
         stored_text: str | None = None,
         timeout_s: float | None = None,
+        notice: str | None = None,
     ) -> LLMResponse:
         deadline_s = self._timeout_s if timeout_s is None else timeout_s
         # Read under the session lock: nobody else can change the session until it is released.
@@ -330,12 +357,17 @@ class SessionService:
                 f"session {session_id} is closed: its remote conversation could not be found "
                 "again. Create a new session"
             )
-        # The provider receives the memory block and the question; only the question is ever
-        # stored, and only when the provider's content is synthetic (D7).
+        # The provider receives the answer notice, the memory block and the question; only the
+        # question is ever stored, and only when the provider's content is synthetic (D7). The
+        # notice is inside the request's prompt, so the provider's size check counts it.
         sent_text = compose_prompt(context, prompt) if context is not None else prompt
+        sent_text = with_notice(notice, sent_text)
         check = getattr(provider, "check", None)
         if check is not None:
-            check(sent_text)  # configuration, measurement, size: before anything is recorded
+            try:
+                check(sent_text)  # configuration, measurement, size: before anything is recorded
+            except PromptTooLong as exc:
+                raise PromptTooLong(f"{exc}. {_own_share(sent_text, prompt, context, notice)}") from None
         with_events = accepts_events(provider)
         warnings: list[str] = []
         cut: list[bool] = []
