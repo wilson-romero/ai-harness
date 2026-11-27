@@ -20,6 +20,9 @@ MIN_PREVIEW_LINES = 8  # the fewest rows a folded block shows
 PREVIEW_RESERVE = 7  # rows of the pane kept for the turn line, borders, footer and margins
 FOLD_GRACE = 4  # a block only this much longer than the preview is shown whole
 PREVIEW_MAX_CHARS = 32_000  # of the rows a folded block shows (bounds the work of a preview)
+# A reply arrives whole (reply-rendering D5) unless its rows hold more characters than this:
+# then it arrives folded, which bounds the work of drawing it (collapsible-blocks D6).
+ARRIVE_WHOLE_MAX_CHARS = 64_000
 KEEP_OPEN_TURNS = 2  # the newest turn and the one before it never fold by themselves
 EXCERPT_MAX = 200  # characters of foreign or typed text in a collapsed line
 
@@ -179,9 +182,17 @@ def is_not_shown_notice(line: str) -> bool:
 def default_fold(kind: str, rows: list[Row], preview: int,
                  height_of: HeightOf = _one_row) -> Fold:
     """Metadata collapsed to one line once it has more than one; alerts, the omitted and
-    attached lines and what `/context` shows whole; anything else whole unless it takes more
+    attached lines and what `/context` shows whole; a reply whole (reply-rendering D5) unless
+    its rows hold more than ARRIVE_WHOLE_MAX_CHARS; anything else whole unless it takes more
     of the pane than the preview (and its grace), then folded."""
     if kind in ALWAYS_WHOLE:
+        return Fold.EXPANDED
+    if kind == REPLY:
+        chars = 0
+        for row in rows:
+            chars += sum(len(text) for _, text in row)
+            if chars > ARRIVE_WHOLE_MAX_CHARS:
+                return Fold.PREVIEW
         return Fold.EXPANDED
     if kind in METADATA:
         return Fold.COLLAPSED if len(rows) > 1 else Fold.EXPANDED

@@ -136,8 +136,13 @@ async def test_nothing_reaches_the_buttons_while_the_box_arms(tmp_path):
 
 
 async def test_keys_typed_ahead_of_the_box_cannot_approve(tmp_path):
-    """Keys sent with the skill line, before the box exists, land while it arms."""
-    tui, effect = _skill_tui(tmp_path, arm_s=0.5)
+    """Keys sent with the skill line, before the box exists, land while it arms.
+
+    The arming is driven by the test, not by the clock (reply-rendering, 2026-11-27): with a
+    0.5 s arming a loaded machine could arm the box before the keys below arrived, and then
+    they were a person's keys on an armed box. Here the box cannot arm by itself; every key
+    is delivered while it is unarmed (checked), then it is armed and nothing is left to act."""
+    tui, effect = _skill_tui(tmp_path, arm_s=3600.0)
     async with tui.app.run_test(size=SIZE) as pilot:
         await tui.ready(pilot)
         prompt = tui.app.query_one("#prompt", Input)
@@ -145,7 +150,13 @@ async def test_keys_typed_ahead_of_the_box_cannot_approve(tmp_path):
         await pilot.press("enter", "tab", "enter", "tab", "enter", "space", "enter")
         await tui.until(pilot, lambda: isinstance(tui.app.screen, ApprovalScreen))
         await pilot.press("tab", "enter")
-        await pilot.pause(0.8)  # armed by now: nothing queued is left to act
+        await pilot.pause(0.2)
+        box = _box(tui)
+        assert not box.armed and not box.pressed  # every key above landed before the arming
+        box.opened -= 3600.0  # the arming time has passed, as for the timer below
+        box._arm()  # what the timer does after `arm_s`
+        await pilot.pause(0.2)  # armed now: nothing queued is left to act
+        assert box.armed
         assert isinstance(tui.app.screen, ApprovalScreen) and not _box(tui).pressed
         await pilot.press("ctrl+c")
         await _finish(tui, pilot)

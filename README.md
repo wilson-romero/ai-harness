@@ -75,16 +75,18 @@ Al entrar se ve el proveedor, la sesión y el proyecto. Una línea normal es una
 |---|---|
 | `/help` | Lista los comandos. |
 | `/status` | Sesión, proyecto, proveedor, última solicitud, modo de respuesta y adjunto pendiente. |
-| `/new [--project SLUG] [NOMBRE]` | Pasa a una sesión nueva; la anterior queda libre y sin cambios. |
+| `/new [--project SLUG] [NOMBRE]` | Pasa a una sesión nueva; la anterior queda libre y sin cambios. Forma corta: `/new SLUG` si `SLUG` es una carpeta de `projects/` del vault. |
 | `/sessions` | Lista numerada de sesiones. |
-| `/resume N` | Pasa a la sesión número N de la última `/sessions` (un número, no un identificador). |
+| `/resume N` o `/resume ID` | Pasa a la sesión número N de la última `/sessions`, o a la sesión con ese identificador (entero, o sus primeros 8 caracteres o más si solo una sesión empieza así). |
 | `/history` | Historial de esta sesión, y de ninguna otra. |
 | `/memory TÉRMINOS` | Lo mismo que `memory search` (dentro del proyecto de la sesión, si lo tiene). |
 | `/context` | Lo mismo que `memory context` para el proyecto de la sesión. |
-| `/skill NOMBRE [CLAVE=VALOR…] [--file CLAVE=RUTA…]` | Ejecuta un Skill en esta sesión, como `skill run`. Su aprobación se pide ahí mismo, con el aviso de siempre. |
+| `/skill NOMBRE [CLAVE=VALOR…] [--file CLAVE=RUTA…]` | Ejecuta un Skill en esta sesión, como `skill run`, con el proyecto de la sesión. Su aprobación se pide ahí mismo, con el aviso de siempre. Forma corta: `/skill NOMBRE RUTA` si el Skill declara una sola entrada. |
 | `/file RUTA` | Adjunta un fichero de texto (hasta 64 KiB, UTF-8, un fichero normal: no un enlace, una tubería ni un dispositivo) a la **siguiente** pregunta. Va marcado como datos y no se guarda nunca. |
 | `/mode [auto\|quick\|deep]` | Sin argumento, el modo de respuesta de la sesión; con uno, lo cambia y lo recuerda. No envía nada. Ver [Copilot Web](#copilot-web). |
 | `/exit` | Sale. El fin de entrada (Ctrl+D; en Windows, Ctrl+Z e Intro) también. |
+
+**Formas cortas** (`command-completion`). Las formas largas siguen igual. Basta el principio del nombre de un comando si solo uno empieza así (`/sk` es `/skill`, `/c` es `/context`); si hay más de uno (`/s`), es un error que los nombra y no se ejecuta nada. `/new demo-alpha` es `/new --project demo-alpha` cuando `demo-alpha` es una carpeta de `projects/`; si no lo es, sigue siendo el nombre de la sesión. `/skill architecture-memory RUTA` es `/skill architecture-memory --file source=RUTA`, porque ese Skill declara una sola entrada (`source`). `/file` y `--file` leen `~/…` de la carpeta personal. Antes de ejecutar un comando escrito en forma corta, la conversación muestra el comando entero (`running: /skill architecture-memory --file source=…`); en la pantalla completa, además, se ve en el borde de la entrada mientras se escribe. Un comando escrito entero no se repite.
 
 - **Ctrl+C** durante una pregunta la interrumpe: queda `uncertain` si el prompt ya había salido, `failed` si no, nunca se reenvía y la conversación sigue. Ctrl+C mientras se espera una línea solo recuerda cómo salir. Ctrl+C durante `/skill` lo detiene: si el paso del modelo estaba en curso, queda `uncertain` (no se reenvía) y la conversación escribe los dos comandos que lo continúan o lo cancelan, que se usan tras dejar la sesión. Ctrl+C en el aviso de aprobación lo deja sin decidir: no se aplica nada. Ctrl+C mientras el proveedor abre sus recursos, al entrar, termina la conversación (código 130) sin preguntar nada; mientras los cierra, al salir, deja de esperar y avisa de que algo puede haber quedado abierto.
 - **Lo que se escribe mientras nadie lee se queda en la terminal** y es la primera línea que recibe la lectura siguiente, también el aviso de aprobación. No puede aprobar (el código sale de un hash que aún no se había mostrado). Tampoco rechaza sola: en la conversación, tras `n` el aviso pide la palabra `reject` completa, y cualquier otra respuesta deja la aprobación pendiente (sin cancelar la ejecución; se continúa con `skill resume` tras dejar la sesión) y no se envía ni se ejecuta. En texto plano (`--plain`), un pegado que contenga `n` y `reject` rechaza. En la pantalla completa, la caja de aprobación se decide con botones que no tienen el foco al abrirse y están deshabilitados el primer medio segundo, y lo escrito mientras el núcleo trabaja no se envía. `skill run` desde la línea de órdenes sigue rechazando con `n`.
@@ -94,43 +96,45 @@ Al entrar se ve el proveedor, la sesión y el proyecto. Una línea normal es una
 
 ### Aspecto
 
-En una consola, la conversación ocupa la pantalla completa ([Textual](https://textual.textualize.io/), la única librería de terminal del proyecto): la conversación con su propio desplazamiento, un panel con la sesión a la derecha, la entrada fija abajo y los atajos al pie. Así se ve en 100 × 30, con el Mock, el vault sintético y una respuesta sintética, tras `/new --project demo-alpha Demo` (captura de texto de la pantalla tomada con el `Pilot` de Textual, sin colores):
+En una consola, la conversación ocupa la pantalla completa ([Textual](https://textual.textualize.io/), la única librería de terminal del proyecto): la conversación con su propio desplazamiento, un panel con la sesión a la derecha (desde 100 columnas), la entrada fija abajo y los atajos al pie. Así se ve en 100 × 30, con el Mock y dos preguntas con respuestas sintéticas (captura de texto de la pantalla tomada con el `Pilot` de Textual, sin colores; las líneas de bienvenida del harness ya están plegadas):
 
 ```text
- session Demo (01a21c5e): this pane shows what happened in it     │ Session
- since the conversation opened; /history lists its stored         │  Demo
- messages                                                         │  01a21c5e-41cc-74b5-bc79-d2a2a2
-                                                                  │ c55f75
- █ revisa este requerimiento                                      │ Project
- context: demo-alpha, 7 note(s) included, 0 truncated, 0 omitted, │  demo-alpha
- 1556 of 8192 bytes, 1 entry skipped, 0 credential(s) redacted    │ Provider
-                                                                  │  mock
- ╭─ mock ───────────────────────────────────────────────────────╮ │ Sends
- │ ## Resumen                                                   │ │  1
- │ El requerimiento pide **avisar** de pedidos con              │ │ Last request
- │ `order.created`.                                             │ │  completed
- │                                                              │ │ Memory
- │ ## Preguntas pendientes                                      │ │  7 note(s) in the last question
- │ - ¿Qué pasa con un evento que no se publica?                 │ │   projects/demo-alpha/_project.
- │ [@click=app.quit]esto no es un enlace[/]                     │ │ md
- ╰──────────────────────────────────────────────────────────────╯ │   Decisiones/alpha-mensajeria.m
-                                                                  │ d
-                                                                  │   Lecciones/2026-11-10-reintent
-                                                                  │ os-idempotentes.md
-                                                                  │   Memoria-CC/project_alpha-inte
-                                                                  │ graciones.md
-                                                                  │   projects/demo-alpha/sessions/
-                                                                  │ 2026-11-21-121500.md
-                                                                  │   projects/demo-alpha/sessions/
-                                                                  │ 2026-11-20-111500.md
-▊▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▎
-▊  Type a question, or / for a command                                                             ▎
-▊▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▎
- ctrl+p commands  ctrl+c interrupts  ctrl+q leaves  ctrl+n new  esc blocks  ctrl+o open/close
+    ▸ harness · 4 lines · done  ai-harness - mock session 01a21…    │  Session
+                                                                    │   chat 2026-11-27 12:04
+  █ revisa este requerimiento 0                                     │   01a21df7-8eef-76f9-a1c2-0e
+                                                                    │  18af454a62
+  ╭─ mock ───────────────────────────────────────────────────────╮  │  Project
+  │ ## Resumen                                                   │  │   -
+  │ El requerimiento pide **avisar** de pedidos con              │  │  Provider
+  │ `order.created`.                                             │  │   mock
+  │                                                              │  │  Sends
+  │ ## Preguntas pendientes                                      │  │   2
+  │ - Que pasa con un evento que no se publica?                  │  │  Last request
+  ╰──────────────────────────────────────────────────────────────╯  │   completed
+                                                                    │  Memory
+  █ revisa este requerimiento 1                                     │   0 note(s) in the last
+                                                                    │  question
+  ╭─ mock ───────────────────────────────────────────────────────╮  │
+  │ ## Resumen                                                   │
+  │ El requerimiento pide **avisar** de pedidos con              │
+  │ `order.created`.                                             │
+  │                                                              │
+  │ ## Preguntas pendientes                                      │
+  │ - Que pasa con un evento que no se publica?                  │
+  ╰──────────────────────────────────────────────────────────────╯
+
+
+
+  ▊▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▎
+  ▊ Type a question, or / for a command                                                          ▎
+  ▊▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▎
+  ctrl+p commands  ctrl+c interrupts  ctrl+q leaves  ctrl+n new  esc blocks  ctrl+o open/close
 ```
 
-- **Bloques:** lo que escribes (con una barra a la izquierda), las líneas del harness (en gris) y el texto ajeno, siempre dentro de un recuadro cuyo título pone el harness (el nombre del proveedor); plegado, de él solo queda un extracto de una línea tras `| `. Lo de dentro del recuadro se muestra como caracteres: `[@click=…]`, `[link=…]` o una secuencia de escape no hacen nada. El resaltado de Markdown es el de siempre: colorea sin quitar ni añadir un carácter.
-- **Bloques que se pliegan** (`collapsible-blocks`): cada turno (tu línea y lo que vino después) y cada bloque de un turno se abren y se cierran. Al llegar, una respuesta que cabe en el panel se ve entera; una más larga muestra sus primeras filas y el borde de abajo dice cuántas líneas faltan (`… 30 more lines · enter/click to expand`). Los pasos de una Skill quedan en una línea. Siempre enteros: los errores y avisos, las líneas `omitted:` y `attached:` (la nota que no cupo, el fichero que sí se envió), cómo terminó una Skill (`skill: run … is completed`) y lo que aplicó (`applied:`) y lo que muestra `/context`, que es exactamente lo que se envía. Al enviar una pregunta, los turnos anteriores al penúltimo se pliegan a una línea (`▸ you → mock · 42 lines · completed  › revisa el HLS`), salvo los que abriste o cerraste tú (tu elección se mantiene) y los que tuvieron un error o un aviso; plegado a mano, un turno así lo dice (`completed · 1 warning`). Plegado, un bloque dice quién es, cuántas líneas tiene y, tras `| `, los títulos de la respuesta (`## Resumen · ## Riesgos`) o su primera línea; lo del harness va sobre un fondo propio que el texto ajeno no puede tener. Teclas: `Esc` recorre los bloques (flechas, `enter` o espacio abre y cierra, `+`/`-` todo, `end` el último, `Esc` o cualquier letra vuelve a escribir y la letra se escribe; abrirse la caja de aprobación o la paleta también); desde la entrada, `alt+↑`/`alt+↓` eligen bloque y `ctrl+o` abre o cierra el elegido o la última respuesta. Un clic en la cabecera o el pie de un bloque lo abre o cierra; en el texto, nada. En la paleta: «Browse blocks», «Open or close the block», «Expand all blocks», «Collapse all blocks», «Jump to latest». Al abrir o cerrar, la cabecera no se mueve de su fila, y lo que llega mientras recorres o lees más arriba no mueve el panel. Cada sesión tiene sus bloques: `/new` y `/resume` muestran los de la sesión tomada. Nada de esto se guarda. Tras dos preguntas largas, `Esc` y `home` (100 × 30, sintético; la primera, plegada; la segunda, abierta a mano):
+- **Espaciado y colores** (`tui-spacing`): todo color sale del tema de Textual por roles con nombre (`harness/shell/palette.py`), sin colores propios, y los huecos salen de una escala (`harness/shell/spacing.py`: columnas 1/2/4/8, filas 1/2, una fila mide como dos columnas). Todo el texto (lo que escribes, el harness, el texto ajeno dentro de su recuadro y la entrada) empieza en la misma columna, a 2 del borde. Desde 30 filas hay una fila en blanco entre bloques; por debajo no, y la entrada pasa a 2 filas. Por debajo de 100 columnas el panel lateral se oculta y la conversación usa todo el ancho; `/status` da lo mismo que el panel (peticiones, última petición y notas de memoria). Lo que escribes lleva una barra a la izquierda y un fondo suave; en un tema de terminal sin fondos, la barra basta.
+- **Bloques:** lo que escribes (con una barra a la izquierda), las líneas del harness (en gris) y el texto ajeno, siempre dentro de un recuadro cuyo título pone el harness (el nombre del proveedor); plegado, de él solo queda un extracto de una línea tras `| `. Lo de dentro del recuadro se muestra como caracteres: `[@click=…]`, `[link=…]` o una secuencia de escape no hacen nada. El resaltado de Markdown colorea sin quitar ni añadir un carácter respecto al texto plano, que muestra lo mismo sin color.
+- **Tablas y bloques de código** (`reply-rendering`, desde el 2026-11-27): el harness alinea una tabla de Markdown de una respuesta como texto, con columnas del ancho de su contenido, una raya bajo la cabecera y las marcas de alineación (`:--`, `:-:`, `--:`); los únicos caracteres que añade son `│`, `─`, `┼` y espacios, atenuados, sin esquinas ni fondo. Si no cabe, parte las celdas dentro de su columna; si ni así cabe, o la tabla está mal formada o pasa de 200 filas, 16 columnas o 1000 caracteres por celda, se queda como llegó. Un bloque de código pierde sus ```` ``` ```` y queda entre dos rayas, la de arriba con el lenguaje (`── python ───`). El texto plano (`--plain`) hace lo mismo, sin color. El ancho es el del panel cuando llega la respuesta: si después cambias el tamaño de la terminal, esa tabla no se vuelve a alinear.
+- **Bloques que se pliegan** (`collapsible-blocks`): cada turno (tu línea y lo que vino después) y cada bloque de un turno se abren y se cierran. Al llegar, una respuesta se ve entera (desde el 2026-11-27, `reply-rendering`): si es más alta que el panel, el panel se coloca en su principio y el pie dice cuántas filas quedan debajo (`↓ 50 more rows below`), hasta que llegas al final. Solo una respuesta de más de 64 000 caracteres llega plegada: muestra sus primeras filas y el borde de abajo dice cuántas líneas faltan (`… 30 more lines · enter/click to expand`); igual llega otro texto ajeno largo (`/history`, `/memory`). Los pasos de una Skill quedan en una línea. Siempre enteros: los errores y avisos, las líneas `omitted:` y `attached:` (la nota que no cupo, el fichero que sí se envió), cómo terminó una Skill (`skill: run … is completed`) y lo que aplicó (`applied:`) y lo que muestra `/context`, que es exactamente lo que se envía. Al enviar una pregunta, los turnos anteriores al penúltimo se pliegan a una línea (`▸ you → mock · 42 lines · completed  › revisa el HLS`), salvo los que abriste o cerraste tú (tu elección se mantiene) y los que tuvieron un error o un aviso; plegado a mano, un turno así lo dice (`completed · 1 warning`). Plegado, un bloque dice quién es, cuántas líneas tiene y, tras `| `, los títulos de la respuesta (`## Resumen · ## Riesgos`) o su primera línea; lo del harness va sobre un fondo propio que el texto ajeno no puede tener. Teclas: `Esc` recorre los bloques (flechas, `enter` o espacio abre y cierra, `+`/`-` todo, `end` el último, `Esc` o cualquier letra vuelve a escribir y la letra se escribe; abrirse la caja de aprobación o la paleta también); desde la entrada, `alt+↑`/`alt+↓` eligen bloque y `ctrl+o` abre o cierra el elegido o la última respuesta. Un clic en la cabecera o el pie de un bloque lo abre o cierra; en el texto, nada. En la paleta: «Browse blocks», «Open or close the block», «Expand all blocks», «Collapse all blocks», «Jump to latest». Al abrir o cerrar, la cabecera no se mueve de su fila, y lo que llega mientras recorres o lees más arriba no mueve el panel. Cada sesión tiene sus bloques: `/new` y `/resume` muestran los de la sesión tomada. Nada de esto se guarda. Tras dos preguntas largas, `Esc` y `home` (100 × 30, sintético; la primera, plegada; la segunda, abierta a mano):
 
   ```text
    ▸ harness · 4 lines · done  ai-harness - mock session 01a21c5d   │  chat 2026-11-27 04:37
@@ -164,7 +168,34 @@ En una consola, la conversación ocupa la pantalla completa ([Textual](https://t
    up/down move  enter open/close  +/- all  end latest  esc back to typing
   ```
 - **Panel:** sesión (nombre e identificador completo), proyecto, proveedor, peticiones enviadas en esta sesión, estado de la última y las notas de memoria que llevó la última pregunta. Sale solo del estado del harness y siempre describe la sesión tomada.
-- **Teclas:** `ctrl+p` abre la paleta de órdenes (solo órdenes del harness: estado, sesión nueva, cambiar de sesión, historial, contexto, elegir Skill, adjuntar fichero, buscar en la memoria…). «Switch session...» lista las sesiones y elige con el teclado; «Choose a skill...» rellena `/skill NOMBRE `; «Attach a file...» lista los ficheros de la carpeta de trabajo. `ctrl+n` sesión nueva. Flechas arriba y abajo: lo escrito en esta ejecución (solo en memoria); `Esc` cambia las flechas a recorrer los bloques. Tab completa los comandos `/`. `ctrl+c` interrumpe la pregunta en curso; sin nada en curso no sale. `ctrl+q`, `ctrl+d` con la entrada vacía o `/exit` salen: se cierra el proveedor y la terminal vuelve a como estaba.
+- **Teclas:** `ctrl+p` abre la paleta de órdenes (solo órdenes del harness: estado, sesión nueva, cambiar de sesión, historial, contexto, elegir Skill, adjuntar fichero, buscar en la memoria…). «Switch session...» lista las sesiones y elige con el teclado; «Choose a skill...» rellena `/skill NOMBRE `; «Attach a file...» lista los ficheros de la carpeta de trabajo. `ctrl+n` sesión nueva. Flechas arriba y abajo: lo escrito en esta ejecución (solo en memoria); `Esc` cambia las flechas a recorrer los bloques. Tab completa (ver «Completar»). `ctrl+c` interrumpe la pregunta en curso; sin nada en curso no sale. `ctrl+q`, `ctrl+d` con la entrada vacía o `/exit` salen: se cierra el proveedor y la terminal vuelve a como estaba.
+- **Completar** (`command-completion`): al escribir `/` aparece debajo de la entrada la lista de comandos con una línea de ayuda; al seguir escribiendo se filtra (primero los que empiezan así, después los que contienen esas letras en orden). Después del comando, la lista ofrece sus opciones (`--project`, `--file`) y sus valores: los proyectos del vault, los Skills válidos con su descripción, las entradas que declara el Skill (`source=`), las sesiones (identificador, proyecto y título) para `/resume`, y rutas para `/file`, `--file NOMBRE=` y la ruta corta de un Skill de una entrada. Las rutas son relativas a la carpeta de trabajo, carpetas primero; `~/` se lista y se queda escrito `~/`; los nombres ocultos solo salen si lo escrito empieza por `.`; un enlace sale como nombre y nunca se sigue. Ninguna fila está elegida al abrirse. Teclas, en este orden:
+  | Tecla | Con la lista abierta | Con la lista cerrada |
+  |---|---|---|
+  | `Tab` | pone la fila elegida, o la primera | pone el primer candidato (si hay) |
+  | `↑`/`↓` | eligen fila | historial de lo escrito |
+  | `Enter` | con una fila elegida, la pone y no envía; sin fila elegida, cierra y envía lo escrito | envía |
+  | `Esc` | cierra la lista | recorre los bloques |
+  | letras, borrar | se escriben y la lista se filtra | se escriben |
+  | `ctrl+c`, `ctrl+q`, `ctrl+n`, `ctrl+p` | lo de siempre (la paleta cierra la lista) | lo de siempre |
+
+  Completar nunca envía ni ejecuta nada y nunca lee el contenido de un fichero, solo nombres. La lista no se abre sobre la caja de aprobación, la paleta ni un selector. Solo se ofrece lo que la conversación lee como ese mismo valor: un nombre con secuencias de escape, caracteres invisibles, cualquier espacio (también el duro o el estrecho de Unicode), comillas, o que empieza por `-`, no se ofrece; los demás se dibujan como caracteres, nunca como estilos. Una carpeta se lista en otro hilo, con un tope de 100 000 entradas y medio segundo; una que no se puede leer no ofrece nada y no da error, y una que nunca contesta no retiene la salida. Así, tras escribir `/` (110 × 32, captura de texto del `Pilot`):
+  ```text
+  ╭─ tab completes · ↑↓ choose · enter takes the chosen · esc closes ──────────────────────────────────────────╮
+  │ /help      this list                                                                                       │
+  │ /status    session, project, provider and last request                                                     │
+  │ /new       switch to a new session                                                                         │
+  │ /sessions  numbered list of sessions                                                                       │
+  │ /resume    switch to session N of the last /sessions list, or to session ID                                │
+  │ /history   the history of this session                                                                  ▁▁ │
+  │ /memory    search the memory (of the session's project, if it has one)                                     │
+  │ /context   the memory block sent with each question of this session                                        │
+  ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  ▊▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▎
+  ▊  /                                                                                                         ▎
+  ▊▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▎
+  ```
+  En texto plano (`--plain`) no hay lista ni Tab (la biblioteca estándar de Python no trae `readline` en Windows), pero las formas cortas son las mismas.
 - **Mientras el proveedor trabaja** se ve `mock: thinking (N s), ctrl+c interrupts` y la entrada no envía (lo escrito se queda en ella).
 - **La aprobación** se abre en su propia caja: la cabecera del motor (destino, hash, caducidad), el contenido propuesto en un recuadro de texto ajeno y, fija abajo, la fila **[Approve] [Reject]** (desde el 2026-11-27, `approval-buttons`). Cómo funciona:
   - El foco empieza en la propuesta, que se recorre con `AvPág`/`RePág`, flechas, `Inicio`, `Fin` o la rueda. La caja dice cuántas líneas quedan debajo o que la propuesta se ha mostrado entera.
@@ -176,6 +207,7 @@ En una consola, la conversación ocupa la pantalla completa ([Textual](https://t
   - La auditoría registra `means=button`.
   - En texto plano (`--plain`) y en `skill run`/`skill resume` se sigue escribiendo el código.
 - **Lo que la pantalla no hace:** capturas, guardar ficheros, abrir enlaces, suspenderse ni copiar al portapapeles de la terminal. Si falla por dentro, imprime una línea fija sin nada de la conversación. Si la consola no admite la pantalla completa, lo dice en una línea y sigue en texto plano.
+- **Texto resaltado en azul:** es la selección de Textual. Arrastrar, o hacer doble o triple clic, sobre la conversación resalta el texto, pero no lo copia (`ctrl+c` interrumpe y Terminal.app no acepta la copia por OSC 52); un clic lo quita. Para copiar, usa la selección de la terminal: en Terminal.app (macOS), arrastra con `Fn` pulsada, o desactiva «Visualización › Permitir informes del ratón» (`⌘R`) y copia con `⌘C`; en Windows Terminal, arrastra con `Mayús` pulsada y copia con `ctrl+shift+c`.
 - **Un pegado de varias líneas** en la entrada se queda con la primera.
 - **Para quitarlo:** `main.py chat --plain`, o `HARNESS_PLAIN=1`, `NO_COLOR=1` o `TERM=dumb` en el entorno: la conversación de texto plano de siempre (la que usan los tests y las demos). También se usa sola sin consola, si Textual no carga o si hay puesta una variable de depuración de Textual (`TEXTUAL`, `TEXTUAL_LOG`, `TEXTUAL_SCREENSHOT`…), que guardaría o enviaría lo que se ve.
 
@@ -213,12 +245,14 @@ uv run python main.py
 Dentro de la conversación (las líneas son iguales en las dos terminales; en zsh la ruta del fichero va con `/`):
 
 ```text
-/new --project demo-alpha "Demo Corte 9"
+/new demo-alpha "Demo Corte 9"
 ¿Qué decisiones de mensajería tiene el proyecto?
 ¿Qué riesgos ves en esa decisión?
 /context
-/skill architecture-memory --file source=tests\fixtures\skill-inputs\fuente-decision.md
+/skill architecture-memory tests\fixtures\skill-inputs\fuente-decision.md
 ```
+
+Son formas cortas: antes de ejecutarse, la conversación muestra `running: /new --project demo-alpha "Demo Corte 9"` y `running: /skill architecture-memory --file source=…`. En la pantalla completa se escriben aún menos: `/new demo-a` y Tab; `/sk`, Tab, `arch`, Tab, y la ruta con Tab en cada carpeta (`tests/fi` Tab, `sk` Tab, `fu` Tab).
 
 Cada pregunta muestra una línea `context: demo-alpha, 7 note(s) included…` y la respuesta del Mock con `| ` delante. `/context` muestra el bloque de memoria. El Skill abre la caja `Approval requested` con la nota entera, su destino `Decisiones/…` y su hash. Cuando la caja dice «The whole proposal has been shown», Tab y Enter, o un clic en «Approve», la aprueban, y se ve `applied: Decisiones/…md` y `skill: run … is completed`. Con `--plain`, el aviso es de texto y se aprueba escribiendo los 8 primeros caracteres del hash. Después, `/status` (anotar el identificador de la sesión) y `/exit`.
 

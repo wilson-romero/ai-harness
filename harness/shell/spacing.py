@@ -30,6 +30,16 @@ BUTTON_GAP = SPACE_8
 # Inside a box, between its border and its content.
 BOX_PADDING_X = SPACE_2
 
+# The conversation (tui-spacing D4): two columns at the edge of the screen, one inside a framed
+# block, and every line of text (typed, the harness's, foreign, the input) on one column.
+EDGE = SPACE_2
+BLOCK_INSET = SPACE_1
+TEXT_COLUMN = EDGE + 1 + BLOCK_INSET  # the edge, a one-column frame or bar, the inset
+
+# The side panel (tui-spacing D2): an even width, shown only from WIDE_COLUMNS.
+SIDE_WIDTH = 32
+WIDE_COLUMNS = 100
+
 # Vertical gaps by terminal height (horizontal ones always stay):
 # - below SNUG_ROWS every row goes to the content: no blank rows at all;
 # - from SNUG_ROWS, one blank row above the buttons;
@@ -49,6 +59,9 @@ TOKENS: dict[str, int] = {
     "button-w": BUTTON_WIDTH,
     "button-rows": BUTTON_ROWS,
     "button-gap": BUTTON_GAP,
+    "edge": EDGE,
+    "inset": BLOCK_INSET,
+    "side-w": SIDE_WIDTH,
 }
 
 

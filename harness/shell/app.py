@@ -177,6 +177,7 @@ def converse(args: argparse.Namespace, settings: Settings, terminal: Conversatio
         service.recover()
         recover_runs(conn, settings.data_dir)
         width = getattr(terminal, "pane_columns", None)  # the full screen's conversation pane
+        layout = getattr(terminal, "layout_columns", None)  # and the text width of its blocks
         conversation = Conversation(terminal, ConversationDeps(
             conn=conn,
             data_dir=settings.data_dir,
@@ -187,6 +188,7 @@ def converse(args: argparse.Namespace, settings: Settings, terminal: Conversatio
             memory=lambda: load_memory_settings(os.environ),
             skills=lambda: load_skill_settings(os.environ),
             **({"columns": width} if width is not None else {}),
+            **({"layout": layout} if layout is not None else {}),
         ))
         return runner(conversation, conversation.run(args.session, args.project, args.name))
     finally:
