@@ -117,6 +117,16 @@ def _split(text: str) -> tuple[list[str], list[_Fence]]:
     return outside, fences
 
 
+Fence = _Fence
+
+
+def split_fences(text: str) -> tuple[list[str], list[Fence]]:
+    """The lines outside fenced code blocks, and the fenced blocks, in order, as `validate`
+    reads them. The plan reader of code mode uses this same reading (code-mode D3), so a block
+    is a block for both or for neither. `text` must already have `\\n` line ends."""
+    return _split(text)
+
+
 def _headings(step: ValidateStep, text: str) -> None:
     """Headings count only outside fenced code blocks: a heading inside code is code."""
     found = set()
