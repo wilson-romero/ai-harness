@@ -49,8 +49,9 @@
 
 - [x] 3.1 Sin código por plataforma: `tests/unit/test_portability.py` pasa con los ficheros nuevos.
   - Recibo (2026-11-27, macOS arm64): incluido en 2.3.
-- [ ] 3.2 Las pruebas marcadas `edge` (el proveedor de Copilot Web contra páginas sintéticas locales), una vez, con `caffeinate -i`, porque pasan por la aprobación del motor.
+- [x] 3.2 Las pruebas marcadas `edge` (el proveedor de Copilot Web contra páginas sintéticas locales), una vez, con `caffeinate -i`, porque pasan por la aprobación del motor.
   - Oráculo: código 0 de `uv run pytest -m edge`.
+  - Recibo (2026-11-27, macOS arm64, sobre `38f1d31`): código 0, 153 passed y 1612 deselected, en 1391,40 s.
 
 ## 4. Documentación
 
