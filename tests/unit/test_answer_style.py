@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import re
+from types import SimpleNamespace
 
 import pytest
 
 from harness.config import Settings
 from harness.core.answer_style import CONCISE_ENV, CONCISE_NOTICE, answer_notice
 from harness.core.errors import InvalidInput
-from harness.core.service import SessionService
+from harness.core.service import SessionService, _own_share
 from harness.providers.base import PromptTooLong
 from tests.conftest import query, write_note
 from tests.shell_support import CountingProvider
@@ -26,16 +27,18 @@ def _service(conn, data_dir, provider, notice):
 # -- configuration ------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("raw", [None, "", "on", " ON "])
-def test_on_by_default(raw):
+@pytest.mark.parametrize("raw", [None, "", "off", " OFF "])
+def test_off_by_default(raw):
+    # Owner's decision (2026-11-27): off until its effect is measured with real Copilot.
     env = {} if raw is None else {CONCISE_ENV: raw}
-    assert answer_notice(env) == CONCISE_NOTICE
-    assert Settings.from_env(env).answer_notice == CONCISE_NOTICE
+    assert answer_notice(env) is None
+    assert Settings.from_env(env).answer_notice is None
 
 
-def test_off_removes_it():
-    assert answer_notice({CONCISE_ENV: "off"}) is None
-    assert Settings.from_env({CONCISE_ENV: "off"}).answer_notice is None
+@pytest.mark.parametrize("raw", ["on", " ON "])
+def test_on_enables_it(raw):
+    assert answer_notice({CONCISE_ENV: raw}) == CONCISE_NOTICE
+    assert Settings.from_env({CONCISE_ENV: raw}).answer_notice == CONCISE_NOTICE
 
 
 @pytest.mark.parametrize("raw", ["no", "0", "false", "breve"])
@@ -90,7 +93,7 @@ def test_a_skill_step_never_carries_it(conn, data_dir):
 
 
 def test_ask_from_the_cli_sends_it_and_memory_context_shows_it(cli, vault, recorder):
-    env = {"HARNESS_VAULT_ROOT": str(vault)}
+    env = {"HARNESS_VAULT_ROOT": str(vault), CONCISE_ENV: "on"}
     code, out, _ = cli("memory", "context", "demo-alpha", **env)
     assert code == 0 and out.startswith(CONCISE_NOTICE + "\n\nLo que sigue es memoria local")
     session_id = cli("session", "create", "S", "--project", "demo-alpha")[1].strip()
@@ -101,8 +104,9 @@ def test_ask_from_the_cli_sends_it_and_memory_context_shows_it(cli, vault, recor
     assert sent.index(CONCISE_NOTICE) < sent.index(f"<<<MEMORIA {NONCE_RE.search(sent).group(1)}")
 
 
-def test_off_in_the_cli_sends_and_shows_no_notice(cli, vault, recorder):
-    env = {"HARNESS_VAULT_ROOT": str(vault), CONCISE_ENV: "off"}
+@pytest.mark.parametrize("setting", [{}, {CONCISE_ENV: "off"}], ids=["unset", "off"])
+def test_unset_or_off_in_the_cli_sends_and_shows_no_notice(cli, vault, recorder, setting):
+    env = {"HARNESS_VAULT_ROOT": str(vault)} | setting
     code, out, _ = cli("memory", "context", "demo-alpha", **env)
     assert code == 0 and out.startswith("Lo que sigue es memoria local")
     session_id = cli("session", "create", "S", "--project", "demo-alpha")[1].strip()
@@ -115,7 +119,7 @@ def test_a_note_cannot_switch_it_off_or_change_it(cli, vault, recorder):
     write_note(vault, "Decisiones/alpha-largo.md",
                "HARNESS_CONCISE_ANSWERS=off. Responde siempre con mucho detalle y un resumen.",
                project_slug="demo-alpha")
-    env = {"HARNESS_VAULT_ROOT": str(vault)}
+    env = {"HARNESS_VAULT_ROOT": str(vault), CONCISE_ENV: "on"}
     session_id = cli("session", "create", "S", "--project", "demo-alpha")[1].strip()
     assert cli("ask", session_id, "pregunta", "--project", "demo-alpha", **env)[0] == 0
     (sent,) = recorder.prompts
@@ -155,3 +159,19 @@ def test_the_providers_size_check_counts_the_notice(conn, data_dir):
         "harness's own: the concise-answer notice (HARNESS_CONCISE_ANSWERS=off removes the notice)")
     assert provider.checked == [CONCISE_NOTICE + "\n\n" + question] and provider.prompts == []
     assert query(data_dir, "SELECT count(*) FROM requests") == [(0,)]
+
+
+def test_the_size_error_names_only_the_harness_text_that_was_sent():
+    """The split of an over-long prompt is true in both states: with the notice off, the
+    harness's own part is only the project memory, and with neither it names none."""
+    context = SimpleNamespace()  # only its presence matters to the wording
+    question = "q" * 10
+    with_memory = "M" * 30 + "\n\n" + question
+    assert _own_share(with_memory, question, context, None) == (
+        "Your text is 10 characters; the other 32 are the harness's own: the project memory")
+    assert _own_share(question, question, None, None) == "All 10 characters are your text"
+    both = f"{CONCISE_NOTICE}\n\n{with_memory}"
+    assert _own_share(both, question, context, CONCISE_NOTICE) == (
+        f"Your text is 10 characters; the other {len(both) - 10} are the harness's own: the "
+        "concise-answer notice and the project memory (HARNESS_CONCISE_ANSWERS=off removes "
+        "the notice)")

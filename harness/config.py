@@ -27,7 +27,8 @@ class Settings:
     copilot_max_prompt_chars: int | None = None
     # Automated tests run the browser without a window; real use is always visible.
     browser_headless: bool = False
-    # The concise-answer notice of plain questions, or None (`HARNESS_CONCISE_ANSWERS=off`).
+    # The concise-answer notice of plain questions with `HARNESS_CONCISE_ANSWERS=on`; None
+    # (the default) otherwise.
     answer_notice: str | None = None
 
     @classmethod

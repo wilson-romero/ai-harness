@@ -39,10 +39,11 @@ def _shown(out):
 
 
 def _block(out):
-    """The memory block alone: what the byte limit and the marking apply to (prompt-economy D3)."""
-    notice, block = _shown(out).split("\n\n", 1)
-    assert notice == CONCISE_NOTICE
-    return block
+    """The memory block alone: what the byte limit and the marking apply to. The answer notice
+    is off by default (prompt-economy D3, revised 2026-11-27), so nothing comes before it."""
+    shown = _shown(out)
+    assert CONCISE_NOTICE not in shown
+    return shown
 
 
 def _paths(text):

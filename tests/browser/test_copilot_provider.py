@@ -74,8 +74,9 @@ def env(app: SyntheticCopilot, tmp_path: Path, data_dir: Path) -> dict[str, str]
 
     These tests exercise the provider: what is typed, read, bound and refused. They compare
     the typed text with the question, so the harness's concise-answer notice (prompt-economy
-    D3, on by default) is off here; `notice_env` and the tests that use it keep it on, end to
-    end through the page."""
+    D3) must be off. It is off by default since 2026-11-27; it stays explicit here so that a
+    change of that default cannot change what these tests type. `notice_env` and the tests
+    that use it set it on, end to end through the page."""
     return {
         "HARNESS_DATA_DIR": str(data_dir),
         "HARNESS_PROVIDER": "copilot_web",

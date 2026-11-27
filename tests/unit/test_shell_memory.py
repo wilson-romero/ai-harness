@@ -63,10 +63,11 @@ async def test_a_session_without_project_sends_only_the_question(conn, data_dir,
 
 async def test_context_shows_the_block_of_memory_context(conn, data_dir, vault, cli):
     """Scenario «Contexto a la vista»: the same block as `memory context`."""
-    # Both with the answer notice, as `chat` and `memory context` show it by default.
+    # Both with the answer notice on (`HARNESS_CONCISE_ANSWERS=on`; it is off by default).
     terminal, _, provider = await _run(conn, data_dir, ["/context", "/exit"], vault=vault,
                                        project="demo-alpha", notice=CONCISE_NOTICE)
-    code, out, _ = cli("memory", "context", "demo-alpha", HARNESS_VAULT_ROOT=str(vault))
+    code, out, _ = cli("memory", "context", "demo-alpha", HARNESS_VAULT_ROOT=str(vault),
+                       HARNESS_CONCISE_ANSWERS="on")
     assert out.startswith(CONCISE_NOTICE + "\n\nLo que sigue es memoria local")
     assert code == 0
     shown = [line[len(FOREIGN_PREFIX):] for line in terminal.foreign()]

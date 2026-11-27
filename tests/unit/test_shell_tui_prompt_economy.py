@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 
+from harness.config import Settings
 from harness.core.answer_style import CONCISE_NOTICE
 from harness.core.service import SessionService
 from harness.storage.database import open_database
@@ -50,15 +51,23 @@ async def test_context_and_a_question_on_the_full_screen(tmp_path, vault):
     assert tui.app.return_value == 0
 
 
-async def test_without_the_notice_the_full_screen_shows_and_sends_none(tmp_path, vault):
+async def test_by_default_the_full_screen_shows_and_sends_no_notice(tmp_path, vault):
+    # The notice of the default configuration: none (owner's decision, 2026-11-27).
+    default = Settings.from_env({}).answer_notice
+    assert default is None
     session = _project_session(tmp_path)
-    tui = Tui(tmp_path, session=session, vault=vault, answer_notice=None)
+    tui = Tui(tmp_path, session=session, vault=vault, answer_notice=default)
     async with tui.app.run_test(size=SIZE) as pilot:
         await tui.ready(pilot)
-        await tui.send(pilot, "pregunta")
+        await tui.send(pilot, "/context")
         await tui.until(pilot, lambda: tui.blocks("foreign"))
         await tui.ready(pilot)
+        (shown,) = tui.blocks("foreign")
+        assert shown.startswith("Lo que sigue es memoria local") and CONCISE_NOTICE not in shown
+        await tui.send(pilot, "pregunta")
+        await tui.until(pilot, lambda: len(tui.blocks("foreign")) == 2)
+        await tui.ready(pilot)
         (sent,) = tui.provider.prompts
-        assert sent.startswith("Lo que sigue es memoria local") and CONCISE_NOTICE not in sent
+        assert NONCE.sub("N", sent) == NONCE.sub("N", shown) + "\n\npregunta"
         await tui.send(pilot, "/exit")
     assert tui.app.return_value == 0

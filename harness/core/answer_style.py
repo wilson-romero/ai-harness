@@ -4,6 +4,9 @@ It is a constant: never built from a note, an input or a reply. It goes first in
 for a plain question (`ask` and the questions of `chat`), outside every data delimiter, and it
 is shown by `memory context` and `/context`, so that what is seen is what is sent. Skill LLM
 steps never get it: their template decides the shape of their answer.
+
+It is off unless `HARNESS_CONCISE_ANSWERS=on` (owner's decision, 2026-11-27): it costs 55
+tokens per question and its effect on Copilot's answers has not been measured yet.
 """
 
 from __future__ import annotations
@@ -21,11 +24,11 @@ CONCISE_NOTICE = (
 
 
 def answer_notice(env: Mapping[str, str]) -> str | None:
-    """The notice, or None when `HARNESS_CONCISE_ANSWERS=off`. Empty or unset means on."""
+    """The notice when `HARNESS_CONCISE_ANSWERS=on`; None when it is `off`, empty or unset."""
     raw = (env.get(CONCISE_ENV) or "").strip().lower()
-    if raw in ("", "on"):
+    if raw == "on":
         return CONCISE_NOTICE
-    if raw == "off":
+    if raw in ("", "off"):
         return None
     raise InvalidInput(f"{CONCISE_ENV} must be 'on' or 'off', got {raw!r}")
 
