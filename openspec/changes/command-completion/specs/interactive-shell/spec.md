@@ -42,6 +42,10 @@ Al abrirse la lista, ninguna fila SHALL estar elegida. Con la lista abierta, Tab
 - **WHEN** la lista está abierta sin fila elegida y la persona pulsa Intro
 - **THEN** se envía la línea tal como está escrita
 
+#### Scenario: Intro con teclas que la lista no ha visto
+- **WHEN** la persona elige `/status` en la lista de `/s` y la terminal entrega de una vez `e` e Intro
+- **THEN** se envía `/se` tal como está escrito y la `e` no se pierde
+
 #### Scenario: Elegir con flechas no envía
 - **WHEN** la persona pulsa ↓ y después Intro
 - **THEN** la fila elegida queda en la entrada y no se envía nada
@@ -83,6 +87,17 @@ Un nombre de fichero o de carpeta, un título de sesión o una descripción de S
 - **WHEN** una sesión tiene un título con saltos de línea y escapes y la persona escribe `/resume `
 - **THEN** el título se ve en una línea, saneado y acotado
 
+### Requirement: Un candidato se lee como una sola palabra
+Un valor de la lista (una ruta, un proyecto, un Skill, una entrada de un Skill o un identificador de sesión) SHALL ofrecerse solo si, puesto en la línea, la conversación lo lee como exactamente ese valor: un nombre con cualquier carácter de espacio (también los de Unicode, como el espacio duro o el estrecho), con comillas o que empieza por `-` SHALL NOT ofrecerse.
+
+#### Scenario: Espacio duro que esconde una opción
+- **WHEN** en la carpeta hay un fichero cuyo nombre es `a`, un espacio duro, `--file`, un espacio duro y `focus=.env`, y la persona completa la ruta de un Skill de una entrada
+- **THEN** ese nombre no se ofrece y ningún `.env` se lee
+
+#### Scenario: Espacio al principio
+- **WHEN** en la carpeta hay `z.md` y ` z.md` (con un espacio delante) y la persona escribe `/file `
+- **THEN** solo se ofrece `z.md`
+
 ### Requirement: Completar no envía, no ejecuta ni lee ficheros
 Abrir, filtrar, recorrer o aceptar la lista SHALL NOT enviar nada al proveedor, ejecutar un comando, crear una solicitud ni abrir el contenido de un fichero: de una carpeta solo SHALL leerse los nombres. Un enlace SHALL ofrecerse como nombre y SHALL NOT seguirse. Una carpeta que no se puede leer SHALL dar una lista vacía, sin mensaje de error.
 
@@ -104,6 +119,10 @@ Listar una carpeta para la lista SHALL hacerse sin detener la escritura y SHALL 
 #### Scenario: Respuesta vieja
 - **WHEN** un listado lento termina después de que la persona ha escrito más
 - **THEN** ese listado no se muestra
+
+#### Scenario: Carpeta que nunca contesta
+- **WHEN** el listado de una carpeta no termina nunca, la persona sigue escribiendo y después sale
+- **THEN** cada tecla llega a la entrada, el número de listados en curso sigue acotado y la conversación termina sin esperar al listado
 
 ### Requirement: Nombre de comando cortado
 Una línea que empieza por `/` seguido del principio del nombre de un solo comando SHALL ejecutarse como ese comando. Si el principio es de más de un comando, el sistema SHALL decir cuáles y SHALL NOT ejecutar nada. Un nombre entero SHALL seguir funcionando igual.

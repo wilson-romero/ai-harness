@@ -175,7 +175,7 @@ En una consola, la conversación ocupa la pantalla completa ([Textual](https://t
   | letras, borrar | se escriben y la lista se filtra | se escriben |
   | `ctrl+c`, `ctrl+q`, `ctrl+n`, `ctrl+p` | lo de siempre (la paleta cierra la lista) | lo de siempre |
 
-  Completar nunca envía ni ejecuta nada y nunca lee el contenido de un fichero, solo nombres. La lista no se abre sobre la caja de aprobación, la paleta ni un selector. Un nombre que la pantalla no puede mostrar tal cual (secuencias de escape, caracteres invisibles, espacios, comillas) no se ofrece; los demás se dibujan como caracteres, nunca como estilos. Una carpeta se lista en otro hilo, con un tope de 100 000 entradas y medio segundo; una que no se puede leer no ofrece nada y no da error. Así, tras escribir `/` (110 × 32, captura de texto del `Pilot`):
+  Completar nunca envía ni ejecuta nada y nunca lee el contenido de un fichero, solo nombres. La lista no se abre sobre la caja de aprobación, la paleta ni un selector. Solo se ofrece lo que la conversación lee como ese mismo valor: un nombre con secuencias de escape, caracteres invisibles, cualquier espacio (también el duro o el estrecho de Unicode), comillas, o que empieza por `-`, no se ofrece; los demás se dibujan como caracteres, nunca como estilos. Una carpeta se lista en otro hilo, con un tope de 100 000 entradas y medio segundo; una que no se puede leer no ofrece nada y no da error, y una que nunca contesta no retiene la salida. Así, tras escribir `/` (110 × 32, captura de texto del `Pilot`):
   ```text
   ╭─ tab completes · ↑↓ choose · enter takes the chosen · esc closes ──────────────────────────────────────────╮
   │ /help      this list                                                                                       │
