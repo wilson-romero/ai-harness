@@ -581,6 +581,9 @@ class SkillEngine:
             return RunOutcome(state.run_id, "failed", message=f"step {step.id!r}: {response.detail}")
         if len(response.text.encode("utf-8")) > MAX_RESPONSE_BYTES:
             return self._stop(state, step.id, row, "limit:response_bytes", limit="response_bytes")
+        if response.truncated:  # only part of the answer was read: never a step's output
+            return self._stop(state, step.id, row, "limit:response_truncated",
+                              limit="response_truncated")
         self._complete(state, step.id, row, response.text)
         return None
 

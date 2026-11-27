@@ -4,7 +4,7 @@ Copiloto de arquitectura que se ejecuta en local. Mantiene varias conversaciones
 
 **Es un proyecto educativo:** sirve para aprender a construir un harness, no está pensado para uso en producción. Se ejercita solo con prompts sintéticos y no guarda contenido real. Quien lo use para automatizar un servicio real es responsable de cumplir las condiciones de uso de ese servicio.
 
-Estado (revisado el 2026-11-25): **Corte 1 · Esqueleto**, **Corte 3 · Memoria**, **Corte 4 · Skills**, **Corte 9 · Interfaz conversacional** ([Conversación](#conversación)) y, del Corte 5, la **pasarela MCP** (`mcp-gateway`); la lectura de Enterprise Architect (`ea-read`) está en pausa. Sesiones, historial y recuperación funcionan con un proveedor Mock, el único disponible hoy: el proveedor de Copilot Web está en desarrollo y no forma parte de esta versión. El harness lee una segunda memoria en Markdown compatible con `claude-memory-system`, ejecuta Skills declarativos y llama por stdio a herramientas de solo lectura de servidores MCP declarados en una lista local (ver [Herramientas MCP](#herramientas-mcp)). Su única escritura en esa memoria es una nota de decisión nueva en `Decisiones/`, después de una aprobación humana (ver [Skills de arquitectura](#skills-de-arquitectura)). El plan de entregas está en [`docs/plan/2026-11-24-ai-harness-cortes.md`](docs/plan/2026-11-24-ai-harness-cortes.md).
+Estado (revisado el 2026-11-26, rama `feature/copilot-web-provider`): **Corte 1 · Esqueleto**, **Corte 3 · Memoria**, **Corte 4 · Skills**, **Corte 9 · Interfaz conversacional** ([Conversación](#conversación)) y, del Corte 5, la **pasarela MCP** (`mcp-gateway`); la lectura de Enterprise Architect (`ea-read`) está en pausa. Sesiones, historial y recuperación funcionan con el proveedor Mock y, en esta rama, con el proveedor de **Copilot Web** (Corte 2, ver [Copilot Web](#copilot-web)). Copilot Web se ha probado contra la página real solo en macOS y con una cuenta de prueba: preguntas completadas en sesiones distintas, la misma conversación desde otro proceso, un plazo vencido que queda `uncertain` sin reenviar, el historial sin contenido y una respuesta sin las sugerencias de seguimiento que la página dibuja debajo, y respuestas con encabezados y con un bloque `json` que pasan las comprobaciones de los Skills `hls-review` y `architecture-memory`. La conversación con Edge abierto todo el rato está probada solo contra el chat sintético. Faltan la demo de Wilson (tarea 7.5) y la prueba en Windows. Con `ask`, cada pregunta abre y cierra Edge (en `chat`, una vez por conversación); cerrarlo cuesta unos 10 s mientras siga activa la red en segundo plano de Edge (ver `SECURITY.md`). El harness lee una segunda memoria en Markdown compatible con `claude-memory-system`, ejecuta Skills declarativos y llama por stdio a herramientas de solo lectura de servidores MCP declarados en una lista local (ver [Herramientas MCP](#herramientas-mcp)). Su única escritura en esa memoria es una nota de decisión nueva en `Decisiones/`, después de una aprobación humana (ver [Skills de arquitectura](#skills-de-arquitectura)). El plan de entregas está en [`docs/plan/2026-11-24-ai-harness-cortes.md`](docs/plan/2026-11-24-ai-harness-cortes.md).
 
 ## Requisitos
 
@@ -28,6 +28,31 @@ uv run python main.py history SESSION_ID
 ```
 
 `session create` imprime el identificador de la sesión. Los comandos aceptan solo el UUID completo, no un prefijo. Los resultados salen por stdout; los avisos y los errores, por stderr, siempre en UTF-8 (también con la salida redirigida en Windows). Código de salida: 0 hecho, 1 error controlado, 2 uso incorrecto, 130 interrumpido con Ctrl+C.
+
+## Copilot Web
+
+Con `HARNESS_PROVIDER=copilot_web`, cada sesión pregunta a Microsoft Copilot Web en su propia conversación, a través de un Edge con un **perfil dedicado** (nunca tu Edge personal). Requisitos: Microsoft Edge instalado, haber iniciado sesión una vez con `main.py copilot login` y haber medido la interfaz con la sonda (`ui.json`). Los pasos, en [`docs/runbook/copilot.md`](docs/runbook/copilot.md).
+
+```sh
+export HARNESS_PROVIDER=copilot_web
+export HARNESS_COPILOT_URL='https://copilot.cloud.microsoft/chat'   # la dirección donde aparece tu chat
+uv run python main.py session create "Integraciones"
+uv run python main.py ask SESSION_ID "Pregunta"
+uv run python main.py history SESSION_ID
+```
+
+En PowerShell, `$env:HARNESS_PROVIDER = "copilot_web"` y `$env:HARNESS_COPILOT_URL = "https://copilot.cloud.microsoft/chat"`; los comandos son los mismos.
+
+- Cada `ask` abre Edge con una ventana, escribe la pregunta en el chat, espera la respuesta, la imprime y cierra Edge. Tarda unos segundos más que la respuesta (medido en macOS: arranque de unos 4 a 8 s).
+- En una [conversación](#conversación) (`main.py chat`), Edge se abre una sola vez al entrar y se cierra al salir; cada pregunta, también con `/new` y `/resume`, carga la conversación de su sesión en ese mismo Edge. Mientras dure, otro comando que necesite el navegador recibe «the harness browser is in use by another command». Tras una pregunta interrumpida con Ctrl+C, la siguiente usa una pestaña nueva.
+- La respuesta sale como Markdown reconstruido desde la página (encabezados, listas, tablas, bloques de código con su lenguaje), sin los botones ni las sugerencias de seguimiento, para que los Skills puedan comprobar sus encabezados y su JSON.
+- La primera pregunta de una sesión abre una conversación nueva. Copilot le da un identificador unos segundos después de responder; el harness lo guarda y las preguntas siguientes de esa sesión, también desde otra terminal, van a esa misma conversación. Antes de escribir comprueba que la página abierta es esa conversación; si ya no existe, no envía nada y la sesión queda `closed`.
+- Si Copilot pide iniciar sesión, la pregunta termina en `authentication_required` sin escribir nada en la página: ejecuta `main.py copilot login` y vuelve a preguntar.
+- Un prompt más largo que el máximo medido (o que `HARNESS_COPILOT_MAX_PROMPT_CHARS`) se rechaza antes de abrir Edge.
+- **Qué se guarda:** de una sesión de Copilot, solo la sesión, el identificador de su conversación, cada solicitud con su estado y sus fechas, y la auditoría. **Nunca** el texto de las preguntas ni de las respuestas: la respuesta solo sale por stdout, sin caracteres de control ni invisibles. `history` muestra el identificador y las solicitudes, sin texto.
+- No actives `DEBUG=pw:api` con contenido real: Playwright escribiría en la terminal lo que se teclea y se lee.
+
+Para verlo sin Copilot, contra un chat sintético local y sin ventana: `uv run python scripts/demo_copilot_provider.py` (termina en `demo: PASS`).
 
 ## Conversación
 
@@ -492,8 +517,12 @@ Por variables de entorno (ver `.env.example`):
 | Variable | Por defecto | Para qué |
 |---|---|---|
 | `HARNESS_DATA_DIR` | `./data` | Dónde viven SQLite y los bloqueos. Debe ser un **disco local**: en una unidad de red los bloqueos de fichero no son fiables. No puede estar dentro de `HARNESS_VAULT_ROOT`. |
-| `HARNESS_PROVIDER` | `mock` | Proveedor de las sesiones nuevas. Hoy solo existe `mock`. |
-| `HARNESS_REQUEST_TIMEOUT_S` | `120` | Plazo de cada pregunta. |
+| `HARNESS_PROVIDER` | `mock` | Proveedor de las sesiones nuevas: `mock` o `copilot_web`. |
+| `HARNESS_REQUEST_TIMEOUT_S` | `120` | Plazo de cada pregunta. Con Copilot cubre todo: esperar el navegador, arrancarlo, enviar y recibir la respuesta. La sonda propone un valor. |
+| `HARNESS_COPILOT_URL` | (vacía) | Dirección del chat de Copilot, la que se abre para una conversación nueva. Solo en tu `.env` local. |
+| `HARNESS_EDGE_PROFILE` | `HARNESS_DATA_DIR/edge-profile` | Carpeta del perfil dedicado de Edge. Nunca la de tu Edge personal: el harness la rechaza. |
+| `HARNESS_COPILOT_READY_TIMEOUT_S` | `60` | Cuánto esperar a que el chat esté listo antes de rendirse sin enviar nada. |
+| `HARNESS_COPILOT_MAX_PROMPT_CHARS` | el máximo medido | Solo puede bajar el máximo que midió la sonda. |
 | `HARNESS_MOCK_BEHAVIOR` | `ok` | `ok`, `fail`, `timeout_before_send` o `timeout_after_send`. Solo para pruebas y demos. |
 | `HARNESS_MOCK_DELAY_MS` | `0` | Espera del Mock después de enviar. Sirve para interrumpir una pregunta a mitad. |
 | `HARNESS_VAULT_ROOT` | (vacía) | Ruta **absoluta** del vault. Solo la leen `memory …` y `ask --project`; si falta o no es un directorio, esos comandos terminan con error sin leer nada. |
@@ -509,10 +538,13 @@ Por variables de entorno (ver `.env.example`):
 |---|---|
 | `completed` | El proveedor respondió. |
 | `failed` | El proveedor informó de un error. |
+| `authentication_required` | Copilot pidió iniciar sesión; no se envió nada. La sesión queda igual hasta la siguiente pregunta completada. |
 | `timeout` | Venció el plazo **antes** de que el prompt saliera. No llegó a ningún sitio. |
 | `uncertain` | Venció el plazo o murió el proceso **después** de que el prompt saliera. Pudo haber llegado. |
 
 El harness nunca reenvía una solicitud por su cuenta. Una solicitud `uncertain` se queda así en el historial; si repites la pregunta, es una solicitud nueva. La sesión aparece como `uncertain` hasta que la siguiente pregunta se completa.
+
+Una sesión de Copilot queda `closed` cuando su conversación remota ya no se encuentra: no acepta más preguntas (crea una sesión nueva). Si una pregunta queda `uncertain`, la siguiente avisa si la conversación tiene más turnos de los completados: la pregunta incierta pudo llegar, y su respuesta está en Edge.
 
 Solo una pregunta a la vez por sesión: una segunda pregunta mientras la primera sigue en curso se rechaza. Sesiones distintas sí pueden preguntar a la vez.
 
@@ -530,5 +562,6 @@ Solo una pregunta a la vez por sesión: una segunda pregunta mientras la primera
 - Git flow: ramas `feature/<change>` desde `develop`.
 - El repositorio es público: lee [`SECURITY.md`](SECURITY.md) y activa el hook una vez por clon con `git config core.hooksPath .githooks`.
 - Sin código condicionado por plataforma fuera de Enterprise Architect: lo que pasa en macOS es lo que corre en Windows.
+- Copilot Web (Corte 2): perfil dedicado de Edge, login manual, sonda y uso real en [`docs/runbook/copilot.md`](docs/runbook/copilot.md).
 - Puerta local antes de un merge: `scripts/verify.sh` sobre el árbol limpio.
-- Demos, iguales en macOS y Windows (PowerShell incluido): `uv run python scripts/demo_session_core.py` (Corte 1), `uv run python scripts/demo_project_memory.py` (Corte 3), `uv run python scripts/demo_skill_engine.py` (Corte 4, motor de Skills), `uv run python scripts/demo_architecture_skills.py` (Corte 4, Skills de arquitectura), `uv run python scripts/demo_mcp_gateway.py` (Corte 5, pasarela MCP), `uv run python scripts/demo_mvp_without_ea.py` (Puerta MVP sin EA) y `uv run python scripts/demo_interactive_shell.py` (Corte 9, conversación). Terminan en `demo: PASS`.
+- Demos, iguales en macOS y Windows (PowerShell incluido): `uv run python scripts/demo_session_core.py` (Corte 1), `uv run python scripts/demo_copilot_provider.py` (Corte 2, proveedor de Copilot contra el chat sintético), `uv run python scripts/demo_project_memory.py` (Corte 3), `uv run python scripts/demo_skill_engine.py` (Corte 4, motor de Skills), `uv run python scripts/demo_architecture_skills.py` (Corte 4, Skills de arquitectura), `uv run python scripts/demo_mcp_gateway.py` (Corte 5, pasarela MCP), `uv run python scripts/demo_mvp_without_ea.py` (Puerta MVP sin EA) y `uv run python scripts/demo_interactive_shell.py` (Corte 9, conversación). Terminan en `demo: PASS`.

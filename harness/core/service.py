@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import re
 import sqlite3
 import time
 from datetime import UTC, datetime
@@ -23,11 +25,20 @@ from harness.core.errors import (
     InvalidProject,
     ProjectMismatch,
     SessionBusy,
+    SessionClosed,
     SessionNotFound,
 )
 from harness.memory.context import ProjectContext, compose_prompt
 from harness.memory.paths import validate_project_slug
-from harness.providers.base import LLMProvider
+from harness.text.safe_text import safe_foreign_line
+from harness.providers.base import (
+    AuthenticationRequired,
+    LLMProvider,
+    ProviderError,
+    ProviderUncertain,
+    RemoteConversationLost,
+    RemoteConversationTaken,
+)
 from harness.providers.registry import ProviderFactory
 from harness.storage import repositories as repo
 from harness.storage.database import transaction
@@ -42,6 +53,19 @@ def is_valid_unicode(text: str) -> bool:
     except UnicodeEncodeError:
         return False
     return True
+
+
+# A remote reference is an identifier the provider read from the remote side: only a plain
+# token is stored or ever printed (design D6).
+REMOTE_REF = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def accepts_events(provider: LLMProvider) -> bool:
+    """Whether the provider's `ask` takes the optional `events` argument (design D5)."""
+    try:
+        return "events" in inspect.signature(provider.ask).parameters
+    except TypeError, ValueError:
+        return False
 
 
 def parse_session_id(raw: str) -> UUID:
@@ -215,6 +239,13 @@ class SessionService:
         finally:
             lock.release()
 
+    @property
+    def timeout_s(self) -> float:
+        return self._timeout_s
+
+    def requests(self, session: Session) -> list[tuple[str, str, str]]:
+        return repo.session_requests(self._conn, session.session_id)
+
     def take_session(self, raw_session_id: str) -> tuple[Session, SessionLock]:
         """Hold a session for a caller that asks several questions (interactive-shell D4).
 
@@ -291,20 +322,44 @@ class SessionService:
         timeout_s: float | None = None,
     ) -> LLMResponse:
         deadline_s = self._timeout_s if timeout_s is None else timeout_s
+        # Read under the session lock: nobody else can change the session until it is released.
         session = repo.get_session(self._conn, session_id)
         assert session is not None
-        warnings: tuple[str, ...] = ()
-        if session.status is SessionStatus.UNCERTAIN:
-            warnings = (
-                "this session has an earlier uncertain request; it was not resent "
-                "and stays in the history",
+        if session.status is SessionStatus.CLOSED:
+            raise SessionClosed(
+                f"session {session_id} is closed: its remote conversation could not be found "
+                "again. Create a new session"
             )
-
         # The provider receives the memory block and the question; only the question is ever
         # stored, and only when the provider's content is synthetic (D7).
         sent_text = compose_prompt(context, prompt) if context is not None else prompt
+        check = getattr(provider, "check", None)
+        if check is not None:
+            check(sent_text)  # configuration, measurement, size: before anything is recorded
+        with_events = accepts_events(provider)
+        warnings: list[str] = []
+        cut: list[bool] = []
+        if session.status is SessionStatus.UNCERTAIN:
+            warnings.append(
+                "this session has an earlier uncertain request; it was not resent "
+                "and stays in the history"
+            )
+            if with_events and session.remote_ref is None:
+                warnings.append(
+                    "that request never got a remote conversation reference, so this question "
+                    "opens a new remote conversation; the earlier one may be left orphaned at "
+                    "the provider"
+                )
         request = LLMRequest(
-            request_id=uuid7(), session_id=session_id, prompt=sent_text, timeout_s=deadline_s
+            request_id=uuid7(),
+            session_id=session_id,
+            prompt=sent_text,
+            timeout_s=deadline_s,
+            remote_ref=session.remote_ref,
+            # Turns the remote conversation must show: those completed in it (none without one).
+            completed_turns=(repo.completed_in_remote(self._conn, session_id)
+                             if session.remote_ref is not None
+                             else repo.completed_requests(self._conn, session_id)),
         )
         store_content = provider.synthetic_content
         question = prompt if stored_text is None else stored_text
@@ -348,6 +403,58 @@ class SessionService:
                 repo.set_request_status(self._conn, request.request_id, RequestStatus.RUNNING)
                 self._audit(request, RequestStatus.RUNNING)
 
+        provider_name = provider.name
+
+        class Events:
+            """What the provider reports while it works, stored at once in its own transaction."""
+
+            @staticmethod
+            def bound(remote_ref: str) -> None:
+                if not REMOTE_REF.fullmatch(remote_ref):
+                    warnings.append(
+                        "the provider reported a remote reference of an unexpected shape; "
+                        "it was not stored"
+                    )
+                    return
+                try:
+                    with transaction(self._conn):
+                        if repo.bind_remote_ref(self._conn, session_id, remote_ref):
+                            repo.insert_audit(
+                                self._conn,
+                                event_type="session.bound",
+                                outcome="ok",
+                                actor=provider_name,
+                                session_id=session_id,
+                                request_id=request.request_id,
+                            )
+                except repo.RemoteRefTaken:
+                    # The prompt went into a conversation another session owns (SEC-02): its
+                    # answer mixes both contexts, so it is neither bound nor shown.
+                    with transaction(self._conn):
+                        repo.insert_audit(
+                            self._conn,
+                            event_type="session.bound",
+                            outcome="refused_taken",
+                            actor=provider_name,
+                            session_id=session_id,
+                            request_id=request.request_id,
+                        )
+                    warnings.append(
+                        "the provider reported a remote conversation that belongs to another "
+                        "session; this session was not bound to it and its answer is not shown"
+                    )
+                    raise RemoteConversationTaken(
+                        "the remote conversation belongs to another session"
+                    ) from None
+
+            @staticmethod
+            def warn(text: str) -> None:
+                warnings.append(safe_foreign_line(text).text)
+
+            @staticmethod
+            def truncated() -> None:
+                cut.append(True)
+
         started = time.monotonic()
 
         def finish(
@@ -356,6 +463,7 @@ class SessionService:
             text: str | None = None,
             error_code: str | None = None,
             detail: str | None = None,
+            closes_session: bool = False,
         ) -> LLMResponse:
             duration_ms = int((time.monotonic() - started) * 1000)
             with transaction(self._conn):
@@ -374,10 +482,15 @@ class SessionService:
                     error_code=error_code,
                     duration_ms=duration_ms,
                 )
-                if status is RequestStatus.COMPLETED:
-                    repo.set_session_status(self._conn, session_id, SessionStatus.ACTIVE)
-                elif status is RequestStatus.UNCERTAIN:
-                    repo.set_session_status(self._conn, session_id, SessionStatus.UNCERTAIN)
+                session_status = {
+                    RequestStatus.COMPLETED: SessionStatus.ACTIVE,
+                    RequestStatus.UNCERTAIN: SessionStatus.UNCERTAIN,
+                    RequestStatus.AUTHENTICATION_REQUIRED: SessionStatus.AUTHENTICATION_REQUIRED,
+                }.get(status)
+                if closes_session:
+                    session_status = SessionStatus.CLOSED
+                if session_status is not None:
+                    repo.set_session_status(self._conn, session_id, session_status)
                 self._audit(request, status)
             return LLMResponse(
                 request_id=request.request_id,
@@ -386,13 +499,17 @@ class SessionService:
                 text=text,
                 duration_ms=duration_ms,
                 detail=detail,
-                warnings=warnings,
+                warnings=tuple(warnings),
+                truncated=bool(cut) and text is not None,
             )
 
         try:
             async with asyncio.timeout(deadline_s):
-                text = await provider.ask(request, on_sent)
-        except TimeoutError:
+                if with_events:
+                    text = await provider.ask(request, on_sent, events=Events())  # type: ignore[call-arg]
+                else:
+                    text = await provider.ask(request, on_sent)
+        except TimeoutError as exc:
             if sent:
                 return finish(
                     RequestStatus.UNCERTAIN,
@@ -403,7 +520,9 @@ class SessionService:
             return finish(
                 RequestStatus.TIMEOUT,
                 error_code="timeout_before_send",
-                detail="the deadline expired before the prompt was sent",
+                detail=str(exc)
+                if isinstance(exc, ProviderError)
+                else "the deadline expired before the prompt was sent",
             )
         except asyncio.CancelledError:
             # Ctrl+C or cancellation: record what is known, then let the interruption continue.
@@ -412,6 +531,27 @@ class SessionService:
             else:
                 finish(RequestStatus.FAILED, error_code="interrupted_before_send")
             raise
+        except (ProviderUncertain, AuthenticationRequired, RemoteConversationLost) as exc:
+            # After `on_sent` the prompt may have arrived: whatever the reason, it is uncertain
+            # and never resent (D5). Before it, each has its own state.
+            if sent or isinstance(exc, ProviderUncertain):
+                return finish(
+                    RequestStatus.UNCERTAIN,
+                    error_code=type(exc).__name__,
+                    detail=f"{exc}; the prompt may have reached the provider and was not resent",
+                )
+            if isinstance(exc, AuthenticationRequired):
+                return finish(
+                    RequestStatus.AUTHENTICATION_REQUIRED,
+                    error_code=type(exc).__name__,
+                    detail=str(exc),
+                )
+            return finish(
+                RequestStatus.FAILED,
+                error_code=type(exc).__name__,
+                detail=str(exc),
+                closes_session=True,
+            )
         except Exception as exc:
             return finish(
                 RequestStatus.FAILED,

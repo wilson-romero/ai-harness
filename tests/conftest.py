@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import shutil
@@ -20,6 +21,7 @@ from harness.core.service import SessionService
 from harness.providers.base import LLMProvider
 from harness.providers.mock import MockProvider
 from harness.storage.database import DATABASE_NAME, open_database
+from tests.copilot_app import SyntheticCopilot
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HARNESS_VARS = [
@@ -28,6 +30,11 @@ HARNESS_VARS = [
     "HARNESS_REQUEST_TIMEOUT_S",
     "HARNESS_MOCK_BEHAVIOR",
     "HARNESS_MOCK_DELAY_MS",
+    # Never inherit a real Copilot URL or the real dedicated profile into a test.
+    "HARNESS_COPILOT_URL",
+    "HARNESS_EDGE_PROFILE",
+    "HARNESS_COPILOT_READY_TIMEOUT_S",
+    "HARNESS_COPILOT_MAX_PROMPT_CHARS",
     "HARNESS_VAULT_ROOT",
     "HARNESS_MEMORY_CONTEXT_MAX_BYTES",
     "HARNESS_MOCK_RESPONSES",
@@ -69,6 +76,56 @@ PRIVATE_KEY_SAMPLE = "\n".join(
         "-----END " + "RSA PRIVATE KEY-----",
     ]
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_environment(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+    """No test sees a real Copilot URL or profile, and no test ever opens a visible window."""
+    for name in HARNESS_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HARNESS_TEST_HEADLESS", "1")
+    if request.node.get_closest_marker("edge"):
+        request.getfixturevalue("edge_ready")
+
+
+@pytest.fixture(scope="session")
+def edge_ready(tmp_path_factory: pytest.TempPathFactory) -> str:
+    """Edge's version, or a visible skip when Edge genuinely cannot be launched here."""
+    from playwright.async_api import async_playwright
+
+    async def launch() -> str:
+        profile = tmp_path_factory.mktemp("edge-check")
+        async with async_playwright() as playwright:
+            context = await playwright.chromium.launch_persistent_context(
+                str(profile), channel="msedge", headless=True, timeout=60_000
+            )
+            version = context.browser.version if context.browser else "unknown"
+            await context.close()
+            return version
+
+    try:
+        return asyncio.run(launch())
+    except Exception as exc:  # any reason Edge cannot start is a reason to skip, said aloud
+        first_line = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+        pytest.skip(f"Microsoft Edge cannot be launched by Playwright here: {first_line}")
+
+
+@pytest.fixture
+def copilot_app() -> Iterator[SyntheticCopilot]:
+    app = SyntheticCopilot().start()
+    yield app
+    app.stop()
+
+
+@pytest.fixture
+def edge_env(
+    data_dir: Path, tmp_path: Path, copilot_app: SyntheticCopilot, monkeypatch: pytest.MonkeyPatch
+) -> SyntheticCopilot:
+    """Environment for a browser test: temporary data and profile, the synthetic app's URL."""
+    monkeypatch.setenv("HARNESS_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("HARNESS_EDGE_PROFILE", str(tmp_path / "edge-profile"))
+    monkeypatch.setenv("HARNESS_COPILOT_URL", copilot_app.url())
+    return copilot_app
 
 
 @pytest.fixture
