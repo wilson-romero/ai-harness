@@ -174,7 +174,9 @@ async def test_skill_inputs_from_a_file_and_bad_inputs(conn, data_dir, tmp_path)
     source.write_text("texto-desde-fichero", encoding="utf-8")
     conversation, terminal, effect, provider = _setup(
         conn, data_dir, tmp_path,
-        ["/skill demo-echo texto", "/skill demo-echo text=a text=b", "/skill ../x text=a",
+        # Two bare words: no short form takes them (command-completion D3; one bare word is
+        # now the path of the skill's only input, tested in test_shell_shortforms.py).
+        ["/skill demo-echo texto otro", "/skill demo-echo text=a text=b", "/skill ../x text=a",
          f"/skill demo-echo --file text={source}", "/exit"], [CODE])
     await conversation.run()
     assert "inputs are NAME=VALUE" in terminal.text

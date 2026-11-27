@@ -13,22 +13,12 @@ from __future__ import annotations
 import unicodedata
 from dataclasses import dataclass
 
+from harness.shell.commands import TABLE, names_starting, resolve_name
 from harness.text.safe_text import terminal_safe
 
-# name -> (minimum, maximum or None) number of arguments.
-COMMANDS: dict[str, tuple[int, int | None]] = {
-    "help": (0, 0),
-    "status": (0, 0),
-    "new": (0, None),
-    "sessions": (0, 0),
-    "resume": (1, 1),
-    "history": (0, 0),
-    "memory": (1, None),
-    "context": (0, 0),
-    "skill": (1, None),
-    "file": (1, 1),
-    "exit": (0, 0),
-}
+# name -> (minimum, maximum or None) number of arguments, from the one table (commands.py).
+COMMANDS: dict[str, tuple[int, int | None]] = {spec.name: (spec.least, spec.most)
+                                               for spec in TABLE}
 _SHOWN_NAME_CHARS = 40
 
 
@@ -59,6 +49,18 @@ def _blank(char: str) -> bool:
 
 
 def parse_line(line: str) -> Question | Command | Empty:
+    """A line as typed in full: a command's name must be whole."""
+    return _parse(line, short=False)
+
+
+def parse_short(line: str) -> Question | Command | Empty:
+    """A line where a command's name may be shortened to its start when only one command starts
+    so (command-completion D3): `/sk` is `/skill`. An ambiguous start is an error that names
+    the commands it could be. Everything else is `parse_line`."""
+    return _parse(line, short=True)
+
+
+def _parse(line: str, *, short: bool) -> Question | Command | Empty:
     line = line.rstrip("\r\n")
     start = 0
     while start < len(line) and _blank(line[start]):
@@ -71,8 +73,15 @@ def parse_line(line: str) -> Question | Command | Empty:
     if not stripped.startswith("/"):
         return Question(line)
     rest = stripped[1:]
-    words = _split(rest)
+    words = split_words(rest)
     name = words[0] if words and not rest[:1].isspace() else ""
+    if short and name not in COMMANDS and name:
+        resolved = resolve_name(name)
+        if resolved is None and len(names_starting(name)) > 1:
+            shown = terminal_safe(name)[:_SHOWN_NAME_CHARS]
+            raise LineError(f"/{shown} is the start of more than one command: "
+                            + ", ".join(f"/{n}" for n in names_starting(name)))
+        name = resolved or name
     if name not in COMMANDS:
         shown = terminal_safe(name)[:_SHOWN_NAME_CHARS]
         raise LineError(f"unknown command /{shown}; /help lists the commands")
@@ -89,7 +98,7 @@ def parse_line(line: str) -> Question | Command | Empty:
     return Command(name, args)
 
 
-def _split(text: str) -> list[str]:
+def split_words(text: str) -> list[str]:
     """Blank-separated words; `"…"` groups blanks into one word. One pass, no backtracking."""
     words: list[str] = []
     current: list[str] = []
