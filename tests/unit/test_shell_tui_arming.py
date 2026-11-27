@@ -3,15 +3,20 @@
 
 The box arms after ARM_S of silence (no key, paste or mouse button) counted from its first
 paint, and an input read before the arming never acts, however late it is handled. Time is
-the box's clock (`ApprovalScreen.clock`), replaced here by a clock the test moves; each input
-event is built with the read stamp the terminal driver gives it (`Message.time`) and handed
-to the application the way the driver does (`App.post_message`). "The timer fires" is
+the box's clock (`ApprovalScreen.clock`), replaced here by a clock the test moves; the same
+clock stamps every Textual message (`Message.time`), so an event the application makes
+itself (the Click after a MouseUp) carries test time too, whatever the machine's uptime.
+Each input event is built with the read stamp the terminal driver gives it and handed to the
+application the way the driver does (`App.post_message`). "The timer fires" is
 `_arm_if_quiet`, called before each delivery as a due timer would be.
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
+import textual.message
 from textual import events
 from textual.widgets import Button
 
@@ -50,6 +55,7 @@ class Clock:
 def clock(monkeypatch) -> Clock:
     fake = Clock()
     monkeypatch.setattr(ApprovalScreen, "clock", staticmethod(fake))
+    monkeypatch.setattr(textual.message, "_time", SimpleNamespace(get_time=fake))
     return fake
 
 
@@ -104,6 +110,14 @@ async def _approved(tui, pilot, effect) -> None:
     await tui.send(pilot, "/exit")
     assert len(effect.written()) == 1
     assert _query(tui.data_dir, "SELECT status FROM approvals") == ["consumed"]
+
+
+async def _rejected(tui, pilot, effect) -> None:
+    await tui.until(pilot, lambda: any("is cancelled" in t for t in tui.blocks("harness")))
+    await tui.ready(pilot)
+    await tui.send(pilot, "/exit")
+    assert effect.written() == []
+    assert _query(tui.data_dir, "SELECT status FROM approvals") == ["rejected"]
 
 
 def test_the_box_reads_the_clock_input_events_are_stamped_with():
@@ -217,4 +231,143 @@ async def test_keys_read_before_a_late_arming_never_act(tmp_path):
         for event in made:
             tui.app.post_message(event)
         await pilot.pause(0.2)
+        await _pending(tui, pilot, effect)
+
+
+# -- review of 2026-11-27: a stall, the confirmation, pastes, the filter of each widget ---------
+
+
+def _burst(first_ms: float, last_ms: float) -> list[float]:
+    """Read times every 100 ms, as a person typing on."""
+    count = round((last_ms - first_ms) / 100) + 1
+    return [first_ms + 100 * n for n in range(count)]
+
+
+@pytest.mark.parametrize("stall_ms", [700, 2000])
+@pytest.mark.parametrize("burst", ["ends before the stall ends", "goes on after the arming"])
+@pytest.mark.parametrize("kind", ["keys", "mouse"])
+async def test_a_stall_then_a_burst_across_the_arming_approves_nothing(
+        tmp_path, clock, stall_ms, burst, kind):
+    """The reviewer's sequence. Keys are read every 100 ms from +0.1 s while the loop stalls
+    until `stall_ms`; when it runs again the arming timer goes first and arms with the
+    silence counted from the paint. The keys already read come next. They were read before
+    the arming, so it was no silence: the box disarms and counts from the last of them. The
+    burst then goes on (Tab and Enter, or a click on Approve, read after that arming)."""
+    tui, effect = _skill_tui(tmp_path, arm_s=ARM_S)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        box = await _open(tui, pilot)
+        reads = _burst(100, stall_ms - 100)
+        queued = [_key("down", MOUNT + ms / 1000) for ms in reads]
+        clock.at(stall_ms)
+        box._arm_if_quiet()  # the timer runs first
+        assert box.armed
+        await _deliver(tui, pilot, clock, stall_ms, queued)
+        assert not box.armed  # each earlier input restarts the interval
+        last = reads[-1]
+        if burst == "goes on after the arming":
+            later = stall_ms + 50
+            made = ([_key("tab", MOUNT + later / 1000), _key("enter", MOUNT + (later + 50) / 1000)]
+                    if kind == "keys" else _click(box, "approve", MOUNT + later / 1000))
+            await _deliver(tui, pilot, clock, later + 50, made)
+            # Enter is read at +50; the Click is made by the application when it handles
+            # the MouseUp, at +50, and stamped then.
+            last = later + 50
+            assert not box.armed
+        clock.at(last + 490)
+        box._arm_if_quiet()
+        assert not box.armed  # not before the last input read + ARM_S
+        clock.at(last + 500)
+        box._arm_if_quiet()
+        assert box.armed
+        await _pending(tui, pilot, effect)
+
+
+async def test_the_confirmation_ignores_input_read_just_after_it_appeared(tmp_path, clock):
+    """The question of Reject arms like the box: Tab and Enter read 10 ms after it appeared,
+    and handled 0.6 s later, do not confirm the rejection."""
+    tui, effect = _skill_tui(tmp_path, arm_s=ARM_S)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        box = await _open(tui, pilot)
+        clock.at(600)
+        box._arm_if_quiet()
+        await _deliver(tui, pilot, clock, 650, _click(box, "reject", clock.at(650)))
+        assert box.query_one("#approval-confirm").display
+        queued = [_key("tab", MOUNT + 0.66), _key("enter", MOUNT + 0.66)]
+        await _deliver(tui, pilot, clock, 1250, queued)  # the timer may have armed first
+        assert isinstance(tui.app.screen, ApprovalScreen) and not box.pressed
+        await pilot.press("ctrl+c")
+        await tui.ready(pilot)
+        await tui.send(pilot, "/exit")
+    assert _query(tui.data_dir, "SELECT status FROM approvals") == ["pending"]
+
+
+async def test_the_confirmation_accepts_input_after_its_silence(tmp_path, clock):
+    """Positive control: 0.5 s of silence after the question, then Tab and Enter reject."""
+    tui, effect = _skill_tui(tmp_path, arm_s=ARM_S)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        box = await _open(tui, pilot)
+        clock.at(600)
+        box._arm_if_quiet()
+        await _deliver(tui, pilot, clock, 650, _click(box, "reject", clock.at(650)))
+        await tui.until(pilot, lambda: box.shown)  # the question is painted
+        clock.at(1300)
+        box._arm_if_quiet()
+        assert box.armed
+        await _deliver(tui, pilot, clock, 1300, [_key("tab", clock.at(1300)),
+                                                 _key("enter", clock.at(1300))])
+        await _rejected(tui, pilot, effect)
+
+
+async def test_a_paste_restarts_the_silence(tmp_path, clock):
+    tui, effect = _skill_tui(tmp_path, arm_s=ARM_S)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        box = await _open(tui, pilot)
+        paste = events.Paste("approve\r")
+        paste.time = clock.at(400)
+        await _deliver(tui, pilot, clock, 400, [paste])
+        clock.at(600)
+        box._arm_if_quiet()
+        assert not box.armed
+        clock.at(900)
+        box._arm_if_quiet()
+        assert box.armed
+        await _pending(tui, pilot, effect)
+
+
+@pytest.mark.parametrize("widget", ["#approve", "#reject", "#approval-content"])
+async def test_each_widget_of_the_box_filters_input_read_before_the_arming(
+        tmp_path, clock, widget):
+    """Defence in depth: the proposal and each button judge the read time themselves, not
+    only the box (a mutant that removes one widget's filter makes its case fail)."""
+    tui, effect = _skill_tui(tmp_path, arm_s=ARM_S)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        box = await _open(tui, pilot)
+        clock.at(600)
+        box._arm_if_quiet()
+        target = box.query_one(widget)
+        assert target.check_message_enabled(_key("enter", clock.at(610)))  # read after: passes
+        assert box.armed
+        assert not target.check_message_enabled(_key("enter", MOUNT + 0.3))  # read before
+        assert not box.armed  # and the box disarms
+        await _pending(tui, pilot, effect)
+
+
+async def test_a_click_pressed_before_a_late_arming_never_presses_even_if_it_rearms(
+        tmp_path, clock):
+    """The button went down at +0.1 s and the loop stalled until +2 s: the MouseDown is
+    dropped and disarms, and since the silence before it was long the box arms again. The
+    button comes up at +2.05 s, after that arming, so the MouseUp passes and the application
+    makes a new Click; its MouseDown was not new: it does not press."""
+    tui, effect = _skill_tui(tmp_path, arm_s=ARM_S)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        box = await _open(tui, pilot)
+        down, up = _click(box, "approve", MOUNT + 0.1)
+        clock.at(2000)
+        box._arm_if_quiet()
+        await tui.until(pilot, lambda: not box.query_one("#approve", Button).disabled)
+        await _deliver(tui, pilot, clock, 2000, [down])
+        await tui.until(pilot, lambda: box.armed)  # armed again: 1.9 s of silence before it
+        await tui.until(pilot, lambda: not box.query_one("#approve", Button).disabled)
+        up.time = MOUNT + 2.05
+        await _deliver(tui, pilot, clock, 2050, [up])
         await _pending(tui, pilot, effect)

@@ -1314,9 +1314,11 @@ class ApprovalScreen(ModalScreen[None]):
     buttons) around the proposal content in a foreign area (shell-tui D6, approval-buttons D2).
 
     The focus starts on the proposal, never on a button. Both buttons stay disabled until the
-    box has been painted and then ARM_S has passed with no key, paste or mouse button; each one
-    received before restarts that silence. An input read before the arming never acts, however
-    late the event loop handles it (approval-buttons D9). Approve stays
+    box has been painted and then ARM_S has passed with no key, paste or mouse button read
+    from the terminal; each one restarts that silence from the moment it was read. An input
+    read before the arming never acts, however late the event loop handles it, and disarms the
+    box: the silence the arming counted on was not one (approval-buttons D9). The question of
+    Reject arms the same way. Approve stays
     disabled until the end of the proposal has been on the screen. Reject asks for a
     confirmation inside the box. Escape does nothing; ctrl+c and ctrl+q leave the approval
     pending."""
@@ -1342,10 +1344,9 @@ class ApprovalScreen(ModalScreen[None]):
         self.opened = self.clock()
         self.armed = False
         self.pressed = False
-        self.confirm_opened = 0.0
-        self.shown = False  # painted once: its widgets are mounted and on the screen
+        self.shown = False  # what it shows now (the box, or Reject's question) is painted
         self.armed_at: float | None = None  # `clock()` when it armed
-        self._quiet_from = 0.0  # the silence before arming counts from here
+        self._quiet_from = 0.0  # the silence counts from here: a paint, or an input's read time
         self._arm_timer: Any = None
 
     @staticmethod
@@ -1369,17 +1370,19 @@ class ApprovalScreen(ModalScreen[None]):
     @staticmethod
     def admits(widget: Any, message: Message) -> bool:
         """Whether the box lets an input reach `widget` of it (approval-buttons D9). Before the
-        arming every input passes, since no button is enabled, and restarts the silence; after
-        it, an input read before the arming is dropped where it is posted, so it reaches no
-        binding and bubbles nowhere."""
+        arming every input passes, since no deciding button is enabled, and restarts the
+        silence from its read time. After it, an input read before the arming is dropped where
+        it is posted, so it reaches no binding and bubbles nowhere, and the box disarms."""
         box = widget if isinstance(widget, ApprovalScreen) else next(
             (node for node in widget.ancestors if isinstance(node, ApprovalScreen)), None)
         if box is None or not ApprovalScreen._deciding(message):
             return True
+        if box.armed and box.armed_at is not None and message.time < box.armed_at:
+            box._disarm(message.time)
+            return False
         if not box.armed:
-            box._restart_silence()
-            return True
-        return box.armed_at is not None and message.time >= box.armed_at
+            box._restart_silence(message.time)
+        return True
 
     def check_message_enabled(self, message: Message) -> bool:
         return super().check_message_enabled(message) and ApprovalScreen.admits(self, message)
@@ -1433,24 +1436,34 @@ class ApprovalScreen(ModalScreen[None]):
         self.call_after_refresh(self._watch_scroll)
 
     def _shown(self) -> None:
-        """The box has been painted: the silence before arming counts from now (D9)."""
+        """What the box shows has been painted: the silence counts from now (D9)."""
         self.shown = True
         self._restart_silence()
         self._arm_if_quiet()
 
-    def _restart_silence(self) -> None:
-        self._quiet_from = max(self._quiet_from, self.clock())
+    def _restart_silence(self, read: float | None = None) -> None:
+        self._quiet_from = max(self._quiet_from, self.clock() if read is None else read)
+
+    def _left(self) -> float:
+        return self.app.arm_s - (self.clock() - self._quiet_from)  # type: ignore[attr-defined]
+
+    def _arm_later(self, seconds: float) -> None:
+        if self._arm_timer is not None:
+            self._arm_timer.stop()
+            self._arm_timer = None
+        if seconds <= 0:  # a Textual timer cannot have a zero interval
+            self.call_later(self._arm_if_quiet)
+            return
+        self._arm_timer = self.set_timer(seconds, self._arm_if_quiet)
 
     def _arm_if_quiet(self) -> None:
-        """Arm once ARM_S has passed since the paint and since the last input; otherwise
-        look again when it would have passed. One timer at a time."""
+        """Arm once ARM_S has passed since the paint and since the last input was read;
+        otherwise look again when it would have passed. One timer at a time."""
         if self.armed or not self.shown:
             return
-        left = self.app.arm_s - (self.clock() - self._quiet_from)  # type: ignore[attr-defined]
+        left = self._left()
         if left > 0:
-            if self._arm_timer is not None:
-                self._arm_timer.stop()
-            self._arm_timer = self.set_timer(left, self._arm_if_quiet)
+            self._arm_later(left)
             return
         self._arm()
 
@@ -1458,7 +1471,20 @@ class ApprovalScreen(ModalScreen[None]):
         self.armed = True
         self.armed_at = self.clock()
         self.query_one("#reject", Button).disabled = False
+        if self.query_one("#approval-confirm").display:
+            self.query_one("#reject-yes", Button).disabled = self.pressed
         self._watch_scroll()
+
+    def _disarm(self, read: float | None = None) -> None:
+        """Back to unarmed: the deciding buttons off, the silence counted again from `read`
+        (an input's read time) or from now. The next look is by timer, so input already
+        queued is handled, unarmed, before it."""
+        self.armed = False
+        self.armed_at = None
+        for name in ("#approve", "#reject", "#reject-yes"):
+            self.query_one(name, Button).disabled = True
+        self._restart_silence(read)
+        self._arm_later(self._left())
 
     def action_escape(self) -> None:
         """Escape never decides: in the confirmation it is Back, otherwise nothing."""
@@ -1495,31 +1521,35 @@ class ApprovalScreen(ModalScreen[None]):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         event.stop()
         which = event.button.id
+        if which == "reject-back" and not self.pressed:
+            self._confirming(False)  # Back never decides: it acts armed or not
+            return
         if not self.armed or self.pressed or self.clock() - self.opened < self.app.arm_s:  # type: ignore[attr-defined]
             return
         if which == "approve" and self.seen_end:
             self._send("approve")
         elif which == "reject":
             self._confirming(True)
-        elif which == "reject-back":
-            self._confirming(False)
         elif which == "reject-yes":
-            # Not a second click or a held key of the Reject that opened the question.
-            if self.clock() - self.confirm_opened >= self.app.arm_s:  # type: ignore[attr-defined]
-                self._send("reject")
+            # Armed again since the question appeared: not a second click or a held key of
+            # the Reject that opened it, nor input read just after it (D3, D9).
+            self._send("reject")
 
     def _confirming(self, on: bool) -> None:
-        """Reject asks once more, inside the box; the focus goes to Back (approval-buttons D3)."""
+        """Reject asks once more, inside the box; the focus goes to Back (approval-buttons D3).
+        Each change of view disarms the box, which arms again by the same rule once the new
+        view is painted (D9)."""
         self.query_one("#approval-buttons").display = not on
         self.query_one("#approval-question").display = not on
         self.query_one("#approval-confirm").display = on
-        for name in ("#reject-back", "#reject-yes"):
-            self.query_one(name, Button).disabled = not on
+        self.query_one("#reject-back", Button).disabled = not on
+        self.shown = False
+        self._disarm()
         if on:
-            self.confirm_opened = self.clock()
             self.query_one("#reject-back", Button).focus()
         else:
             self.query_one(ProposalArea).focus()
+        self.call_after_refresh(self._shown)
 
     def _send(self, choice: str) -> None:
         self.pressed = True
