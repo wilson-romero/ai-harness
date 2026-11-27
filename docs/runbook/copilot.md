@@ -183,6 +183,12 @@ Qué significa cada resultado:
 
 `history` de una sesión de Copilot muestra el identificador de su conversación y, por solicitud, su estado y su hora (UTC), **sin texto**: la base de datos del harness no guarda preguntas ni respuestas de Copilot. El perfil dedicado es un perfil de navegador: Edge guarda en él caché, IndexedDB, historial y cookies, y ahí puede quedar texto de las conversaciones (ver `SECURITY.md`, «Qué queda en disco»).
 
-Desde el 2026-11-26, `ui.json` admite `locators.code_language` (`css` o `test_id`): el elemento de la cabecera de un bloque de código que lleva la etiqueta del lenguaje. Sin él, los bloques de código salen sin lenguaje y un Skill que espera un bloque `json` no lo encuentra. Mídelo por estructura (sin copiar texto) y añádelo a mano a tu `ui.json`.
+Desde el 2026-11-26, `ui.json` admite `locators.code_language` (`css` o `test_id`): el elemento de la cabecera de un bloque de código que lleva la etiqueta del lenguaje. Sin él, los bloques de código salen sin lenguaje y un Skill que espera un bloque `json` no lo encuentra. Lo mide la sonda sin enviar nada, sobre una sesión cuya conversación ya muestra un bloque de código (por ejemplo, la de una pregunta que pidió un bloque `json`):
+
+```
+uv run python scripts/copilot_probe.py code-language --session SESSION_ID
+```
+
+Busca por estructura el elemento con `data-testid` que lleva la etiqueta de cada bloque, comprueba que con él el bloque sale con lenguaje y sin él sin lenguaje, y lo añade a `ui.json` (el anterior queda como `ui-<fecha>.json`). Un `measure` posterior lo conserva. Sin bloque de código en esa conversación, termina con `missing: code_language` y no cambia nada.
 
 Pruebas reales (opcional, 5 envíos de prompts sintéticos fijos, con ventana): con las variables del paso 0, `uv run pytest -m copilot -p no:cacheprovider`. Sin esas variables se omiten con su motivo.

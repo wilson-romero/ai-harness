@@ -9,6 +9,8 @@ Usage (see docs/runbook/copilot.md):
     uv run python scripts/copilot_probe.py login-state  # what an expired login looks like
     uv run python scripts/copilot_probe.py discover     # only find the controls (2 sends)
     uv run python scripts/copilot_probe.py structure    # sanitised page structure, no sends
+    uv run python scripts/copilot_probe.py code-language --session SESSION_ID
+                                                        # a code block's label element, no sends
 
 The probe sends only the fixed prompts below and accepts no prompt of its own from arguments,
 environment or standard input. It writes its measurements only under
@@ -74,9 +76,14 @@ from harness.providers.copilot_ui import (  # noqa: E402
     MeasurementError,
     UiMeasurement,
 )
+from harness.providers.copilot_ui import load_measurement, measurement_path  # noqa: E402
+from harness.providers.copilot_web import REPLY_MAX_CHARS, REPLY_TEXT_JS  # noqa: E402
+from harness.storage import repositories as repo  # noqa: E402
+from harness.storage.database import connect  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
 
 DISCOVERED_FILE = "discovered.json"
+CODE_WAIT_S = 20.0  # `code-language`: how long a reopened conversation may take to show its code
 REQUIRED_LOCATORS = ("composer", "new_conversation", "user_turn", "assistant_turn")
 
 # -- what the probe sends: fixed, synthetic, nothing else ---------------------------------------
@@ -582,6 +589,7 @@ class Probe:
     settings: Settings
     url: str
     out_dir: Path
+    session: str | None = None  # `code-language`: the session whose conversation is opened
 
     @property
     def copilot_host(self) -> str:
@@ -994,6 +1002,141 @@ async def step_structure(probe: Probe, result: dict) -> None:
     result["structure_lines"] = len(lines)
 
 
+# Per code box (`role=textbox`) of a turn: does it have a header (the nearest enclosing element
+# with visible text outside the box, controls and icons left out), does that text look like a
+# language name, how long it is, and the `data-testid` of the header elements that hold exactly
+# that text and not the box. Attribute values and counts only: the text itself never leaves.
+CODE_LABEL_JS = r"""
+(turn) => {
+  const CONTROLS = "button,[role=button],[role=toolbar],[role=menu],[role=menubar],[role=menuitem]";
+  const LANGUAGE = /^[A-Za-z0-9][A-Za-z0-9+#._-]{0,19}$/;
+  const outside = (el, box) => {
+    let s = "";
+    const go = (n) => {
+      if (n === box) return;
+      if (n.nodeType === 3) { s += n.textContent; return; }
+      if (n.nodeType !== 1 || n.matches(CONTROLS) || n.tagName.toLowerCase() === "svg") return;
+      for (const c of n.childNodes) go(c);
+    };
+    go(el);
+    return s.trim();
+  };
+  return [...turn.querySelectorAll("[role=textbox]")].map((box) => {
+    let block = box.parentElement;
+    while (block && block !== turn && !outside(block, box)) block = block.parentElement;
+    if (!block || block === turn) return { header: false, label_is_language: false, test_ids: [] };
+    const label = outside(block, box);
+    const ids = [...block.querySelectorAll("[data-testid]")]
+      .filter((e) => !e.contains(box) && outside(e, null) === label)
+      .map((e) => e.getAttribute("data-testid"));
+    return { header: true, label_is_language: LANGUAGE.test(label), label_length: label.length, test_ids: ids };
+  });
+}
+"""
+
+
+def fence_counts(text: str) -> tuple[int, int]:
+    """Opening fences of a rebuilt reply: (with a language, without one). Counts only."""
+    fences = [line.strip() for line in text.split("\n") if re.match(r"`{3,}", line.strip())]
+    opening = fences[0::2]
+    return (sum(1 for f in opening if re.fullmatch(r"`{3,}\S+", f)),
+            sum(1 for f in opening if re.fullmatch(r"`{3,}", f)))
+
+
+def choose_code_language(boxes: list[dict]) -> str | None:
+    """The `data-testid` that every labelled code box's header shares, or None."""
+    labelled = [b for b in boxes if b.get("header") and b.get("label_is_language")]
+    if not labelled:
+        return None
+    common = set(labelled[0]["test_ids"])
+    for box in labelled[1:]:
+        common &= set(box["test_ids"])
+    ordered = [i for i in labelled[0]["test_ids"] if i in common]
+    return ordered[0] if ordered else None
+
+
+async def step_code_language(probe: Probe, result: dict) -> None:
+    """Measure, without sending, which element of a code block holds its language label
+    (D8, review 2026-11-26), on the conversation of `--session` (one that already shows a
+    code block), and add it to ui.json as `locators.code_language`."""
+    if probe.session is None:
+        raise ProbeFailure("code-language needs --session SESSION_ID (a session whose "
+                           "conversation shows a code block)")
+    from uuid import UUID
+
+    try:
+        session_id = UUID(probe.session)
+    except ValueError:
+        raise ProbeFailure("--session must be a full session id") from None
+    measurement = load_measurement(probe.settings.data_dir)
+    conn = connect(probe.settings.data_dir)
+    try:
+        session = repo.get_session(conn, session_id)
+    finally:
+        conn.close()
+    if session is None or session.remote_ref is None:
+        raise ProbeFailure("that session has no remote conversation")
+    target = measurement.conversation_ref.url_for(probe.url, session.remote_ref)
+    async with probe.launcher().open() as context:
+        result["edge_version"] = edge_version(context)
+        page = first_page(context)
+        await page.goto(target)
+        if not await settle_page(page, probe.copilot_host, probe.settings.copilot_ready_timeout_s):
+            result["stopped"] = "not on the Copilot host (sign-in page?)"
+            raise ProbeFailure("the Copilot page did not open (signed out?): run `probe login`")
+        turns = measurement.locators.assistant_turn.resolve(page)
+        boxes: list[dict] = []
+        deadline = time.monotonic() + CODE_WAIT_S  # a reopened history can arrive late
+        while not boxes and time.monotonic() < deadline:
+            boxes = [b for i in range(await turns.count())
+                     for b in await turns.nth(i).evaluate(CODE_LABEL_JS)]
+            if not boxes:
+                await asyncio.sleep(0.5)
+        result["assistant_turns"] = await turns.count()
+        result["page_textboxes"] = await page.locator("[role=textbox]").count()
+        result["code_boxes"] = len(boxes)
+        result["code_boxes_with_header"] = sum(1 for b in boxes if b["header"])
+        result["code_boxes_with_language_label"] = sum(1 for b in boxes if b["label_is_language"])
+        chosen = choose_code_language(boxes)
+        if chosen is None:
+            return
+        locator = Locators.model_validate(
+            measurement.locators.model_dump(mode="json", exclude_none=True)
+            | {"code_language": {"test_id": chosen}}
+        ).code_language
+        assert locator is not None
+        # Oracle: the reader gives a language to as many blocks as have a language label with
+        # the locator, and to none without it (it never guesses).
+        with_it, without = 0, 0
+        for i in range(await turns.count()):
+            for selector in (locator.css_selector(), None):
+                _, text, _ = await turns.nth(i).evaluate(REPLY_TEXT_JS, [REPLY_MAX_CHARS, selector])
+                counted = fence_counts(text)[0]  # only the count is kept; the text is dropped
+                if selector is None:
+                    without += counted
+                else:
+                    with_it += counted
+    result["fences_with_language"] = with_it
+    result["fences_with_language_without_locator"] = without
+    result["checked"] = with_it == result["code_boxes_with_language_label"] and without == 0
+    if result["checked"]:
+        result["code_language"] = {"test_id": chosen}
+
+
+def add_code_language(out_dir: Path, data_dir: Path, locator: dict) -> str:
+    """Put the measured locator into the current ui.json (the old one is kept, dated)."""
+    target = measurement_path(data_dir)
+    if not target.is_file():
+        return "no ui.json yet: it gets the locator when measure writes it"
+    data = json.loads(target.read_text(encoding="utf-8"))
+    data["locators"] = data["locators"] | {"code_language": locator}
+    final = UiMeasurement.model_validate(data)
+    dated = datetime.fromtimestamp(target.stat().st_mtime, UTC).strftime("%Y%m%dT%H%M%SZ")
+    target.replace(out_dir / f"ui-{dated}.json")
+    write_json(out_dir, MEASUREMENT_FILE, final.model_dump(mode="json"))
+    return "written"
+
+
 # -- results ------------------------------------------------------------------------------------
 
 
@@ -1037,6 +1180,14 @@ def finish_login_state(result: dict) -> None:
     result["complete"] = bool(measured)
 
 
+def code_language_of(out_dir: Path) -> dict:
+    """The locator of the latest complete `code-language` step, as a locators entry."""
+    found = latest(out_dir, "code-language")
+    if found and found.get("complete") and found.get("code_language"):
+        return {"code_language": found["code_language"]}
+    return {}
+
+
 def assemble(out_dir: Path) -> tuple[UiMeasurement | None, str]:
     """Build `ui.json` from the latest measure and login-state results; write it if complete."""
     measure, login_state = latest(out_dir, "measure"), latest(out_dir, "login-state")
@@ -1059,7 +1210,7 @@ def assemble(out_dir: Path) -> tuple[UiMeasurement | None, str]:
         "measured_at": measure["measured_at"],
         "edge_version": measure.get("edge_version"),
         "platform": measure.get("platform"),
-        "locators": measure["locators"],
+        "locators": measure["locators"] | code_language_of(out_dir),
         "conversation_ref": measure.get("conversation_ref"),
         "identity_recoverable": measure.get("identity_recoverable"),
         "turns_visible_after_reopen": measure.get("turns_visible_after_reopen", []),
@@ -1146,6 +1297,19 @@ def print_summary(step: str, result: dict, ui_status: str | None) -> None:
         f"edge: {result.get('edge_version') or '?'}  platform: {result['platform']}  "
         f"python: {result['python']}",
     ]
+    if step == "code-language":
+        lines.append(
+            f"assistant turns: {result.get('assistant_turns')}  textboxes on the page: "
+            f"{result.get('page_textboxes')}  code boxes: {result.get('code_boxes')}  with header: "
+            f"{result.get('code_boxes_with_header')}  with a language label: "
+            f"{result.get('code_boxes_with_language_label')}"
+        )
+        lines.append(
+            f"locator: {'test_id' if result.get('code_language') else 'none'}  fences with a "
+            f"language: {result.get('fences_with_language')} (without the locator: "
+            f"{result.get('fences_with_language_without_locator')})  checked: "
+            f"{yes_no(result.get('checked'))}"
+        )
     if step == "login":
         lines.append(
             f"P1 controllable: {yes_no(result.get('controllable'))}  "
@@ -1223,6 +1387,7 @@ STEPS: dict[str, Callable] = {
     "structure": step_structure,
     "discover": step_discover,
     "sizes": step_sizes,
+    "code-language": step_code_language,
 }
 
 
@@ -1238,6 +1403,10 @@ def build_parser() -> argparse.ArgumentParser:
     steps.add_parser("structure", help="sanitised page structure, no text; sends nothing")
     steps.add_parser("discover", help="find the controls by behaviour (two fixed sends)")
     steps.add_parser("sizes", help="only the prompt sizes (P6), with the measured locators")
+    code = steps.add_parser(
+        "code-language", help="which element of a code block holds its language; sends nothing")
+    code.add_argument("--session", required=True,
+                      help="a session whose conversation already shows a code block")
     return parser
 
 
@@ -1255,7 +1424,8 @@ def main(argv: list[str] | None = None) -> int:
     result = new_result(args.step)
     try:
         settings = Settings.from_env(os.environ)
-        probe = Probe(settings, settings.require_copilot_url(), settings.data_dir / MEASUREMENT_DIR)
+        probe = Probe(settings, settings.require_copilot_url(), settings.data_dir / MEASUREMENT_DIR,
+                      session=getattr(args, "session", None))
         ensure_unversionable(probe.out_dir)
     except HarnessError as exc:
         say(f"probe: error: {exc}")
@@ -1293,6 +1463,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.step == "structure":
         result["complete"] = bool(result.get("structure_file"))
         result["missing"] = [] if result["complete"] else ["structure"]
+    elif args.step == "code-language":
+        result["complete"] = bool(result.get("code_language"))
+        result["missing"] = [] if result["complete"] else ["code_language"]
     else:
         result["complete"] = result.get("controllable") is True and bool(result.get("confirmed_by_person"))
         result["missing"] = [] if result["complete"] else ["login"]
@@ -1300,6 +1473,8 @@ def main(argv: list[str] | None = None) -> int:
     ui_status = None
     if args.step in ("measure", "login-state", "sizes"):
         _, ui_status = assemble(probe.out_dir)
+    elif args.step == "code-language" and result["complete"]:
+        ui_status = add_code_language(probe.out_dir, probe.settings.data_dir, result["code_language"])
     print_summary(args.step, result, ui_status)
     if code == EXIT_OK and not result["complete"]:
         code = EXIT_ERROR

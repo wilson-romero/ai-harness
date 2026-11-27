@@ -17,7 +17,10 @@ from types import ModuleType
 
 import pytest
 
+from harness.core.contracts import Session, SessionStatus
 from harness.providers.copilot_ui import MeasurementError, load_measurement, measurement_path
+from harness.storage import repositories as repo
+from harness.storage.database import open_database, transaction
 from harness.storage.locks import NamedLock
 from tests.conftest import HARNESS_VARS, REPO_ROOT
 from tests.copilot_app import CANARIES, SyntheticCopilot
@@ -485,3 +488,119 @@ def test_a_signal_read_while_the_page_finishes_is_not_early(quick, copilot_app, 
     for name in ("stop_hidden", "send_ready", "done_control", "aria_busy"):
         assert measure["signals"][name]["early"] == 0, name
         assert measure["signals"][name]["valid"] is True, name
+
+
+# -- code-language: the label element of a code block, measured without sending ------------------
+
+
+RICH = REPO_ROOT / "tests" / "fixtures" / "copilot_ui" / "rich"
+
+
+def bound_session(app: SyntheticCopilot, data: Path, html: str) -> str:
+    """A session bound to a synthetic conversation whose one answer renders `html`."""
+    from datetime import UTC, datetime
+    from uuid import uuid7
+
+    conversation = f"code{uuid7().hex[:12]}"
+    app.conversations[conversation] = [
+        {"role": "user", "text": "ZQX-RICH-elements"},
+        {"role": "assistant", "text": "", "html": html},
+    ]
+    now = datetime.now(UTC)
+    session = Session(session_id=uuid7(), name="Bloque", provider="copilot_web",
+                      status=SessionStatus.ACTIVE, created_at=now, updated_at=now)
+    conn = open_database(data)
+    with transaction(conn):
+        repo.insert_session(conn, session)
+        repo.bind_remote_ref(conn, session.session_id, conversation)
+    conn.close()
+    return str(session.session_id)
+
+
+def measurement_without_code_language(data: Path) -> bytes:
+    ui = json.loads(SYNTHETIC_UI.read_text(encoding="utf-8"))
+    del ui["locators"]["code_language"]
+    target = measurement_path(data)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(ui), encoding="utf-8")
+    return target.read_bytes()
+
+
+def test_code_language_step_measures_the_label_element_without_sending(quick, copilot_app, monkeypatch):
+    """Review 2026-11-26: the language of a code block comes only from a measured element.
+    The step finds it by structure on a conversation that shows a code block, checks it with
+    the reader (a language with it, none without), and adds it to ui.json, keeping the old."""
+    probe, data = quick
+    measurement_without_code_language(data)
+    session = bound_session(copilot_app, data, (RICH / "elements.html").read_text("utf-8"))
+    monkeypatch.setenv("HARNESS_COPILOT_URL", copilot_app.url())
+    out = io.StringIO()
+    with redirect_stdout(out):
+        assert probe.main(["code-language", "--session", session]) == 0
+    code_language = load_measurement(data).locators.code_language
+    assert code_language is not None and code_language.test_id == "synthetic-code-identity"
+    assert "checked: yes" in out.getvalue() and "fences with a language: 1 (without the locator: 0)" in out.getvalue()
+    assert len(list((data / "copilot").glob("ui-*.json"))) == 1  # the old measurement, kept
+    assert copilot_app.prompt_count == 0  # it sends nothing
+    result = next((data / "copilot").glob("probe-code-language-*.json")).read_text("utf-8")
+    for text in (out.getvalue(), result):
+        for canary in ("ZZ-COPY-LABEL", "ZZ-MORE-BUTTON", "clave", "valor", *CANARIES):
+            assert canary not in text
+
+
+def test_control_a_conversation_without_code_leaves_the_measurement_alone(quick, copilot_app, monkeypatch):
+    probe, data = quick
+    before = measurement_without_code_language(data)
+    session = bound_session(copilot_app, data, "<p>Respuesta sintética sin código.</p>")
+    monkeypatch.setenv("HARNESS_COPILOT_URL", copilot_app.url())
+    with redirect_stdout(io.StringIO()):
+        assert probe.main(["code-language", "--session", session]) == 1
+    assert measurement_path(data).read_bytes() == before
+    assert not list((data / "copilot").glob("ui-*.json"))
+
+
+def test_a_prose_word_beside_a_code_box_is_not_measured_as_a_label(quick, copilot_app, monkeypatch):
+    """Negative control: a plain span next to the code box has no data-testid, so nothing is
+    chosen and nothing is written."""
+    probe, data = quick
+    before = measurement_without_code_language(data)
+    html = ('<div><span>Respuesta</span>'
+            '<div role="textbox" style="white-space: pre">x = 1</div></div>')
+    session = bound_session(copilot_app, data, html)
+    monkeypatch.setenv("HARNESS_COPILOT_URL", copilot_app.url())
+    with redirect_stdout(io.StringIO()):
+        assert probe.main(["code-language", "--session", session]) == 1
+    assert measurement_path(data).read_bytes() == before
+
+
+def test_measure_keeps_the_measured_code_language(full_run, tmp_path):
+    """`assemble` (run by measure, login-state and sizes) keeps the latest code-language
+    locator; without one, ui.json has none."""
+    out = tmp_path / "copilot"
+    shutil.copytree(full_run.data / "copilot", out)
+    measured = sorted(out.glob("probe-measure-[0-9]*.json"))[-1]
+    result = json.loads(measured.read_text("utf-8"))
+    result["locators"].pop("code_language", None)  # a measure made before the locator existed
+    measured.write_text(json.dumps(result), "utf-8")
+    _, status = full_run.probe.assemble(out)
+    assert status == "written", status
+    assert json.loads((out / "ui.json").read_text("utf-8"))["locators"].get("code_language") is None
+    (out / "probe-code-language-29991231T000000000000Z.json").write_text(json.dumps(
+        {"complete": True, "code_language": {"test_id": "synthetic-code-identity"}}), "utf-8")
+    full_run.probe.assemble(out)
+    locators = json.loads((out / "ui.json").read_text("utf-8"))["locators"]
+    assert locators["code_language"]["test_id"] == "synthetic-code-identity"
+
+
+def test_a_header_whose_text_is_not_a_language_is_not_measured(quick, copilot_app, monkeypatch):
+    """Negative control: an element with a data-testid next to the code, holding two words,
+    is not a language label; nothing is chosen and nothing is written."""
+    probe, data = quick
+    before = measurement_without_code_language(data)
+    html = ('<div><div data-testid="synthetic-code-identity"><span>dos palabras</span></div>'
+            '<div role="textbox" style="white-space: pre">x = 1</div></div>')
+    session = bound_session(copilot_app, data, html)
+    monkeypatch.setenv("HARNESS_COPILOT_URL", copilot_app.url())
+    with redirect_stdout(io.StringIO()):
+        assert probe.main(["code-language", "--session", session]) == 1
+    assert measurement_path(data).read_bytes() == before
