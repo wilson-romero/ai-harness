@@ -392,3 +392,103 @@ async def test_tab_after_keys_not_yet_seen_by_the_list_completes_what_is_typed(t
         await pilot.press("escape")
         prompt.value = ""
         await tui.send(pilot, "/exit")
+
+
+# -- independent review (2026-11-27): a stuck listing, a stale Enter --------------------------
+
+EXIT_SCRIPT = r"""
+import asyncio, sys, threading, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from harness.shell import tui as tui_module
+from harness.shell.completion import Listing
+stuck = threading.Event()
+def blocked(word, **kwargs):
+    stuck.wait(30)  # a dead network folder
+    return Listing()
+tui_module.list_folder = blocked
+from tests.tui_support import SIZE, Tui
+
+async def main():
+    tui = Tui(Path(sys.argv[2]))
+    async with tui.app.run_test(size=SIZE) as pilot:
+        await tui.ready(pilot)
+        await pilot.press(*"/file a")
+        await pilot.pause(0.3)
+        await tui.send(pilot, "/exit")
+    print("closed", flush=True)
+
+started = time.monotonic()
+asyncio.run(main())
+print(f"exit {time.monotonic() - started:.2f}", flush=True)
+"""
+
+
+def test_leaving_does_not_wait_for_a_stuck_folder_listing(tmp_path):
+    """A listing blocked on a dead folder must not hold the exit: `asyncio.run` waits for the
+    threads of its default executor, where Textual's thread workers run (measured 8.87 s with
+    a listing of 8 s before the fix)."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[2]
+    data_dir = tmp_path / "datos"
+    data_dir.mkdir()
+    started = time.monotonic()
+    done = subprocess.run([sys.executable, "-c", EXIT_SCRIPT, str(repo), str(data_dir)],
+                          capture_output=True, text=True, timeout=60, cwd=tmp_path)
+    took = time.monotonic() - started
+    assert "closed" in done.stdout, done.stderr[-2000:]
+    assert took < 20, f"the exit waited {took:.1f} s for the listing (it blocks 30 s)"
+
+
+async def test_keys_with_a_stuck_listing_keep_typing_and_bound_the_threads(tmp_path,
+                                                                           monkeypatch):
+    stuck = threading.Event()
+    started: list[str] = []
+
+    def blocked(word: str, **kwargs) -> Listing:  # noqa: ANN003
+        started.append(word)
+        stuck.wait(30)
+        return Listing()
+
+    monkeypatch.setattr(tui_module, "list_folder", blocked)
+    tui = _skills_tui(tmp_path)
+    try:
+        async with tui.app.run_test(size=SIZE) as pilot:
+            prompt, listing = await _open(tui, pilot)
+            before = threading.active_count()
+            await pilot.press(*"/file ", *"abcdefghijklmnopqrst")
+            await pilot.pause(0.3)
+            assert prompt.value == "/file abcdefghijklmnopqrst"  # every key typed
+            live = threading.active_count() - before
+            assert live <= tui_module.MAX_LISTERS, f"{live} threads for 21 keys"
+            assert len(started) <= tui_module.MAX_LISTERS
+            stuck.set()  # the folder answers: the newest request is the one listed
+            await tui.until(pilot, lambda: started[-1:] == ["abcdefghijklmnopqrst"])
+            prompt.value = ""
+            await tui.send(pilot, "/exit")
+    finally:
+        stuck.set()
+
+
+async def test_enter_after_keys_the_list_has_not_seen_sends_what_is_typed(tmp_path):
+    """`e` and Enter in one write after choosing `/status`: Enter must not take the row the
+    list chose for `/s`, which would drop the `e` (same class as the Tab of task 4.8)."""
+    from textual.events import Key
+
+    tui = _skills_tui(tmp_path)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        prompt, listing = await _open(tui, pilot)
+        await pilot.press("/", "s")
+        await tui.until(pilot, lambda: listing.showing)
+        await pilot.press("down")
+        assert listing.chosen() is not None and listing.chosen().insert.startswith("/status")
+        prompt.insert_text_at_cursor("e")  # its Changed not handled yet
+        event = Key("enter", "\r")
+        await prompt._on_key(event)
+        assert prompt.value == "/se"  # the e is kept; Enter goes on to send it as typed
+        assert not event._no_default_action and not listing.showing
+        prompt.value = ""
+        await tui.send(pilot, "/exit")
