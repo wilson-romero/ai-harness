@@ -52,6 +52,7 @@ from harness.providers.base import (
     ProviderError,
     ProviderEvents,
     ProviderTimeout,
+    PromptTooLong,
     ProviderUncertain,
     RemoteConversationLost,
 )
@@ -279,10 +280,6 @@ REPLY_TEXT_JS = r"""
   return [text.length, text.length > max ? text.slice(0, max) : text, cut];
 }
 """
-
-
-class PromptTooLong(InvalidInput):
-    pass
 
 
 def editor_length(text: str) -> int:

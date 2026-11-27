@@ -3,7 +3,7 @@
 import pytest
 
 from harness.memory.config import CONTEXT_DEFAULT_BYTES, load_memory_settings
-from tests.conftest import query, run_main
+from tests.conftest import note_header, query, run_main
 
 
 def test_memory_help_lists_the_three_subcommands(data_dir):
@@ -61,7 +61,7 @@ def test_synced_folders_and_repositories_are_accepted(cli, vault, tmp_path):
             HARNESS_VAULT_ROOT=str(synced), HARNESS_DATA_DIR=str(data), HARNESS_PROFILE=profile,
         )
         assert code == 0, (profile, err)
-        assert "projects/demo-alpha/_project.md" in out
+        assert note_header("projects/demo-alpha/_project.md") in out
 
 
 @pytest.mark.parametrize("value", ["1023", "65537", "0", "-5", "ocho mil"])
