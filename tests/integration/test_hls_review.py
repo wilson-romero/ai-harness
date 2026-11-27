@@ -193,3 +193,21 @@ def test_the_demo_responses_file_matches_the_fixtures():
         KEY: _fixture("hls-review-ok.md"),
         "tarea: architecture-memory/extract": _fixture("decision-ok.json"),
     }
+
+
+def test_a_heading_only_inside_a_code_block_does_not_count(conn, data_dir, vault):
+    """Scenario «Encabezados que solo están dentro de un bloque de código» (2026-11-26): the
+    incomplete review plus `## Preguntas pendientes` inside a code block still fails."""
+    forged = _fixture("hls-review-incompleta.md") + "\n\n```md\n## Preguntas pendientes\n```\n"
+    engine, sessions, _ = _engine(conn, data_dir, vault, forged)
+    session = sessions.create_session("Revisión", "demo-alpha")
+    assert _run(engine, session, document=_fixture("hls-corto.md")).status == "failed"
+    code = conn.execute("SELECT error_code FROM skill_runs").fetchone()[0]
+    assert code == "validation_failed:required_headings:Preguntas pendientes"
+
+
+def test_control_the_same_heading_outside_the_code_block_completes(conn, data_dir, vault):
+    fixed = _fixture("hls-review-incompleta.md") + "\n\n## Preguntas pendientes\n\n- Ninguna.\n"
+    engine, sessions, _ = _engine(conn, data_dir, vault, fixed)
+    session = sessions.create_session("Revisión", "demo-alpha")
+    assert _run(engine, session, document=_fixture("hls-corto.md")).status == "completed"
