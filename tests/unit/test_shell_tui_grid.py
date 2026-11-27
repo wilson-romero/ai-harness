@@ -3,7 +3,10 @@ the gaps between them and the rows around them, at the sizes a person may use.""
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
+from textual.css.query import NoMatches
 from textual.geometry import Region
 from textual.widget import Widget
 from textual.widgets import Button
@@ -28,17 +31,46 @@ def _skill(tmp_path, *, long: bool = True):
 
 
 async def _open(tui, pilot) -> ApprovalScreen:
+    """The box once painted (its widgets exist) and armed. Waiting only for the screen to
+    be pushed raced its composition: NoMatches '#reject' under load (Windows, 2026-11-27)."""
     await tui.send(pilot, SKILL_LINE)
-    await tui.until(pilot, lambda: isinstance(tui.app.screen, ApprovalScreen))
-    await tui.until(pilot, lambda: not tui.app.screen.query_one("#reject", Button).disabled)
+    box = await tui.approval_box(pilot)
+    await tui.until(pilot, lambda: not box.query_one("#reject", Button).disabled)
     await pilot.pause(0.1)
-    return tui.app.screen
+    return box
 
 
 async def _leave(tui, pilot) -> None:
     await pilot.press("ctrl+c")
     await tui.ready(pilot)
     await tui.send(pilot, "/exit")
+
+
+@pytest.mark.parametrize("size", SIZES, ids=lambda s: f"{s[0]}x{s[1]}")
+async def test_the_box_is_waited_for_until_its_widgets_exist(tmp_path, size, monkeypatch):
+    """A loaded machine, reproduced: the box composes 0.3 s after it is pushed. Textual puts
+    a screen on the stack before composing it, so a check right after the push queries a box
+    with no widgets (NoMatches '#reject', as on Windows). `approval_box` waits for the paint.
+    The box is pushed here as the core pushes it (`open_approval`), without a Pilot wait."""
+    compose = ApprovalScreen._compose
+
+    async def slow(self):
+        await asyncio.sleep(0.3)
+        await compose(self)
+
+    monkeypatch.setattr(ApprovalScreen, "_compose", slow)
+    tui = _skill(tmp_path)
+    async with tui.app.run_test(size=size) as pilot:
+        await tui.ready(pilot)
+        tui.app.open_approval(["hash: synthetic"], ["propuesta sintética"], "0" * 64, "Approve?")
+        assert isinstance(tui.app.screen, ApprovalScreen)
+        with pytest.raises(NoMatches):
+            tui.app.screen.query_one("#reject", Button)  # what the old wait then queried
+        box = await tui.approval_box(pilot)
+        await tui.until(pilot, lambda: not box.query_one("#reject", Button).disabled)
+        assert box.query_one("#approval-confirm")
+        tui.app.close_approval()
+        await tui.send(pilot, "/exit")
 
 
 def _row(box: ApprovalScreen, left: str, right: str) -> tuple[Region, Region, Region]:
