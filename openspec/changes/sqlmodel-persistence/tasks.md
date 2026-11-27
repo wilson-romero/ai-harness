@@ -23,6 +23,7 @@ Cada `[x]` lleva su recibo debajo, con fecha y plataforma. Cada grupo es un tram
 - [x] 1.5 Escenario «Valor hostil como dato» de la spec: `tests/security/test_sql_values.py`, sesión llamada `x'); DROP TABLE sessions; --` y una pregunta con ese texto. Oráculo: el nombre literal en la lista de sesiones, el texto literal en el historial y `SELECT name FROM sqlite_master WHERE type = 'table'` con las 11 tablas.
   - Recibo (2026-11-27, macOS arm64): `1 passed`; con el mutante f-string de `insert_session` del 1.4 → falla.
 - [ ] 1.6 `scripts/verify.sh` sobre el árbol limpio. Oráculo: código 0 y `verify: PASS on <sha>`; `tests/unit/test_portability.py` en verde (sin ramas por plataforma). Lo ejecuta el coordinador.
+  - Recibo parcial (2026-11-27, macOS arm64, no sustituye a `verify.sh`): antes del merge de `develop`, `caffeinate -i uv run pytest -q -m "not edge and not copilot"` → código 0, 1627 passed; `-m edge` → código 0, 153 passed. Tras unir `origin/develop` (`57c413d`, sin conflictos), la guarda y la prueba del valor hostil → 37 passed; `-m "not edge and not copilot"` → código 0, 1659 passed; el lote `edge` no se repitió porque el merge no toca `_open_run` ni `_needs_recovery`/`recover_runs`. `openspec validate --all --strict --no-interactive` → código 0 (21 passed); `scripts/check_public_safety.py` → código 0.
 
 ## 2. Tramo 1 · Dependencias, modelos y fontanería, sin cambiar conducta
 
