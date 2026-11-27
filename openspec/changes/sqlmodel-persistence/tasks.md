@@ -4,12 +4,25 @@ Cada `[x]` lleva su recibo debajo, con fecha y plataforma. Cada grupo es un tram
 
 ## 1. Tramo 0 · Guarda contra SQL construido
 
-- [ ] 1.1 Rama `feature/sqlmodel-persistence-0` desde `develop`. Hecho: `git rev-parse --abbrev-ref HEAD` da ese nombre y su base es `origin/develop`.
-- [ ] 1.2 `tests/unit/test_sql_literals.py` (D9): recorre el AST de `harness/` y rechaza, con fichero y línea, todo primer argumento de `execute`, `executemany`, `executescript`, `exec_driver_sql`, `text`, `literal_column` y `prefix_with` que no sea literal o nombre ligado a literal; única excepción, con su motivo, `executescript` en `migrate()`. Oráculo: sobre `develop` sin el 1.3 la prueba falla y nombra exactamente `engine.py:1342`, `engine.py:1355` y `conversation.py:393`.
-- [ ] 1.3 Reescribir esos 3 f-strings como literales completos (las dos consultas de `_HALF_DONE` enteras; `IN (?, ?, ?, ?)` como en `engine.py:243`) y quitar el `noqa: S608`. Oráculo: la prueba del 1.2 pasa, y el inventario del guion AST da 0 f-strings y 0 concatenaciones en sentencias.
-- [ ] 1.4 Controles negativos de la guarda: (a) `conn.execute(f"SELECT * FROM sessions WHERE name = '{name}'")`; (b) `"… WHERE name = '" + name + "'"`; (c) `sql = "…%s" % name; conn.execute(sql)`; (d) `text(f"…{x}")`. Oráculo: cada mutante → `1 failed` con su línea.
-- [ ] 1.5 Escenario «Valor hostil como dato» de la spec: sesión llamada `x'); DROP TABLE sessions; --` en `tests/security/`. Oráculo: el nombre literal en `session list` y `SELECT name FROM sqlite_master WHERE type = 'table'` con las 11 tablas.
-- [ ] 1.6 `scripts/verify.sh` sobre el árbol limpio. Oráculo: código 0 y `verify: PASS on <sha>`; `tests/unit/test_portability.py` en verde (sin ramas por plataforma).
+- [x] 1.1 Rama del tramo 0. Hecho: por indicación del coordinador (2026-11-27) el tramo 0 va en la misma rama del change, `feature/sqlmodel-persistence`, creada desde `origin/develop` (`5af28ed`).
+  - Recibo (2026-11-27, macOS arm64): `git merge-base HEAD origin/develop` → `5af28ed`.
+- [x] 1.2 `tests/unit/test_sql_literals.py` (D9, regla exacta escrita allí): en `harness/` y `main.py`, toda llamada `.execute`, `.executemany`, `.executescript` o `.exec_driver_sql` tiene que llevar SQL literal (literal `str`, `+` de SQL literal, o constante de módulo ligada una sola vez a SQL literal); un método SQL no se puede nombrar sin llamarlo ni pedir con `getattr`; única excepción, con su motivo, `executescript` en `migrate()`. `text`, `literal_column` y `prefix_with` se añaden en el tramo 1, con la dependencia. Oráculo: sobre `origin/develop` la guarda nombra exactamente `engine.py:1342`, `engine.py:1355` y `conversation.py:393`; `test_the_guard_sees_the_product_statements` impide que la prueba pase por no ver nada.
+  - Recibo (2026-11-27, macOS arm64): guion fuera del repositorio que aplica `find_violations` a `git show origin/develop:<fichero>` → 3 hallazgos, `harness/skills/engine.py:1342`, `harness/skills/engine.py:1355` y `harness/shell/conversation.py:393`, y ninguno más. Sobre la rama: `uv run pytest -q tests/unit/test_sql_literals.py` → 36 passed (1 sobre el producto, 1 de cobertura, 8 aceptados, 25 rechazados, 1 de la excepción).
+- [x] 1.3 Llevar esos 3 f-strings a formas que la guarda acepta sin cambiar el texto de la sentencia: `"… AND " + _HALF_DONE` y `"… WHERE " + _HALF_DONE` en `engine.py`, `IN (?, ?, ?, ?)` literal en `conversation.py` (como `engine.py:243`); se quitan los dos `noqa: S608`. No se toca nada más de esos ficheros. Oráculo: la prueba del 1.2 pasa, y el inventario AST da 0 f-strings.
+  - Recibo (2026-11-27, macOS arm64): `git diff origin/develop --stat -- harness/` → `engine.py` 2 líneas, `conversation.py` 2 líneas. Inventario AST sobre `harness/`: 68 literales, 2 `+` (las dos de `_HALF_DONE`), 1 otra (`executescript` de `migrate()`), 0 f-strings.
+- [x] 1.4 Controles negativos. Sintéticos y permanentes, en la propia prueba (`REFUSED`, 25 casos): f-string con variable y con solo constantes, `.format`, `%`, `+` con parámetro y con variable local, nombre ligado a una llamada o a un `join`, constante religada (en función con `global`, dos veces, por un bucle, por un `import`), atributo, subíndice, `*args`, sin sentencia, alias en variable y en atributo, `getattr`, `partial`, `cursor().execute`, `executemany`/`executescript`/`exec_driver_sql` con variable, `bytes`. Sobre el código real, con un guion fuera del repositorio (mutación en su sitio, `pytest`, `git checkout --` del fichero). Oráculo: cada mutante → al menos `1 failed`.
+  - Recibo (2026-11-27, macOS arm64), `uv run pytest -q -p no:cacheprovider tests/unit/test_sql_literals.py tests/security/test_sql_values.py`, código 1 en todos:
+    - f-string con variable en `insert_session` → `2 failed` (`test_product_sql_is_literal` y `test_a_hostile_session_name_is_stored_literally`);
+    - `.format` en `_needs_recovery` → `1 failed`;
+    - `%` en `_open_run` de la conversación → `1 failed`;
+    - `+` con un nombre local en `recover_runs` → `1 failed`;
+    - `_HALF_DONE` ligado a un no literal (`str(...)`) → `1 failed`;
+    - alias `run = conn.execute` en `_needs_recovery` → `1 failed` («execute referenced without being called»).
+    - Árbol limpio tras restaurar (`git status --porcelain` vacío).
+  - Límites (escritos en la prueba y en D9): no se sigue la reasignación de una constante desde otro módulo, `getattr` con nombre calculado ni `operator.methodcaller`; no se revisan `scripts/` ni `tests/`.
+- [x] 1.5 Escenario «Valor hostil como dato» de la spec: `tests/security/test_sql_values.py`, sesión llamada `x'); DROP TABLE sessions; --` y una pregunta con ese texto. Oráculo: el nombre literal en la lista de sesiones, el texto literal en el historial y `SELECT name FROM sqlite_master WHERE type = 'table'` con las 11 tablas.
+  - Recibo (2026-11-27, macOS arm64): `1 passed`; con el mutante f-string de `insert_session` del 1.4 → falla.
+- [ ] 1.6 `scripts/verify.sh` sobre el árbol limpio. Oráculo: código 0 y `verify: PASS on <sha>`; `tests/unit/test_portability.py` en verde (sin ramas por plataforma). Lo ejecuta el coordinador.
 
 ## 2. Tramo 1 · Dependencias, modelos y fontanería, sin cambiar conducta
 
