@@ -90,40 +90,77 @@ Al entrar se ve el proveedor, la sesión y el proyecto. Una línea normal es una
 
 ### Aspecto
 
-En una consola, la conversación ocupa la pantalla completa ([Textual](https://textual.textualize.io/), la única librería de terminal del proyecto): la conversación con su propio desplazamiento, un panel con la sesión a la derecha, la entrada fija abajo y los atajos al pie. Así se ve en 100 × 30, con el Mock, el vault sintético y una respuesta sintética (captura de texto de la pantalla tomada con el `Pilot` de Textual, sin colores):
+En una consola, la conversación ocupa la pantalla completa ([Textual](https://textual.textualize.io/), la única librería de terminal del proyecto): la conversación con su propio desplazamiento, un panel con la sesión a la derecha, la entrada fija abajo y los atajos al pie. Así se ve en 100 × 30, con el Mock, el vault sintético y una respuesta sintética, tras `/new --project demo-alpha Demo` (captura de texto de la pantalla tomada con el `Pilot` de Textual, sin colores):
 
 ```text
- ai-harness  -  mock  session 01a219d9                            │ Session
- -------------------------------------                            │  Demo
- Enter sends a question. /help lists the commands; Tab completes  │  01a219d9-d8d0-708a-922b-854b44
- them.                                                            │ 3d1ba5
- Ctrl+C interrupts a question (never resent). /exit or end of     │ Project
- input leaves.                                                    │  demo-alpha
-                                                                  │ Provider
- █ /new --project demo-alpha Demo                                 │  mock
- new session 01a219d9-d8d0-708a-922b-854b443d1ba5 (Demo), project │ Sends
- demo-alpha                                                       │  1
-                                                                  │ Last request
- █ revisa este requerimiento                                      │  completed
- context: demo-alpha, 7 note(s) included, 0 truncated, 0 omitted, │ Memory
- 1556 of 8192 bytes, 1 entry skipped, 0 credential(s) redacted    │  7 note(s) in the last question
-                                                                  │   projects/demo-alpha/_project.
- ╭─ mock ───────────────────────────────────────────────────────╮ │ md
- │ ## Resumen                                                   │ │   Decisiones/alpha-mensajeria.m
- │ El requerimiento pide **avisar** de pedidos con              │ │ d
- │ `order.created`.                                             │ │   Lecciones/2026-11-10-reintent
- │                                                              │ │ os-idempotentes.md
- │ ## Preguntas pendientes                                      │ │   Memoria-CC/project_alpha-inte
- │ - ¿Qué pasa con un evento que no se publica?                 │ │ graciones.md
- │ [@click=app.quit]esto no es un enlace[/]                     │ │   projects/demo-alpha/sessions/
- ╰──────────────────────────────────────────────────────────────╯ │ 2026-11-21-121500.md
+ session Demo (01a21c5e): this pane shows what happened in it     │ Session
+ since the conversation opened; /history lists its stored         │  Demo
+ messages                                                         │  01a21c5e-41cc-74b5-bc79-d2a2a2
+                                                                  │ c55f75
+ █ revisa este requerimiento                                      │ Project
+ context: demo-alpha, 7 note(s) included, 0 truncated, 0 omitted, │  demo-alpha
+ 1556 of 8192 bytes, 1 entry skipped, 0 credential(s) redacted    │ Provider
+                                                                  │  mock
+ ╭─ mock ───────────────────────────────────────────────────────╮ │ Sends
+ │ ## Resumen                                                   │ │  1
+ │ El requerimiento pide **avisar** de pedidos con              │ │ Last request
+ │ `order.created`.                                             │ │  completed
+ │                                                              │ │ Memory
+ │ ## Preguntas pendientes                                      │ │  7 note(s) in the last question
+ │ - ¿Qué pasa con un evento que no se publica?                 │ │   projects/demo-alpha/_project.
+ │ [@click=app.quit]esto no es un enlace[/]                     │ │ md
+ ╰──────────────────────────────────────────────────────────────╯ │   Decisiones/alpha-mensajeria.m
+                                                                  │ d
+                                                                  │   Lecciones/2026-11-10-reintent
+                                                                  │ os-idempotentes.md
+                                                                  │   Memoria-CC/project_alpha-inte
+                                                                  │ graciones.md
+                                                                  │   projects/demo-alpha/sessions/
+                                                                  │ 2026-11-21-121500.md
+                                                                  │   projects/demo-alpha/sessions/
+                                                                  │ 2026-11-20-111500.md
+▊▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▎
 ▊  Type a question, or / for a command                                                             ▎
- ctrl+p commands  ctrl+c interrupts  ctrl+n new session  ctrl+q leaves
+▊▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▎
+ ctrl+p commands  ctrl+c interrupts  ctrl+q leaves  ctrl+n new  esc blocks  ctrl+o open/close
 ```
 
-- **Bloques:** lo que escribes (con una barra a la izquierda), las líneas del harness (en gris) y el texto ajeno, siempre dentro de un recuadro cuyo título pone el harness (el nombre del proveedor). Lo de dentro del recuadro se muestra como caracteres: `[@click=…]`, `[link=…]` o una secuencia de escape no hacen nada. El resaltado de Markdown es el de siempre: colorea sin quitar ni añadir un carácter.
+- **Bloques:** lo que escribes (con una barra a la izquierda), las líneas del harness (en gris) y el texto ajeno, siempre dentro de un recuadro cuyo título pone el harness (el nombre del proveedor); plegado, de él solo queda un extracto de una línea tras `| `. Lo de dentro del recuadro se muestra como caracteres: `[@click=…]`, `[link=…]` o una secuencia de escape no hacen nada. El resaltado de Markdown es el de siempre: colorea sin quitar ni añadir un carácter.
+- **Bloques que se pliegan** (`collapsible-blocks`): cada turno (tu línea y lo que vino después) y cada bloque de un turno se abren y se cierran. Al llegar, una respuesta que cabe en el panel se ve entera; una más larga muestra sus primeras filas y el borde de abajo dice cuántas líneas faltan (`… 30 more lines · enter/click to expand`). La línea de contexto y los pasos de una Skill quedan en una línea; los errores y avisos, siempre enteros. Al enviar una pregunta, los turnos anteriores al penúltimo se pliegan a una línea (`▸ you → mock · 42 lines · completed  › revisa el HLS`), salvo los que abriste o cerraste tú: tu elección se mantiene. Plegado, un bloque dice quién es, cuántas líneas tiene y, tras `| `, los títulos de la respuesta (`## Resumen · ## Riesgos`) o su primera línea; lo del harness va sobre un fondo propio que el texto ajeno no puede tener. Teclas: `Esc` recorre los bloques (flechas, `enter` o espacio abre y cierra, `+`/`-` todo, `end` el último, `Esc` o cualquier letra vuelve a escribir y la letra se escribe); desde la entrada, `alt+↑`/`alt+↓` eligen bloque y `ctrl+o` abre o cierra el elegido o la última respuesta. Un clic en la cabecera o el pie de un bloque lo abre o cierra; en el texto, nada. En la paleta: «Browse blocks», «Open or close the block», «Expand all blocks», «Collapse all blocks», «Jump to latest». Al abrir o cerrar, la cabecera no se mueve de su fila, y lo que llega mientras recorres o lees más arriba no mueve el panel. Cada sesión tiene sus bloques: `/new` y `/resume` muestran los de la sesión tomada. Nada de esto se guarda. Tras dos preguntas largas, `Esc` y `home` (100 × 30, sintético; la primera, plegada; la segunda, abierta a mano):
+
+  ```text
+   ▸ harness · 4 lines · done  ai-harness - mock session 01a21c5d   │  chat 2026-11-27 04:37
+                                                                    │  01a21c5d-eb10-736a-98c3-28e8b9
+   ▸ you → mock · 2 lines · completed  › ¿está claro el alcance?    │ d286ca
+                                                                    │ Project
+   █ revisa el HLS sintético                                        │  -
+                                                                  ▃ │ Provider
+   ╭─ mock · 41 lines ───────────────────────────────────────────╮  │  mock
+   │ ## Resumen del HLS                                          │  │ Sends
+   │ El requerimiento sintético pide **avisar** de cada pedido.  │  │  3
+   │                                                             │  │ Last request
+   │ ## Riesgos                                                  │  │  completed
+   │ - Riesgo sintético 1: el evento `order.created` puede       │  │ Memory
+   │ llegar dos veces.                                           │  │  0 note(s) in the last question
+   │ - Riesgo sintético 2: el evento `order.created` puede       │  │
+   │ llegar dos veces.                                           │
+   │ - Riesgo sintético 3: el evento `order.created` puede       │
+   │ llegar dos veces.                                           │
+   │ - Riesgo sintético 4: el evento `order.created` puede       │
+   │ llegar dos veces.                                           │
+   │ - Riesgo sintético 5: el evento `order.created` puede       │
+   │ llegar dos veces.                                           │
+   │ - Riesgo sintético 6: el evento `order.created` puede       │
+   │ llegar dos veces.                                           │
+   │ - Riesgo sintético 7: el evento `order.created` puede       │
+   │ llegar dos veces.                                           │
+  ▊▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▎
+  ▊  browsing the blocks: esc or any letter goes back to typing                                      ▎
+  ▊▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▎
+   up/down move  enter open/close  +/- all  end latest  esc back to typing
+  ```
 - **Panel:** sesión (nombre e identificador completo), proyecto, proveedor, peticiones enviadas en esta sesión, estado de la última y las notas de memoria que llevó la última pregunta. Sale solo del estado del harness y siempre describe la sesión tomada.
-- **Teclas:** `ctrl+p` abre la paleta de órdenes (solo órdenes del harness: estado, sesión nueva, cambiar de sesión, historial, contexto, elegir Skill, adjuntar fichero, buscar en la memoria…). «Switch session...» lista las sesiones y elige con el teclado; «Choose a skill...» rellena `/skill NOMBRE `; «Attach a file...» lista los ficheros de la carpeta de trabajo. `ctrl+n` sesión nueva. Flechas arriba y abajo: lo escrito en esta ejecución (solo en memoria). Tab completa los comandos `/`. `ctrl+c` interrumpe la pregunta en curso; sin nada en curso no sale. `ctrl+q`, `ctrl+d` con la entrada vacía o `/exit` salen: se cierra el proveedor y la terminal vuelve a como estaba.
+- **Teclas:** `ctrl+p` abre la paleta de órdenes (solo órdenes del harness: estado, sesión nueva, cambiar de sesión, historial, contexto, elegir Skill, adjuntar fichero, buscar en la memoria…). «Switch session...» lista las sesiones y elige con el teclado; «Choose a skill...» rellena `/skill NOMBRE `; «Attach a file...» lista los ficheros de la carpeta de trabajo. `ctrl+n` sesión nueva. Flechas arriba y abajo: lo escrito en esta ejecución (solo en memoria); `Esc` cambia las flechas a recorrer los bloques. Tab completa los comandos `/`. `ctrl+c` interrumpe la pregunta en curso; sin nada en curso no sale. `ctrl+q`, `ctrl+d` con la entrada vacía o `/exit` salen: se cierra el proveedor y la terminal vuelve a como estaba.
 - **Mientras el proveedor trabaja** se ve `mock: thinking (N s), ctrl+c interrupts` y la entrada no envía (lo escrito se queda en ella).
 - **La aprobación** se abre en su propia caja: la cabecera del motor (destino, hash, caducidad), el contenido propuesto en un recuadro de texto ajeno y una entrada solo para el código. Esa entrada no guarda historial, no admite pegar ni copiar (tampoco con `ctrl+v` o `ctrl+x`) y no acepta una respuesta en el primer medio segundo. Una propuesta larga se recorre con `AvPág`/`RePág`, flechas, `Inicio` y `Fin` mientras se escribe en la entrada; la caja dice cuántas líneas quedan debajo y no toma el código hasta que el final de la propuesta se ha visto en pantalla. `n` pide escribir `reject`, como en texto plano, y rechazar no exige leer hasta el final; `ctrl+c` la deja sin decidir.
 - **Lo que la pantalla no hace:** capturas, guardar ficheros, abrir enlaces, suspenderse ni copiar al portapapeles de la terminal. Si falla por dentro, imprime una línea fija sin nada de la conversación. Si la consola no admite la pantalla completa, lo dice en una línea y sigue en texto plano.
