@@ -118,8 +118,13 @@
 - [x] 6.2 `MD_CODE` con `$text-secondary`: el código en línea del modelo no lleva el color de un aviso del harness (D8).
   - Oráculo: `tests/unit/test_shell_tui_styles.py`, con 2 pruebas: los estilos y el color dibujado en pantalla.
   - Recibo (2026-11-27): con `#e5c07b`, 2 failed (`md.code`: `Color(229, 192, 123)` es el de `harness.warning`); con el cambio, 2 passed.
-- [ ] 6.3 Las dos tandas, una vez cada una con `caffeinate -i`, después del merge de `develop`: `-m "not edge and not copilot"` y `-m edge`. Después, `openspec validate --all --strict` y `scripts/check_public_safety.py`.
+- [x] 6.3 Las dos tandas, una vez cada una con `caffeinate -i`, después del merge de `develop`: `-m "not edge and not copilot"` y `-m edge`. Después, `openspec validate --all --strict` y `scripts/check_public_safety.py`.
   - Oráculo: código 0 en cada tanda; 0 errores de validación; `public-safety: PASS`.
+  - Recibo (2026-11-27, macOS arm64), sobre `11c50f9`, el merge de `develop` `1b460ea`, sin conflictos:
+    - `-m "not edge and not copilot"`: código 0, 1696 passed en 300,26 s;
+    - `-m edge`: código 0, 155 passed en 1277,41 s;
+    - `openspec validate --all --strict`: 22 de 22;
+    - public-safety: PASS en cada commit (hook).
 
 ## 7. Demo
 
