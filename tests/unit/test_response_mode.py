@@ -340,6 +340,60 @@ def test_the_deep_deadline_defaults_to_three_times_and_cannot_be_lower():
         Settings.from_env({"HARNESS_REQUEST_TIMEOUT_S": "100", "HARNESS_DEEP_REQUEST_TIMEOUT_S": "50"})
 
 
+@pytest.mark.parametrize("name", ["HARNESS_REQUEST_TIMEOUT_S", "HARNESS_DEEP_REQUEST_TIMEOUT_S"])
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "0", "-1"])
+def test_a_deadline_is_a_finite_number_above_zero(name, raw):
+    """Review 2026-11-27, finding 6: `asyncio.timeout(nan)` breaks the event loop with the
+    request already recorded, so neither deadline takes nan, an infinity or zero."""
+    env = {name: raw}
+    if name == "HARNESS_DEEP_REQUEST_TIMEOUT_S":
+        env["HARNESS_REQUEST_TIMEOUT_S"] = "1"
+    with pytest.raises(InvalidInput, match=f"{name} must be a finite number above 0"):
+        Settings.from_env(env)
+    Settings.from_env(env | {name: "100"})  # control: a plain number is taken
+
+
+class OversizeProvider(MockProvider):
+    """The Mock, but its size check refuses every prompt (as Copilot over its maximum)."""
+
+    def check(self, prompt: str) -> None:
+        from harness.providers.base import PromptTooLong
+
+        raise PromptTooLong("the prompt has too many characters")
+
+
+async def test_ask_with_a_mode_keeps_nothing_when_the_question_is_refused(conn, make_service):
+    """Finding 7: `ask --mode deep` whose question is refused before it is recorded (size,
+    closed session) leaves the session's mode and its audit as they were."""
+    from harness.core.contracts import SessionStatus
+    from harness.core.errors import SessionClosed
+    from harness.providers.base import PromptTooLong
+
+    service = make_service({"mock": OversizeProvider()})
+    session = service.create_session("S")
+    with pytest.raises(PromptTooLong):
+        await service.ask(str(session.session_id), "hola", mode="deep")
+    closed = service.create_session("T")
+    with transaction(conn):
+        repo.set_session_status(conn, closed.session_id, SessionStatus.CLOSED)
+    with pytest.raises(SessionClosed):
+        await service.ask(str(closed.session_id), "hola", mode="deep")
+    assert [tuple(r) for r in conn.execute("SELECT response_mode FROM sessions")] == [
+        ("auto",), ("auto",)]
+    assert conn.execute("SELECT count(*) FROM audit_events WHERE event_type = 'session.mode'"
+                        ).fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM requests").fetchone()[0] == 0
+
+
+async def test_ask_with_a_mode_keeps_it_when_the_question_is_recorded(conn, make_service):
+    """Control of the previous test: a question that is recorded keeps its mode."""
+    service = make_service({"mock": MockProvider()})
+    session = service.create_session("S")
+    await service.ask(str(session.session_id), "hola", mode="deep")
+    assert service.require_session(str(session.session_id)).response_mode is DEEP
+    assert _modes(conn) == [("deep", "deep")]
+
+
 # -- the CLI ------------------------------------------------------------------------------------
 
 

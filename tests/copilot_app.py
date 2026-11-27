@@ -48,6 +48,7 @@ class Received:
     conversation: str
     prompt: str
     mode: str | None = None  # the mode the page was in when it sent it (response-mode)
+    list_open: bool | None = None  # whether the list of modes was open when it sent it
 
 
 @dataclass
@@ -105,12 +106,12 @@ class SyntheticCopilot:
             return len(self.prompts)
 
     def receive(self, conversation: str | None, prompt: str,
-                mode: str | None = None) -> tuple[str, str]:
+                mode: str | None = None, list_open: bool | None = None) -> tuple[str, str]:
         with self._lock:
             if not conversation or conversation not in self.conversations:
                 conversation = secrets.token_hex(8)
                 self.conversations[conversation] = []
-            self.prompts.append(Received(conversation, prompt, mode))
+            self.prompts.append(Received(conversation, prompt, mode, list_open))
             reply = make_reply(prompt)
             self.conversations[conversation] += [
                 {"role": "user", "text": prompt},
@@ -219,7 +220,7 @@ def _handler(app: SyntheticCopilot) -> type[BaseHTTPRequestHandler]:
             if path == "/api/send":
                 data = json.loads(body)
                 conversation, reply = app.receive(data.get("conversation"), data["prompt"],
-                                                  data.get("mode"))
+                                                  data.get("mode"), data.get("list_open"))
                 self._json({"conversation": conversation, "reply": reply,
                             "html": rich_reply(data["prompt"])})
             elif path == "/api/mode":

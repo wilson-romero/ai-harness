@@ -1226,44 +1226,48 @@ def mode_trigger_candidates(opener: dict, override: dict | None) -> list[dict]:
     return unique
 
 
+async def _read_both(selectors: dict) -> dict:
+    seen = {}
+    for name, selector in selectors.items():
+        try:
+            seen[name] = await selector.read()
+        except (_NotConfirmed, PlaywrightError):
+            seen[name] = None
+    return seen
+
+
 async def confirm_modes(page: Page, trigger: dict, options: dict, labels: dict,
-                        order: list[str]) -> dict[str, list[str]]:
+                        order: list[str], others: tuple = ()) -> dict[str, list[str]]:
     """Choose each mode with this opener and read it back both ways. Returns, per readback,
-    the modes it confirmed."""
+    the modes it confirmed. A reading confirms a mode only if it read something else just
+    before the mode was chosen (review 2026-11-27, finding 3): a reading that never changes
+    tells no mode apart."""
     spec = LocatorSpec.model_validate(trigger)
     opts = {m: LocatorSpec.model_validate(o) for m, o in options.items()}
     checked = _ModeSelector(page, ResponseModeControl(
-        trigger=spec, options=opts, readback="checked_option"))
-    by_label = None
+        trigger=spec, options=opts, readback="checked_option"), others)
+    selectors = {"checked_option": checked}
     if len(set(labels.values())) == len(labels):
-        by_label = _ModeSelector(page, ResponseModeControl(
-            trigger=spec, options=opts, labels=labels, readback="trigger_label"))
+        selectors["trigger_label"] = _ModeSelector(page, ResponseModeControl(
+            trigger=spec, options=opts, labels=labels, readback="trigger_label"), others)
     confirmed: dict[str, list[str]] = {"checked_option": [], "trigger_label": []}
     for mode in order:
+        before = await _read_both(selectors)
         try:
-            await checked.open()
-            option = await checked._one(opts[mode], f"the option of {mode}")
-            await option.click(timeout=3000)
+            await checked.choose(mode)
         except (_NotConfirmed, PlaywrightError):
+            await checked.close()
             continue
         until = time.monotonic() + MODE_CONFIRM_S
         while True:
-            seen = {}
-            for name, selector in (("trigger_label", by_label), ("checked_option", checked)):
-                if selector is None:
-                    continue
-                try:
-                    seen[name] = await selector.read()
-                except (_NotConfirmed, PlaywrightError):
-                    seen[name] = None
+            seen = await _read_both(selectors)
             if any(value == mode for value in seen.values()) or time.monotonic() >= until:
                 break
             await asyncio.sleep(STATE_POLL_S)
         for name, value in seen.items():
-            if value == mode:
+            if value == mode and before.get(name) != mode:
                 confirmed[name].append(mode)
-        with contextlib.suppress(_NotConfirmed, PlaywrightError):
-            await checked.close()
+        await checked.close()
     return confirmed
 
 
@@ -1271,9 +1275,18 @@ async def step_response_mode(probe: Probe, result: dict) -> None:
     """Measure the response-mode selector with the person, sending nothing (D7): how it opens,
     its options, which is which mode (the person says), and how the current mode is read
     back; each mode is chosen and read back, and the page is left in the mode it was in."""
-    user_turn = None
+    measured = None
     with contextlib.suppress(MeasurementError, OSError):
-        user_turn = load_measurement(probe.settings.data_dir).locators.user_turn
+        measured = load_measurement(probe.settings.data_dir).locators
+    if measured is None:
+        # Without the measured user turns, whether choosing a mode changes the conversation
+        # cannot be checked (review 2026-11-27, finding 8).
+        result["mode_status"] = ("no ui.json yet: measure first, then measure the selector "
+                                 "(the turns of the conversation are checked with it)")
+        return
+    user_turn = measured.user_turn
+    others = tuple(spec for spec in (measured.composer, measured.send, measured.stop,
+                                     measured.new_conversation) if spec is not None)
     async with probe.launcher().open() as context:
         result["edge_version"] = edge_version(context)
         page = first_page(context)
@@ -1312,16 +1325,22 @@ async def step_response_mode(probe: Probe, result: dict) -> None:
         labels = {m: options[i]["name"] for m, i in mapping.items()}
         start = next((m for m, i in mapping.items() if options[i]["checked"]), None)
         result["mode_at_start"] = start
-        order = sorted(mapping, key=lambda m: m == start)  # the starting mode last: restored
         await page.keyboard.press("Escape")  # the list the person opened
+        if start is None:
+            # Nothing is chosen: the page could not be put back in the mode it was in.
+            result["mode_status"] = ("the starting mode is not among the mapped ones, so the "
+                                     "page could not be left as found: not measured")
+            return
+        order = sorted(mapping, key=lambda m: m == start)  # the starting mode last: restored
         url_before = page.url
-        turns_before = await user_turn.resolve(page).count() if user_turn else None
+        turns_before = await user_turn.resolve(page).count()
         override = probe.overrides().get(MODE_TRIGGER_OVERRIDE)
         tried = []
         chosen = None
-        for candidate in mode_trigger_candidates(opener, override):
+        candidates = mode_trigger_candidates(opener, override)
+        for candidate in candidates:
             try:
-                confirmed = await confirm_modes(page, candidate, specs, labels, order)
+                confirmed = await confirm_modes(page, candidate, specs, labels, order, others)
             except ValueError:  # not a valid locator or control
                 continue
             kind = next(iter(k for k in candidate if k != "exact" and k != "name"))
@@ -1334,24 +1353,31 @@ async def step_response_mode(probe: Probe, result: dict) -> None:
                 break
         result["triggers_tried"] = tried
         result["url_changed_on_select"] = page.url != url_before
-        if user_turn is not None:
-            result["turns_changed_on_select"] = await user_turn.resolve(page).count() != turns_before
+        result["turns_changed_on_select"] = await user_turn.resolve(page).count() != turns_before
+        # Leave the page in the mode it was in, with the confirmed reading or, when none was
+        # confirmed, with the marked option and each opener tried (finding 8).
+        restore_with = [chosen] if chosen else [(c, "checked_option") for c in candidates]
+        result["restored"] = False
+        for trigger, readback in restore_with:
+            with contextlib.suppress(ValueError, _NotConfirmed, PlaywrightError):
+                control = ResponseModeControl.model_validate({
+                    "trigger": trigger, "options": specs, "readback": readback, "labels": labels})
+                back = await _ModeSelector(page, control, others).select(ResponseMode(start))
+                if back == start:
+                    result["restored"] = True
+                    break
+        if result["url_changed_on_select"] or result["turns_changed_on_select"]:
+            result["mode_status"] = "choosing a mode changed the conversation: not written"
+            return
         if chosen is None:
             result["mode_status"] = "not confirmed with any locator of the opener"
             return
+        if not result["restored"]:
+            result["mode_status"] = "the page was not left in the mode it was in: not written"
+            return
         trigger, readback = chosen
         control = ResponseModeControl.model_validate({
-            "trigger": trigger, "options": specs, "readback": readback,
-            "labels": labels,
-        })
-        if start is not None:
-            back = await _ModeSelector(page, control).select(ResponseMode(start))
-            result["restored"] = back == start
-        else:
-            result["restored"] = None  # nothing was marked when the person opened it
-        if result["url_changed_on_select"] or result.get("turns_changed_on_select"):
-            result["mode_status"] = "choosing a mode changed the conversation: not written"
-            return
+            "trigger": trigger, "options": specs, "readback": readback, "labels": labels})
         result["response_mode"] = control.model_dump(mode="json", exclude_none=True)
         result["mode_status"] = "confirmed " + ", ".join(m for m in MODES if m in mapping)
 

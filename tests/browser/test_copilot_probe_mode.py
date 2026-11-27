@@ -77,6 +77,7 @@ def test_the_menu_shape_is_measured_without_sending(probe_env, copilot_app, monk
     assert set(copilot_app.mode_events) == {"auto", "quick", "deep"}  # each mode was confirmed
     assert len(list((data / "copilot").glob("ui-*.json"))) == 1  # the old measurement, kept
     assert "response mode: confirmed auto, quick, deep" in out
+    assert "left as found: yes" in out
     for text in saved_texts(data, out):
         for canary in CANARIES:
             assert canary not in text
@@ -132,3 +133,65 @@ def test_measure_keeps_the_measured_mode_control(probe_env, copilot_app, monkeyp
     found = probe.response_mode_of(data / "copilot")
     assert found["response_mode"]["readback"] == "checked_option"
     assert probe.response_mode_of(tmp_path) == {}
+
+
+# -- review 2026-11-27: the probe writes only a reading that tells modes apart, on a page that
+# -- stayed in its conversation and was left as found (findings 3 and 8) -------------------------
+
+
+def assert_not_written(data: Path, before: bytes, code: int, out: str, says: str) -> None:
+    assert code == 1, out
+    assert says in out
+    assert measurement_path(data).read_bytes() == before
+    result = json.loads(sorted((data / "copilot").glob("probe-response-mode-*.json"))[-1]
+                        .read_text("utf-8"))
+    assert result["complete"] is False and result.get("response_mode") is None
+
+
+def test_a_reading_that_cannot_tell_modes_apart_is_not_written(probe_env, copilot_app,
+                                                               monkeypatch):
+    """Finding 3: the opener always carries the label of deep, and only deep (the mode the
+    page is in) is mapped; reading deep after choosing deep proves nothing."""
+    probe, data = probe_env
+    before = measurement_path(data).read_bytes()
+    monkeypatch.setattr(probe, "choose_modes", lambda options: {
+        "deep": [o["name"] for o in options].index(LABELS["deep"])})
+    code, out = run_step(probe, monkeypatch, copilot_app, modes="menu", mode_start="deep",
+                         mode_label=LABELS["deep"])
+    assert_not_written(data, before, code, out, "not confirmed")
+
+
+@pytest.mark.parametrize("page", [{"mode_navigate": "1"}, {"mode_append": "1"}],
+                         ids=["address", "turns"])
+def test_a_selector_that_changes_the_conversation_is_not_written(probe_env, copilot_app,
+                                                                 monkeypatch, page):
+    probe, data = probe_env
+    before = measurement_path(data).read_bytes()
+    code, out = run_step(probe, monkeypatch, copilot_app, modes="menu", **page)
+    assert_not_written(data, before, code, out, "changed the conversation")
+    assert copilot_app.prompt_count == 0
+
+
+def test_an_unknown_starting_mode_is_not_written(probe_env, copilot_app, monkeypatch):
+    """The page starts in auto, which the person does not map: the probe cannot leave the
+    page as it found it, so nothing is written."""
+    probe, data = probe_env
+    before = measurement_path(data).read_bytes()
+    monkeypatch.setattr(probe, "choose_modes", lambda options: {
+        mode: [o["name"] for o in options].index(LABELS[mode]) for mode in ("quick", "deep")})
+    code, out = run_step(probe, monkeypatch, copilot_app, modes="menu")
+    assert_not_written(data, before, code, out, "starting mode")
+
+
+def test_without_a_measurement_the_turns_cannot_be_checked(probe_env, copilot_app, monkeypatch):
+    """No ui.json yet: the user turns cannot be located, so whether choosing a mode changes
+    the conversation is unknown; the result is not complete."""
+    probe, data = probe_env
+    measurement_path(data).unlink()
+    code, out = run_step(probe, monkeypatch, copilot_app, modes="menu")
+    assert code == 1, out
+    assert "measure first" in out
+    result = json.loads(sorted((data / "copilot").glob("probe-response-mode-*.json"))[-1]
+                        .read_text("utf-8"))
+    assert result["complete"] is False and result.get("response_mode") is None
+    assert probe.response_mode_of(data / "copilot") == {}

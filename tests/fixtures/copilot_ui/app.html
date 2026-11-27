@@ -38,6 +38,17 @@
     mode_late_ms=N      a chosen mode applies N ms after the click
     mode_fallback=M     the page switches to mode M when a reply ends
     mode_newchat=1      choosing an option also opens a new, empty chat
+    mode_sticky=1       choosing an option applies it, but the list stays open and Escape does
+                        not close it
+    mode_disabled=M     the option of mode M is aria-disabled: a click does nothing
+    mode_twice=1        every option is in the list twice
+    mode_reread_fail=1  once a reply ends, a second copy of the opener appears
+    mode_history=1      choosing an option inserts an older question and answer above the
+                        thread, as a history that arrives late
+    mode_append=1       choosing an option adds a user turn at the end of the thread
+    mode_navigate=1     choosing an option moves the address to another conversation
+    mode_label=TEXT     the opener also carries the aria-label TEXT
+  With modes=..., each prompt also tells the server whether the list was open when it was sent.
   A reply the server sends with `html` (a prompt with ZQX-RICH-<name>) streams as text, then
   is replaced by that HTML, as a page renders the Markdown it received.
 -->
@@ -91,6 +102,14 @@
   const modeFallback = params.get("mode_fallback") || "";
   const modeNewChat = params.get("mode_newchat") === "1";
   const modePersist = params.get("mode_persist") === "1";
+  const modeSticky = params.get("mode_sticky") === "1";
+  const modeDisabled = params.get("mode_disabled") || "";
+  const modeTwice = params.get("mode_twice") === "1";
+  const modeRereadFail = params.get("mode_reread_fail") === "1";
+  const modeHistory = params.get("mode_history") === "1";
+  const modeAppend = params.get("mode_append") === "1";
+  const modeNavigate = params.get("mode_navigate") === "1";
+  const modeLabel = params.get("mode_label") || "";
   let mode = params.get("mode_start") || "auto";
   if (modePersist) {
     try { mode = localStorage.getItem("synthetic-mode") || mode; } catch (e) { /* none */ }
@@ -160,6 +179,7 @@
     if (modesShape === "listbox") modeTrigger.textContent = MODE_LABELS[mode];
     const mark = modesShape === "menu" ? "aria-checked" : "aria-selected";
     for (const option of modeList.children) {
+      if (option.dataset.mode === modeDisabled) option.setAttribute("aria-disabled", "true");
       option.setAttribute(mark, option.dataset.mode === mode ? "true" : "false");
     }
   }
@@ -180,9 +200,24 @@
     modeTrigger.setAttribute("aria-expanded", open ? "true" : "false");
   }
   function chooseMode(next) {
-    showModes(false);
+    if (next === modeDisabled) return;  // a disabled option: nothing happens, the list stays
+    if (!modeSticky) showModes(false);
     if (modeStuck) return;
-    const apply = () => { setMode(next); if (modeNewChat) newChat(); };
+    const apply = () => {
+      setMode(next);
+      if (modeNewChat) newChat();
+      if (modeHistory) {
+        const first = thread.firstChild;
+        for (const role of ["user", "assistant"]) {
+          const old = document.createElement("div");
+          old.className = "turn " + role;
+          old.textContent = "ZZ-LATE-HISTORY " + role;
+          thread.insertBefore(old, first);
+        }
+      }
+      if (modeAppend) addTurn("user", "ZZ-MODE-TURN");
+      if (modeNavigate) history.replaceState(null, "", "/c/synthetic-other" + location.search);
+    };
     if (modeLateMs) setTimeout(apply, modeLateMs); else apply();
   }
   function buildModes() {
@@ -202,7 +237,8 @@
     modeList = document.createElement(menu ? "div" : "ul");
     modeList.setAttribute("role", menu ? "menu" : "listbox");
     modeList.hidden = true;
-    for (const key of ["auto", "quick", "deep"]) {
+    for (const key of modeTwice ? ["auto", "quick", "deep", "auto", "quick", "deep"]
+                                : ["auto", "quick", "deep"]) {
       const option = document.createElement(menu ? "div" : "li");
       option.setAttribute("role", menu ? "menuitemradio" : "option");
       option.tabIndex = -1;
@@ -211,8 +247,11 @@
       option.addEventListener("click", () => chooseMode(key));
       modeList.appendChild(option);
     }
+    if (modeLabel) modeTrigger.setAttribute("aria-label", modeLabel);
     modeTrigger.addEventListener("click", () => showModes(modeList.hidden));
-    document.addEventListener("keydown", (event) => { if (event.key === "Escape") showModes(false); });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !modeSticky) showModes(false);
+    });
     composer.before(modeTrigger);
     document.body.appendChild(modeList);  // as a portal: outside the chat, at the end
     renderMode();
@@ -221,11 +260,12 @@
     const prompt = composer.value;
     if (!prompt) return;
     const sentMode = modesShape ? mode : null;
+    const listOpen = modesShape ? !modeList.hidden : null;
     if (bounce) {
       await fetch("/api/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversation, prompt, mode: sentMode }),
+        body: JSON.stringify({ conversation, prompt, mode: sentMode, list_open: listOpen }),
       });
       addTurn("assistant notice", "ZZ-ERROR-NOTICE");
       return;
@@ -238,7 +278,7 @@
     const response = await fetch("/api/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ conversation, prompt, mode: sentMode }),
+      body: JSON.stringify({ conversation, prompt, mode: sentMode, list_open: listOpen }),
     });
     const data = await response.json();
     conversation = data.conversation;
@@ -280,6 +320,7 @@
       turn.appendChild(bar);
     }
     if (modeFallback && modeTrigger) setMode(modeFallback);
+    if (modeRereadFail && modeTrigger) modeTrigger.after(modeTrigger.cloneNode(true));
     stop.hidden = true;
     send.hidden = false;
     if (idDelay !== null && !idNever) {

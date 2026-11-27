@@ -346,13 +346,33 @@ TRIGGER_LABEL_JS = (
 )
 
 
+# Whether the element is one of `others`, or holds one, or is inside one.
+SAME_OR_NESTED_JS = "(e, others) => others.some((o) => o === e || o.contains(e) || e.contains(o))"
+# Whether a user turn came after `previous` (the last one before the mode was chosen): turns
+# inserted above it are a history that arrived late, not a new question (review 2026-11-27,
+# finding 1). A `previous` the page removed (a virtualised list) tells nothing: false, and the
+# guard before typing still checks the conversation.
+NEW_TURN_SINCE_JS = """(turns, previous) => {
+  if (previous === null) return turns.length > 0;
+  if (!previous.isConnected) return false;
+  const last = turns[turns.length - 1];
+  return !!last && last !== previous
+    && !!(previous.compareDocumentPosition(last) & Node.DOCUMENT_POSITION_FOLLOWING);
+}"""
+
+
 class _ModeSelector:
     """The measured response-mode selector of one page (response-mode D3). Every click is on
-    exactly one visible element found with a measured locator; nothing is typed."""
+    exactly one visible element found with a measured locator, and never on one of the
+    `others` (the editor, send, stop or new-chat control) however the locator was written;
+    nothing is typed. Every method that opens the list closes it again, also when it fails
+    (review 2026-11-27, finding 2): whoever types after it checks that it is closed."""
 
-    def __init__(self, page: Page, control: ResponseModeControl) -> None:
+    def __init__(self, page: Page, control: ResponseModeControl,
+                 others: tuple[LocatorSpec, ...] = ()) -> None:
         self.page = page
         self.control = control
+        self.others = others
 
     def _visible(self, spec: LocatorSpec) -> Locator:
         return spec.resolve(self.page).filter(visible=True)
@@ -364,32 +384,76 @@ class _ModeSelector:
             raise _NotConfirmed(f"{count} visible elements match {what}, not one")
         return found.first
 
+    async def _is_other(self, element: Locator) -> bool:
+        for spec in self.others:
+            handles = await spec.resolve(self.page).element_handles()
+            if handles and await element.evaluate(SAME_OR_NESTED_JS, handles):
+                return True
+        return False
+
+    async def _click(self, element: Locator, what: str) -> None:
+        """Click `element` unless it is, holds or sits inside another measured control
+        (review 2026-11-27, finding 4: a loose locator can pass the schema's literal check)."""
+        if await self._is_other(element):
+            raise _NotConfirmed(f"{what} resolves to another control of the page (the "
+                                "editor, send, stop or new chat), so it was not clicked")
+        await element.click(timeout=_ms(MODE_OPEN_S))
+
+    async def unusable(self) -> str | None:
+        """Why this measured selector must not be used on this page, before any click: a
+        visible element of its opener or options that is another control. None if none is."""
+        parts = [("the control that opens the modes", self.control.trigger),
+                 *((f"the option of {mode}", spec) for mode, spec in self.control.options.items())]
+        for what, spec in parts:
+            found = self._visible(spec)
+            for index in range(await found.count()):
+                if await self._is_other(found.nth(index)):
+                    return (f"{what} resolves to another control of the page (the editor, send, "
+                            "stop or new chat)")
+        return None
+
     async def _list_open(self) -> bool:
         for spec in self.control.options.values():
             if await self._visible(spec).count():
                 return True
         return False
 
+    async def is_open(self) -> bool:
+        """Whether the list of modes shows now."""
+        return await self._list_open()
+
     async def open(self) -> None:
         if await self._list_open():
             return
-        trigger = await self._one(self.control.trigger, "the control that opens the modes")
-        await trigger.click(timeout=_ms(MODE_OPEN_S))
+        what = "the control that opens the modes"
+        await self._click(await self._one(self.control.trigger, what), what)
         until = time.monotonic() + MODE_OPEN_S
         while not await self._list_open():
             if time.monotonic() >= until:
                 raise _NotConfirmed("the list of modes did not open")
             await asyncio.sleep(POLL_S)
 
-    async def close(self) -> None:
-        """Best effort: a list left open is no reason to fail, and the editor is focused
-        before anything is typed."""
-        if not await self._list_open():
-            return
-        await self.page.keyboard.press("Escape")
-        until = time.monotonic() + MODE_CLOSE_S
-        while await self._list_open() and time.monotonic() < until:
-            await asyncio.sleep(POLL_S)
+    async def close(self) -> bool:
+        """Close the list with Escape; whether it is closed now. Never raises for the page:
+        it runs in `finally`, and the caller checks the list before typing."""
+        try:
+            if not await self._list_open():
+                return True
+            await self.page.keyboard.press("Escape")
+            until = time.monotonic() + MODE_CLOSE_S
+            while await self._list_open():
+                if time.monotonic() >= until:
+                    return False
+                await asyncio.sleep(POLL_S)
+            return True
+        except PlaywrightError:
+            return False
+
+    async def choose(self, target: ResponseMode | str) -> None:
+        """Open the list and click the option of `target` (no read-back, no close)."""
+        await self.open()
+        what = f"the option of {target}"
+        await self._click(await self._one(self.control.options[str(target)], what), what)
 
     async def read(self) -> ResponseMode | None:
         """The mode the page shows now, by the measured readback; None when it is not one of
@@ -403,34 +467,35 @@ class _ModeSelector:
                 return None
             return ResponseMode(hits[0][1])
         was_open = await self._list_open()
-        await self.open()
         checked = []
-        for mode, spec in self.control.options.items():
-            option = self._visible(spec)
-            if await option.count() == 1 and await option.first.evaluate(OPTION_CHECKED_JS):
-                checked.append(mode)
-        if not was_open:
-            await self.close()
+        try:
+            await self.open()
+            for mode, spec in self.control.options.items():
+                option = self._visible(spec)
+                if await option.count() == 1 and await option.first.evaluate(OPTION_CHECKED_JS):
+                    checked.append(mode)
+        finally:
+            if not was_open:
+                await self.close()
         return ResponseMode(checked[0]) if len(checked) == 1 else None
 
     async def select(self, target: ResponseMode) -> ResponseMode | None:
         """Choose `target` unless the page already shows it, then read it back until it shows
         or MODE_CONFIRM_S passes. Returns the mode read last."""
-        current = await self.read()
-        if current is target:
-            await self.close()
-            return current
-        await self.open()
-        option = await self._one(self.control.options[target.value], f"the option of {target}")
-        await option.click(timeout=_ms(MODE_OPEN_S))
-        until = time.monotonic() + MODE_CONFIRM_S
-        while True:
+        try:
             current = await self.read()
-            if current is target or time.monotonic() >= until:
-                break
-            await asyncio.sleep(STATE_POLL_S)
-        await self.close()
-        return current
+            if current is target:
+                return current
+            await self.choose(target)
+            until = time.monotonic() + MODE_CONFIRM_S
+            while True:
+                current = await self.read()
+                if current is target or time.monotonic() >= until:
+                    break
+                await asyncio.sleep(STATE_POLL_S)
+            return current
+        finally:
+            await self.close()
 
 
 class _NoEvents:
@@ -684,6 +749,9 @@ class _Turn:
         return self.deadline - time.monotonic()
 
     async def run(self, page: Page) -> str:
+        # One attempt: a mode confirmed in an earlier tab says nothing about this one
+        # (review 2026-11-27, finding 5).
+        self.confirmed_mode = None
         await self.open_conversation(page)
         await self.apply_mode(page)
         users = self.locators.user_turn.resolve(page)
@@ -727,7 +795,13 @@ class _Turn:
 
     # -- the response mode (change response-mode, D2 to D4) -----------------------------------
 
+    def _other_controls(self) -> tuple[LocatorSpec, ...]:
+        loc = self.locators
+        return tuple(s for s in (loc.composer, loc.send, loc.stop, loc.new_conversation)
+                     if s is not None)
+
     def _report_mode(self, mode: ResponseMode) -> None:
+        """A change seen after the prompt went out (D4): recorded at once."""
         self.confirmed_mode = mode
         self.on_mode(mode)
 
@@ -746,11 +820,24 @@ class _Turn:
                 f"the response mode {mode} is not in the measurement; nothing was sent"
             )
         users = self.locators.user_turn.resolve(page)
-        users_before = await users.count()
+        last_before = await users.last.element_handle() if await users.count() else None
         reference = self.plan.ref.identifier_in(page.url)
+        selector = _ModeSelector(page, control, self._other_controls())
+        unusable = await selector.unusable()
+        if unusable is not None:  # finding 4: nothing of this selector is clicked
+            if mode is ResponseMode.AUTO:
+                self.events.warn(f"the measured response-mode selector is not used ({unusable}); "
+                                 "the question goes with the mode the page is in. Measure the "
+                                 "selector again (copilot_probe.py response-mode)")
+                return
+            raise ModeNotConfirmed(
+                f"the response mode {mode} could not be confirmed on the page ({unusable}); "
+                "nothing was clicked or typed and nothing was sent. Measure the selector again "
+                "(copilot_probe.py response-mode)"
+            )
         confirmed: ResponseMode | None = None
         try:
-            confirmed = await _ModeSelector(page, control).select(mode)
+            confirmed = await selector.select(mode)
             problem = None if confirmed is mode else f"the page shows {confirmed or 'no mode'}"
         except _NotConfirmed as exc:
             problem = str(exc)
@@ -758,22 +845,36 @@ class _Turn:
             if page.is_closed() or is_target_gone(exc):
                 raise
             problem = f"the page did not respond to the selector ({type(exc).__name__})"
-        if self.plan.ref.identifier_in(page.url) != reference or await users.count() != users_before:
+        # As `guard` does (finding 1): the address still names the conversation and no user
+        # turn came after the last one; a count would also change with a late history.
+        if self.plan.ref.identifier_in(page.url) != reference or \
+                await users.evaluate_all(NEW_TURN_SINCE_JS, last_before):
             raise ProviderError(
                 "the page changed its conversation while the response mode was set, so nothing "
                 "was typed and nothing was sent; the session keeps its conversation. Ask again, "
                 "or measure the selector again (copilot_probe.py response-mode)"
             )
+        try:
+            still_open = await selector.is_open()
+        except PlaywrightError as exc:
+            if page.is_closed() or is_target_gone(exc):
+                raise
+            still_open = True
+        if still_open:  # finding 2: nothing is typed under an open list, in any mode
+            raise ProviderError(
+                "the list of response modes stayed open after the mode was chosen, so nothing "
+                "was typed and nothing was sent. Close it in the Edge window and ask again"
+            )
+        await self.guard(page)
         if problem is None:
-            self._report_mode(mode)
+            self.confirmed_mode = mode  # recorded when the prompt goes out (`send`)
             return
         if mode is ResponseMode.AUTO:
             self.events.warn(
                 f"the automatic response mode could not be confirmed on the page ({problem}); "
                 "the question goes with the mode the page is in"
             )
-            if confirmed is not None:
-                self._report_mode(confirmed)
+            self.confirmed_mode = confirmed
             return
         raise ModeNotConfirmed(
             f"the response mode {mode} could not be confirmed on the page ({problem}); nothing "
@@ -787,11 +888,15 @@ class _Turn:
         if self.confirmed_mode is None or control is None:
             return
         now: ResponseMode | None = None
+        selector = _ModeSelector(page, control, self._other_controls())
         try:
             async with asyncio.timeout(max(0.1, min(MODE_REREAD_S, self.remaining()))):
-                now = await _ModeSelector(page, control).read()
+                now = await selector.read()
         except (PlaywrightError, TimeoutError, _NotConfirmed):
             now = None
+        if not await selector.close():
+            self.events.warn("the list of response modes stayed open after it was read again; "
+                             "close it in the Edge window")
         if now is None:
             self.events.warn(
                 "the response mode could not be read again after the answer; the record keeps "
@@ -938,6 +1043,8 @@ class _Turn:
         )
 
     async def send(self, composer: Locator) -> None:
+        if self.confirmed_mode is not None:
+            self.on_mode(self.confirmed_mode)  # the mode this attempt confirmed (finding 5)
         self.sent = True
         self.on_sent()  # just before the key press: a failure during it counts as sent
         await self.submit(composer)

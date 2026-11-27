@@ -4,6 +4,7 @@ No recording of any kind (screenshots, traces, HAR, video, storage state) anywhe
 browser package only looks at pages: it never types, fills, presses or clicks.
 """
 
+import ast
 import re
 
 from tests.conftest import REPO_ROOT
@@ -48,22 +49,49 @@ def test_browser_package_never_interacts_with_the_page():
     assert _offenders(INPUT_ACTIONS, "harness/browser") == []
 
 
+def _scopes(path, line_numbers: set[int]) -> dict[int, str]:
+    """For each line, the `Class.method` (or function) whose body holds it."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found: dict[int, str] = {}
+
+    def visit(node, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                name = f"{prefix}{child.name}"
+                for number in line_numbers:
+                    if child.lineno <= number <= (child.end_lineno or child.lineno):
+                        found[number] = name
+                visit(child, name + ".")
+
+    visit(tree, "")
+    return found
+
+
 def test_provider_types_only_into_the_editor_and_sends_only_with_the_measured_control():
     """The Copilot provider has exactly three input actions that write or send: fill the
-    editor, press Enter in the editor, click the measured send control. Revised 2026-11-27
-    (response-mode D3): three more, only in the measured response-mode selector, before
-    anything is typed: click its opener, click the option of one mode, press Escape to close
-    its list. Nothing else is typed, pressed or clicked."""
+    editor, press Enter in the editor, click the measured send control, each in its own
+    method of a question's turn. Revised 2026-11-27 (response-mode D3, independent review):
+    two more, and only inside the measured response-mode selector (`_ModeSelector`): one
+    click, which refuses any element that is another control, and Escape to close its list.
+    The selector runs before anything is typed and, to read the mode again after the answer,
+    once the reply has ended; it never types. Nothing else is typed, pressed or clicked."""
+    path = REPO_ROOT / "harness" / "providers" / "copilot_web.py"
     found = _offenders(INPUT_ACTIONS, "harness/providers")
-    actions = sorted(line.split(": ", 1)[1] for line in found)
-    assert len(actions) == 6, found
-    assert all(line.startswith("harness/providers/copilot_web.py:") for line in found)
-    assert any(a.startswith("await composer.fill(self.request.prompt") for a in actions)
-    assert any(a.startswith('await composer.press("Enter"') for a in actions)
-    assert any(a.startswith("await self.locators.send.resolve(page).first.click(") for a in actions)
-    assert any(a.startswith("await trigger.click(") for a in actions)
-    assert any(a.startswith("await option.click(") for a in actions)
-    assert any(a.startswith('await self.page.keyboard.press("Escape")') for a in actions)
+    assert all(line.startswith("harness/providers/copilot_web.py:") for line in found), found
+    actions = {int(line.split(":")[1]): line.split(": ", 1)[1] for line in found}
+    scopes = _scopes(path, set(actions))
+    where = sorted((scopes.get(number, "<module>"), text.split("(")[0])
+                   for number, text in actions.items())
+    assert where == [
+        ("_ModeSelector._click", "await element.click"),
+        ("_ModeSelector.close", 'await self.page.keyboard.press'),
+        ("_Turn.put_prompt", "await composer.fill"),
+        ("_Turn.submit", "await composer.press"),
+        ("_Turn.submit", "await self.locators.send.resolve"),
+    ], found
+    assert any(a.startswith("await composer.fill(self.request.prompt") for a in actions.values())
+    assert any(a.startswith('await composer.press("Enter"') for a in actions.values())
+    assert any(a.startswith('await self.page.keyboard.press("Escape")') for a in actions.values())
 
 
 LAUNCH = re.compile(r"\.launch_persistent_context\(|\bchromium\.launch\(|\.connect_over_cdp\(")

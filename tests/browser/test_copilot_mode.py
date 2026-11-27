@@ -230,3 +230,142 @@ def test_no_fallback_keeps_the_mode(run, data_dir, copilot_app):
     assert code == 0, err
     assert modes_of(data_dir, session_id) == [("completed", "deep", "deep")]
     assert "switched" not in err
+
+
+# -- review 2026-11-27 (independent review of 1572b0a) -------------------------------------------
+
+
+def two_questions(run, data_dir, page: dict, mode: str) -> tuple[str, tuple[int, str, str]]:
+    """A first question that binds the conversation (auto, no click), then a second one in
+    `mode` that reopens it with the page options of `page`."""
+    write_ui(data_dir, MENU)
+    session_id = new_session(run)
+    code, _, err = run("ask", session_id, "primera", page={"modes": "menu"})
+    assert code == 0, err
+    return session_id, run("ask", session_id, "segunda", "--mode", mode, page=page)
+
+
+@pytest.mark.parametrize("mode, start", [("deep", "auto"), ("auto", "deep")])
+def test_a_history_that_arrives_while_choosing_does_not_block(run, data_dir, copilot_app, mode,
+                                                              start):
+    """Finding 1: turns inserted above the thread while the mode is chosen (a late, virtualised
+    history) are no new question; neither deep nor auto may fail for them."""
+    session_id, (code, _, err) = two_questions(
+        run, data_dir, {"modes": "menu", "mode_start": start, "mode_history": "1"}, mode)
+    assert code == 0, err
+    assert [p.mode for p in copilot_app.prompts] == ["auto", mode]
+    assert modes_of(data_dir, session_id)[-1] == ("completed", mode, mode)
+
+
+def test_a_new_turn_while_choosing_fails_before_typing(run, data_dir, copilot_app):
+    """Control of finding 1: a user turn after the last one is a new question; nothing is
+    typed and the session keeps its conversation."""
+    session_id, (code, _, err) = two_questions(
+        run, data_dir, {"modes": "menu", "mode_append": "1"}, "deep")
+    assert code != 0 and "nothing was sent" in err and "conversation" in err
+    assert copilot_app.prompt_count == 1
+    assert modes_of(data_dir, session_id)[-1] == ("failed", "deep", None)
+
+
+@pytest.mark.parametrize("mode, start", [("deep", "auto"), ("auto", "deep")])
+def test_a_list_that_stays_open_fails_before_typing(run, data_dir, copilot_app, mode, start):
+    """Finding 2: the list of modes does not close; nothing is typed under it, in any mode."""
+    write_ui(data_dir, MENU)
+    session_id = new_session(run)
+    code, out, err = run("ask", session_id, "hola", "--mode", mode,
+                         page={"modes": "menu", "mode_start": start, "mode_sticky": "1"})
+    assert code != 0 and out == ""
+    assert "stayed open" in err and "nothing was sent" in err
+    assert copilot_app.prompt_count == 0
+    assert modes_of(data_dir, session_id) == [("failed", mode, None)]
+
+
+def test_a_disabled_option_leaves_no_list_open_under_the_prompt(run, data_dir, copilot_app):
+    """Finding 2: the click on a disabled option fails; auto warns and goes on, with the list
+    closed before anything is typed."""
+    write_ui(data_dir, MENU)
+    session_id = new_session(run)
+    code, _, err = run("ask", session_id, "hola",
+                       page={"modes": "menu", "mode_start": "deep", "mode_disabled": "auto"})
+    assert code == 0, err
+    assert "automatic response mode could not be confirmed" in err
+    [prompt] = copilot_app.prompts
+    assert prompt.mode == "deep" and prompt.list_open is False
+
+
+def test_two_matching_options_leave_no_list_open(run, data_dir, copilot_app):
+    write_ui(data_dir, MENU)
+    session_id = new_session(run)
+    code, _, err = run("ask", session_id, "hola",
+                       page={"modes": "menu", "mode_start": "deep", "mode_twice": "1"})
+    assert code == 0, err
+    assert "2 visible elements" in err
+    [prompt] = copilot_app.prompts
+    assert prompt.list_open is False
+    code, _, err = run("ask", session_id, "otra", "--mode", "quick",
+                       page={"modes": "menu", "mode_twice": "1"})
+    assert code != 0 and copilot_app.prompt_count == 1  # quick: failed, not typed
+
+
+def test_a_reread_that_fails_keeps_the_mode_confirmed_before_sending(run, data_dir, copilot_app):
+    """D4: after the answer the opener is doubled, so the mode cannot be read again; the
+    record keeps the mode the prompt was sent in, with a warning."""
+    write_ui(data_dir, MENU)
+    session_id = new_session(run)
+    code, _, err = run("ask", session_id, "hola", "--mode", "deep",
+                       page={"modes": "menu", "mode_reread_fail": "1"})
+    assert code == 0, err
+    assert "could not be read again" in err
+    assert modes_of(data_dir, session_id) == [("completed", "deep", "deep")]
+
+
+def test_an_option_that_is_another_control_is_never_clicked(run, data_dir, copilot_app):
+    """Finding 4: a loose locator (not exact) passes the schema but resolves to the new-chat
+    button; the provider refuses to click it and nothing is typed."""
+    loose = json.loads(json.dumps(MENU))
+    loose["options"]["deep"] = {"role": "button", "name": "New synthetic chat", "exact": False}
+    session_id, (code, _, err) = two_questions(run, data_dir, {"modes": "menu"}, "auto")
+    assert code == 0, err
+    write_ui(data_dir, loose)
+    code, _, err = run("ask", session_id, "tercera", "--mode", "deep", page={"modes": "menu"})
+    assert code != 0 and "nothing was sent" in err
+    assert "another control" in err
+    assert copilot_app.prompt_count == 2
+    assert modes_of(data_dir, session_id)[-1] == ("failed", "deep", None)
+
+
+async def test_a_retry_in_a_new_tab_does_not_keep_the_first_confirmation(copilot_app, data_dir,
+                                                                        tmp_path, monkeypatch):
+    """Finding 5: the first try confirms auto and then loses its tab before typing; the
+    second try cannot confirm it. The record must not keep the first try's confirmation."""
+    from harness.providers import copilot_web
+    from tests.browser.test_copilot_conversation import Chat
+    from tests.shell_support import ScriptedTerminal
+
+    write_ui(data_dir, MENU)
+    answers = iter([copilot_web.ResponseMode.AUTO, None])
+
+    async def select(self, target):
+        return next(answers)
+
+    monkeypatch.setattr(copilot_web._ModeSelector, "select", select)
+    original = copilot_web._Turn.put_prompt
+    lost: list = []
+
+    async def losing(self, page, *args):
+        if not lost:
+            lost.append(page)
+            await page.close()
+        return await original(self, page, *args)
+
+    monkeypatch.setattr(copilot_web._Turn, "put_prompt", losing)
+    chat = Chat(data_dir, tmp_path / "edge-profile", copilot_app.url("/app", modes="menu"),
+                ScriptedTerminal(["uno ZQX-END-1", "/exit"]))
+    try:
+        assert await chat.conversation.run() == 0
+        assert "trying once more in a new tab" in chat.terminal.text
+        rows = [tuple(r) for r in chat.conn.execute(
+            "SELECT status, requested_mode, confirmed_mode FROM requests")]
+        assert rows == [("completed", "auto", None)]
+    finally:
+        chat.close()

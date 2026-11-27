@@ -293,10 +293,8 @@ class SessionService:
         if not lock.acquire():
             raise SessionBusy(f"session {session.session_id} already has a question in progress")
         try:
-            if chosen is not None:
-                self.set_mode(session.session_id, provider, chosen)
             return await self._ask_locked(session.session_id, provider, prompt, context,
-                                          notice=self._answer_notice)
+                                          notice=self._answer_notice, set_mode=chosen)
         finally:
             lock.release()
 
@@ -422,6 +420,7 @@ class SessionService:
         stored_text: str | None = None,
         timeout_s: float | None = None,
         notice: str | None = None,
+        set_mode: ResponseMode | None = None,
     ) -> LLMResponse:
         # Read under the session lock: nobody else can change the session until it is released.
         session = repo.get_session(self._conn, session_id)
@@ -431,7 +430,9 @@ class SessionService:
                 f"session {session_id} is closed: its remote conversation could not be found "
                 "again. Create a new session"
             )
-        mode = session.response_mode
+        # `ask --mode`: kept only once nothing below refuses the question before recording it
+        # (review 2026-11-27, finding 7).
+        mode = set_mode if set_mode is not None else session.response_mode
         if timeout_s is not None:
             deadline_s = timeout_s  # a skill step keeps its own (response-mode D6)
         else:
@@ -448,6 +449,8 @@ class SessionService:
             except PromptTooLong as exc:
                 raise PromptTooLong(f"{exc}. {_own_share(sent_text, prompt, context, notice)}") from None
         check_mode(provider, mode)  # a mode the provider cannot set: refused, nothing recorded
+        if set_mode is not None:
+            self.set_mode(session_id, provider, set_mode)
         with_events = accepts_events(provider)
         with_modes = _accepts(provider, "on_mode")
         warnings: list[str] = []

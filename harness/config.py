@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,10 +49,10 @@ class Settings:
     def from_env(cls, env: Mapping[str, str]) -> Settings:
         data_dir = Path(env.get("HARNESS_DATA_DIR") or "./data")
         profile = env.get("HARNESS_EDGE_PROFILE")
-        request_timeout_s = _number(env, "HARNESS_REQUEST_TIMEOUT_S", 120.0)
+        request_timeout_s = _number(env, "HARNESS_REQUEST_TIMEOUT_S", 120.0, deadline=True)
         deep_timeout_s: float | None = None
         if env.get("HARNESS_DEEP_REQUEST_TIMEOUT_S"):
-            deep_timeout_s = _number(env, "HARNESS_DEEP_REQUEST_TIMEOUT_S", 0.0)
+            deep_timeout_s = _number(env, "HARNESS_DEEP_REQUEST_TIMEOUT_S", 0.0, deadline=True)
             if deep_timeout_s < request_timeout_s:
                 raise InvalidInput(
                     "HARNESS_DEEP_REQUEST_TIMEOUT_S must not be lower than "
@@ -93,7 +94,10 @@ def _positive_int(env: Mapping[str, str], key: str) -> int | None:
     return int(raw)
 
 
-def _number(env: Mapping[str, str], key: str, default: float) -> float:
+def _number(env: Mapping[str, str], key: str, default: float, *, deadline: bool = False) -> float:
+    """A number of the environment. A `deadline` must be finite and above 0: `nan` or an
+    infinity would reach `asyncio.timeout` with the request already recorded (review
+    2026-11-27, finding 6)."""
     raw = env.get(key)
     if not raw:
         return default
@@ -101,6 +105,10 @@ def _number(env: Mapping[str, str], key: str, default: float) -> float:
         value = float(raw)
     except ValueError:
         raise InvalidInput(f"{key} must be a number, got {raw!r}") from None
+    if deadline and not (math.isfinite(value) and value > 0):
+        raise InvalidInput(f"{key} must be a finite number above 0, got {raw!r}")
+    if not math.isfinite(value):
+        raise InvalidInput(f"{key} must be a finite number, got {raw!r}")
     if value < 0:
         raise InvalidInput(f"{key} must not be negative")
     return value
