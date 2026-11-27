@@ -77,8 +77,11 @@
       | Sin hueco ante las líneas del harness | 2 failed |
       | Marco ajeno en `$secondary` | 1 failed |
       | Sin *breakpoints* | 3 failed |
-- [ ] 6.2 Las dos tandas, una vez cada una con `caffeinate -i`: `-m "not edge and not copilot"` y `-m edge`. Si falla una de Edge, se repite sola antes de concluir. Después, `openspec validate --all --strict`, `scripts/check_public_safety.py` y `scripts/check_sec_matrix.py`.
+- [x] 6.2 Las dos tandas, una vez cada una con `caffeinate -i`: `-m "not edge and not copilot"` y `-m edge`. Si falla una de Edge, se repite sola antes de concluir. Después, `openspec validate --all --strict`, `scripts/check_public_safety.py` y `scripts/check_sec_matrix.py`.
   - Oráculo: código 0 en cada una.
+  - Recibo (2026-11-27, macOS arm64, sobre `345acfa`): Edge `155 passed, 1835 deselected` en 1253 s, código 0. Sin Edge: `1 failed, 1832 passed`, código 1. La que falló, `test_chat_tui_terminal.py::test_ctrl_c_interrupts_the_question_not_the_screen`, falla también sola, así que no es carga. La prueba espera el texto «is uncertain» en la salida del pseudo-terminal. Con la columna de texto nueva, el panel parte la línea `interrupted: request <id> is uncertain: …` entre «is» y «uncertain». El aviso sí se muestra; la espera ahora busca «uncertain:», que no puede partirse (`437e42c`). Con eso, el fichero da `13 passed`.
+  - Tanda sin Edge repetida sobre `437e42c`: `1 failed, 1832 passed`, código 1. Esta vez falló `test_shell_tui_buttons.py::test_keys_typed_ahead_of_the_box_cannot_approve`, una prueba de `approval-buttons` que mide tiempo (el recuadro tarda 0,5 s en armarse). Sola pasa 5 de 5 (`1 passed`, 1,6–2,5 s). La lectura es que, con la máquina cargada, el recuadro ya estaba armado cuando llegaron las teclas. No toca nada de este corte.
+  - `openspec validate --all --strict`: 24 de 24 válidos, código 0. `scripts/check_sec_matrix.py`: PASS (15 filas, 135 pruebas), código 0. `scripts/check_public_safety.py` sobre los 13 ficheros del corte: PASS, código 0. `test_portability.py` está en la tanda sin Edge y pasa.
 - [x] 6.3 Sin código por plataforma: `tests/unit/test_portability.py` pasa con los ficheros nuevos.
   - Recibo: en 6.2.
 - [x] 6.4 Documentación: `README.md` («Conversación › Aspecto»), con la captura nueva a 100×30 y el apartado «Espaciado y colores».
