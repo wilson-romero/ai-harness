@@ -3,7 +3,8 @@
 The proposal is a small object whose content is represented by its SHA-256; its hash is the
 SHA-256 of a fixed prefix plus canonical JSON. A person grants it only at an interactive
 terminal, by typing the first 8 characters of the hash shown next to the full content. Nothing
-here reads a model output as a decision: the only input that can grant is the terminal's.
+here reads a model output as a decision: the only input that can grant is the terminal's. On the
+full screen the person presses a button instead (approval-buttons): see `decide`.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import hashlib
 import json
 import unicodedata
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol, runtime_checkable
 
 from harness.shell.terminal import Terminal, TtyTerminal  # the common interface (re-exported)
 from harness.text.redaction import redact
@@ -25,6 +26,39 @@ CODE_LENGTH = 8
 MAX_ATTEMPTS = 3
 
 Decision = Literal["granted", "rejected", "undecided"]
+Means = Literal["code", "button"]
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """What `decide` concluded and, when a person decided, how (approval-buttons D1): the
+    audit trail records whether the code was typed or a button of the full screen pressed."""
+
+    decision: Decision
+    means: Means | None = None
+
+
+@dataclass(frozen=True)
+class ButtonPress:
+    """The answer of the approval buttons of the full screen (approval-buttons D1).
+
+    It is an object, never a string: no typed line, model output, file or variable can be one.
+    `decide` accepts it only from a `ButtonApprovalTerminal`, as the return value of
+    `ask_buttons`, and only with the hash of the proposal that prompt was asked for."""
+
+    choice: Literal["approve", "reject"]
+    approval_hash: str
+
+
+@runtime_checkable
+class ButtonApprovalTerminal(Protocol):
+    """A terminal that asks the approval with buttons instead of the typed code: only the
+    full screen (harness/shell/tui.py). The plain conversation and the CLI do not have it."""
+
+    def ask_buttons(self, question: str, approval_hash: str) -> ButtonPress | None:
+        """Block until a button answers the box opened for `approval_hash`; None leaves the
+        approval undecided (Ctrl+C, leaving, the box not opened for this hash)."""
+        ...
 
 
 # Invisible code points (review 8.5, 2026-11-24). Derived with `unicodedata` only, no data file:
@@ -166,8 +200,31 @@ CONFIRM_QUESTION = (f"Type {REJECT_WORD} to confirm the rejection; anything else
                     "approval pending: ")
 
 
+BUTTON_QUESTION = "Approve applies this proposal; Reject cancels the run."
+
+
 def decide(terminal: Terminal, shown: str, approval_hash: str, *,
-           confirm_rejection: bool = False) -> Decision:
+           confirm_rejection: bool = False) -> Verdict:
+    """Show the proposal and ask for a decision: by buttons on the full screen, otherwise by
+    the typed code (approval-buttons D1)."""
+    if isinstance(terminal, ButtonApprovalTerminal):
+        terminal.show(shown)
+        press = terminal.ask_buttons(BUTTON_QUESTION, approval_hash)
+        # Only an object of the button type, answered to this very prompt, for this hash.
+        if not isinstance(press, ButtonPress) or press.approval_hash != approval_hash:
+            return Verdict("undecided")
+        if press.choice == "approve":
+            return Verdict("granted", "button")
+        if press.choice == "reject":  # confirmed inside the box before it is sent
+            return Verdict("rejected", "button")
+        return Verdict("undecided")
+    decision = decide_by_code(terminal, shown, approval_hash,
+                              confirm_rejection=confirm_rejection)
+    return Verdict(decision, "code" if decision != "undecided" else None)
+
+
+def decide_by_code(terminal: Terminal, shown: str, approval_hash: str, *,
+                   confirm_rejection: bool = False) -> Decision:
     """Show the proposal and ask for the code, at most MAX_ATTEMPTS times.
 
     The question blocks the session (its lock is held) until the person answers or closes the
@@ -183,7 +240,7 @@ def decide(terminal: Terminal, shown: str, approval_hash: str, *,
     question = f"Type the first {CODE_LENGTH} characters of the hash to approve, or n to reject: "
     for _ in range(MAX_ATTEMPTS):
         answer = terminal.ask(question)
-        if answer is None:
+        if not isinstance(answer, str):  # end of input, or anything that is not typed text
             return "undecided"
         answer = answer.strip().lower()
         if answer == "n":

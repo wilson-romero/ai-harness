@@ -20,10 +20,10 @@ from harness.shell.terminal import ConsoleTerminal
 from harness.shell.tui import (
     COMMAND_ENTRIES,
     ApprovalScreen,
-    CodeInput,
     ForeignBlock,
     HarnessApp,
     PickerScreen,
+    ProposalArea,
     TuiTerminal,
     rows_content,
     textual_is_quiet,
@@ -345,64 +345,14 @@ def _skill_tui(tmp_path, provider=None, **options) -> tuple[Tui, WriteEffect]:
                effects={"test.write": effect}, **options), effect
 
 
-def _code(tui) -> str:
-    header = str(tui.app.screen.query_one("#approval-header", Static).render())
-    line = next(l for l in header.split("\n") if l.strip().startswith("hash:"))
-    return line.split()[-1][:8]
-
-
 async def _approval(tui, pilot) -> None:
     await tui.send(pilot, SKILL_LINE)
     await tui.until(pilot, lambda: isinstance(tui.app.screen, ApprovalScreen))
     await pilot.pause(0.05)
 
 
-async def _type_answer(tui, pilot, text: str) -> None:
-    await tui.until(pilot, lambda: isinstance(tui.app.focused, CodeInput))
-    await pilot.press(*text)
-    await pilot.press("enter")
-
-
-async def test_an_approval_typed_in_its_box_applies_once(tmp_path):
-    tui, effect = _skill_tui(tmp_path)
-    async with tui.app.run_test(size=SIZE) as pilot:
-        await _approval(tui, pilot)
-        box = tui.app.screen
-        assert str(box.query_one("#approval-box").border_title) == "Approval requested"
-        content = str(box.query_one("#approval-content Static", Static).render())
-        assert "target" not in content  # the header is not in the foreign area...
-        assert "target:" in str(box.query_one("#approval-header", Static).render())
-        code = _code(tui)
-        await _type_answer(tui, pilot, code)
-        await tui.until(pilot, lambda: any("is completed" in t for t in tui.blocks("harness")))
-        await tui.ready(pilot)
-        prompt = tui.app.query_one("#prompt")
-        assert code not in prompt.history and SKILL_LINE in prompt.history
-        assert all(code not in text for text in tui.blocks("you"))  # never a "you" block
-        await tui.send(pilot, "/exit")
-    assert len(effect.written()) == 1
-    assert _query(tui.data_dir, "SELECT status FROM approvals") == ["consumed"]
-
-
-@pytest.mark.parametrize(("answers", "approval", "run"), [
-    (["n", "reject"], "rejected", "cancelled"),
-    (["n", "no"], "pending", "awaiting_approval"),
-    (["x"], "pending", "awaiting_approval"),  # three wrong codes: still pending
-])
-async def test_the_rejection_still_needs_its_confirmation(tmp_path, answers, approval, run):
-    tui, effect = _skill_tui(tmp_path)
-    async with tui.app.run_test(size=SIZE) as pilot:
-        await _approval(tui, pilot)
-        for answer in answers if answers != ["x"] else ["x", "y", "z"]:
-            await tui.until(pilot, lambda: isinstance(tui.app.screen, ApprovalScreen))
-            await _type_answer(tui, pilot, answer)
-            await pilot.pause(0.05)
-        await tui.until(pilot, lambda: any(f"is {run}" in t for t in tui.blocks("harness")))
-        await tui.ready(pilot)
-        await tui.send(pilot, "/exit")
-    assert effect.written() == []
-    assert _query(tui.data_dir, "SELECT status FROM approvals") == [approval]
-    assert _query(tui.data_dir, "SELECT status FROM skill_runs") == [run]
+# The buttons of the box, and the typed code they replace on the full screen, are tested in
+# tests/unit/test_shell_tui_buttons.py (approval-buttons).
 
 
 async def test_ctrl_c_in_the_approval_box_leaves_it_pending(tmp_path):
@@ -418,49 +368,6 @@ async def test_ctrl_c_in_the_approval_box_leaves_it_pending(tmp_path):
     assert _query(tui.data_dir, "SELECT status FROM approvals") == ["pending"]
 
 
-async def test_an_answer_typed_ahead_of_the_box_cannot_approve(tmp_path):
-    """The box refuses an answer sooner than ARM_S after it opened (type-ahead); the same
-    answer typed later is taken. Negative control: with no delay it is taken at once."""
-    tui, effect = _skill_tui(tmp_path, arm_s=30.0)
-    async with tui.app.run_test(size=SIZE) as pilot:
-        await _approval(tui, pilot)
-        await _type_answer(tui, pilot, _code(tui))
-        await tui.until(pilot, lambda: "Too soon" in str(
-            tui.app.screen.query_one("#approval-message", Static).render()))
-        assert isinstance(tui.app.screen, ApprovalScreen)  # still asking
-        tui.app.arm_s = 0.0  # time passes
-        await _type_answer(tui, pilot, _code(tui))
-        await tui.until(pilot, lambda: any("is completed" in t for t in tui.blocks("harness")))
-        await tui.ready(pilot)
-        await tui.send(pilot, "/exit")
-    assert len(effect.written()) == 1
-
-
-async def test_a_paste_in_the_approval_box_is_ignored(tmp_path):
-    tui, effect = _skill_tui(tmp_path)
-    async with tui.app.run_test(size=SIZE) as pilot:
-        await _approval(tui, pilot)
-        code = _code(tui)
-        box_input = tui.app.screen.query_one(CodeInput)
-        await tui.until(pilot, lambda: tui.app.focused is box_input)
-        tui.app.post_message  # noqa: B018 - the paste arrives as Textual's event
-        from textual.events import Paste
-
-        box_input.post_message(Paste(code))
-        await pilot.pause(0.1)
-        assert box_input.value == ""
-        # Negative control: an ordinary input takes the same paste.
-        plain_input = tui.app.query_one("#prompt", Input)
-        plain_input.post_message(Paste("pegado"))
-        await pilot.pause(0.1)
-        assert plain_input.value == "pegado"
-        plain_input.value = ""
-        await pilot.press("ctrl+c")
-        await tui.until(pilot, tui.terminal.waiting_for_line)
-        await tui.send(pilot, "/exit")
-    assert effect.written() == []
-
-
 async def test_the_palette_never_opens_over_the_approval_box(tmp_path):
     tui, _ = _skill_tui(tmp_path)
     async with tui.app.run_test(size=SIZE) as pilot:
@@ -468,7 +375,7 @@ async def test_the_palette_never_opens_over_the_approval_box(tmp_path):
         await pilot.press("ctrl+p")
         await pilot.pause(0.2)
         assert isinstance(tui.app.screen, ApprovalScreen)
-        assert isinstance(tui.app.focused, CodeInput)
+        assert isinstance(tui.app.focused, ProposalArea)
         await pilot.press("ctrl+c")
         await tui.ready(pilot)
         await tui.send(pilot, "/exit")

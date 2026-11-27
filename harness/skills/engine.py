@@ -699,13 +699,16 @@ class SkillEngine:
             if not self._terminal.is_interactive():
                 self._set_awaiting(state, row)
                 return waiting
-            decision = decide(
+            verdict = decide(
                 self._terminal,
                 self._render_approval(proposal, proposal_hash, live["expires_at"],
                                       proposed.redactions),
                 proposal_hash,
                 confirm_rejection=self._confirm_rejection,
             )
+            decision = verdict.decision
+            # How the person decided goes into the audit trail (approval-buttons D1).
+            means = f";means={verdict.means}" if verdict.means else ""
             decided = utc_iso(self._clock())
             if decision == "undecided":
                 self._set_awaiting(state, row)
@@ -716,7 +719,7 @@ class SkillEngine:
                     self._set_approval(live["approval_id"], "rejected", decided_at=decided,
                                        identity=identity)
                     self._audit("approval.rejected", "rejected", state.session, state.run_id,
-                                self._approval_detail(live))
+                                self._approval_detail(live) + means)
                     self._set_step(row, "failed", error_code="approval_rejected", finished=True)
                     self._finish_run_locked(state.run_id, state.session, "cancelled",
                                             "approval_rejected")
@@ -739,7 +742,7 @@ class SkillEngine:
                 self._set_approval(live["approval_id"], "granted", decided_at=decided,
                                    identity=identity)
                 self._audit("approval.granted", "granted", state.session, state.run_id,
-                            self._approval_detail(live))
+                            self._approval_detail(live) + means)
         return await self._apply(state, step, live["approval_id"], proposed)
 
     async def _apply(

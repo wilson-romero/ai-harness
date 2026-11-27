@@ -9,6 +9,7 @@ imported, with that reason.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import signal
@@ -19,6 +20,7 @@ import time
 import pytest
 
 from tests.conftest import REPO_ROOT, query, run_main, subprocess_env, wait_for_running
+from tests.skill_support import GOOD_ECHO
 
 pty = pytest.importorskip("pty", reason="no pseudo-terminal module on this system")
 select = pytest.importorskip("select")
@@ -217,3 +219,32 @@ def test_a_hangup_during_a_question_exits_cleanly(data_dir):
     assert os.waitstatus_to_exitcode(status) == 0
     assert query(data_dir, "SELECT status FROM requests") == [("uncertain",)]
     assert run_main(data_dir, "ask", session_id, "otra").returncode == 0  # the session is free
+
+
+def test_the_approval_buttons_at_a_real_terminal(data_dir, tmp_path):
+    """approval-buttons: the skill line and, in the same write, the keys that would approve
+    if a button had the focus (Tab, Enter, Space). The box opens and stays pending; Tab and
+    Enter sent once it is armed approve, and the audit says so."""
+    responses = tmp_path / "respuestas.json"
+    responses.write_text(json.dumps({"tarea: demo-echo/draft": GOOD_ECHO}), encoding="utf-8")
+    child = FullScreenChild(data_dir, "chat", HARNESS_MOCK_RESPONSES=str(responses),
+                            HARNESS_SKILLS_DIR=str(REPO_ROOT / "tests" / "fixtures" / "skills"),
+                            HARNESS_MOCK_DELAY_MS="0")
+    try:
+        child.read_until(READY)
+        child.type("/skill demo-echo text=texto-sintetico\r\t\r \r\t\r")
+        child.read_until("The whole proposal has been shown")
+        time.sleep(1.0)  # armed by now
+        assert query(data_dir, "SELECT status FROM approvals") == [("pending",)]
+        child.type("\t")
+        time.sleep(0.3)
+        child.type("\r")
+        child.read_until("is completed")
+        child.type("\x11")
+        assert child.wait() == 0
+    finally:
+        child.kill()
+    assert _restored(child)
+    assert query(data_dir, "SELECT status FROM approvals") == [("consumed",)]
+    detail = query(data_dir, "SELECT detail FROM audit_events WHERE event_type = 'approval.granted'")
+    assert detail[0][0].endswith(";means=button")
