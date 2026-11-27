@@ -1,0 +1,91 @@
+# Tasks
+
+Cada `[x]` lleva su recibo debajo, con fecha y plataforma. Los oráculos se nombran en cada tarea. Todo se ejecutó en macOS 26.2 arm64 con Python 3.14.8 y Textual 8.2.8. Windows no se ha ejecutado: no hay código por plataforma (`tests/unit/test_portability.py`).
+
+Los controles negativos se aplicaron con un guion fuera del repositorio: aplica una mutación, ejecuta la prueba que la tiene que detectar, restaura el fichero y usa `PYTHONDONTWRITEBYTECODE=1` y `-p no:cacheprovider`. El guion está en el *scratchpad* de la sesión de desarrollo y no entra al repositorio. Cada mutación se cita en su tarea como «Mn». Resultado de la última pasada (2026-11-27, sobre el árbol de la tarea 7.1): las 23 mutaciones detectadas, ninguna sobrevive.
+
+## 1. Rama, premisas y estudio
+
+- [x] 1.1 Rama `feature/command-completion` desde `feature/collapsible-blocks` (aún sin merge al empezar) y, ya mergeada, integrada con `origin/develop` (`1611064`). Hecho: `git log --oneline` muestra el merge «🔀 Merge develop into feature/command-completion».
+  - Recibo (2026-11-27, macOS arm64): merge `af425a1` sin conflictos; `develop` = `1611064` («Merge feature/collapsible-blocks into develop»).
+- [x] 1.2 Leer en el Textual instalado lo que fija el diseño: `Input.replace`, `_watch_value`, `selection`/`cursor_position`, `_on_key` y la MRO, los atajos con prioridad, `OptionList(markup=False)` con `highlighted=None`, `run_worker` y `call_from_thread`, `push_screen`. Oráculo: las citas de fichero y línea en `design.md` («Premisas»).
+  - Recibo (2026-11-27, macOS arm64): leído en `.venv/lib/python3.14/site-packages/textual/` (`widgets/_input.py`, `widgets/_option_list.py`, `app.py`, `dom.py`, `message_pump.py`).
+- [x] 1.3 Estudio de Claude Code, Codex CLI y OpenCode. Oráculo: las fuentes citadas en `design.md` («Qué hacen otras herramientas»), con la URL o el fichero y el commit.
+  - Recibo (2026-11-27): `code.claude.com/docs/en/interactive-mode`, `opencode.ai/docs/tui` y `openai/codex` en `6bf1e3e68765` (`command_popup.rs`, `file_search_popup.rs`, `popup_consts.rs`).
+
+## 2. Una sola tabla (D1)
+
+- [x] 2.1 `harness/shell/commands.py` con `TABLE`; `parser.COMMANDS`, `/help` y los candidatos salen de ella. Oráculo: `test_the_parser_and_help_read_the_one_table` y `test_slash_lists_every_command_of_the_one_table_with_its_summary`. Las pruebas del analizador (`tests/unit/test_shell_parser.py`) no cambian.
+  - Recibo (2026-11-27, macOS arm64): pasan; `git diff 1611064 -- tests/unit/test_shell_parser.py` → vacío.
+- [x] 2.2 Nombre cortado (`parse_short`, `resolve_name`): único → el comando; ambiguo → error que nombra los candidatos y no ejecuta nada. Oráculo: `test_a_unique_start_names_the_command`, `test_an_ambiguous_start_is_an_error_that_names_the_candidates`, `test_an_ambiguous_start_runs_nothing`, `test_the_strict_parser_does_not_take_a_cut_name`. Control negativo: M18 (un principio ambiguo toma el primero).
+  - Recibo (2026-11-27, macOS arm64): pasan; M18 → `1 failed`.
+
+## 3. Formas cortas y eco (D3)
+
+- [x] 3.1 `harness/shell/shortforms.py`: `/new SLUG` y `/skill NOMBRE RUTA`, solo con datos del harness; una consulta que falla no convierte nada. Oráculo: `test_short_forms_expand_to_the_long_form`, `test_nothing_known_expands_nothing`, `test_a_lookup_that_fails_expands_nothing`, `test_the_full_line_reads_back_as_the_same_command`. Control negativo: M16 (cualquier palabra es un proyecto) y M17 (la ruta suelta también con varias entradas).
+  - Recibo (2026-11-27, macOS arm64): pasan; M16 y M17 → `1 failed` cada una.
+- [x] 3.2 El núcleo escribe `running: <comando entero>`, saneado, antes de ejecutar una forma corta, y no repite un comando escrito entero; vale igual en `--plain`. Oráculo: `test_the_two_lines_of_the_owner_in_short_form` (la línea siguiente al eco es ya la del Skill), `test_a_command_typed_in_full_is_not_echoed`, `test_a_hostile_word_in_a_short_form_is_shown_clean`. Control negativo: M15 (sin eco).
+  - Recibo (2026-11-27, macOS arm64): pasan; M15 → `1 failed`.
+- [x] 3.3 Una prueba existente cambia una línea: en `tests/unit/test_shell_skills.py`, `/skill demo-echo texto` era un error de forma y ahora es la forma corta de un Skill de una entrada (`demo-echo` declara `text`). Pasa a `/skill demo-echo texto otro`, que sigue siendo el mismo error. Oráculo: `git diff 1611064 -- tests/unit/test_shell_skills.py` → la línea y un comentario.
+  - Recibo (2026-11-27, macOS arm64): `+3 −1`: la línea cambiada y dos de comentario que lo explican.
+- [x] 3.4 `/resume ID` (entero o principio único de 8 o más caracteres) y `~/` en `/file` y `--file`. Oráculo: `test_resume_by_a_session_id`, `test_a_path_that_starts_with_tilde_is_read_from_the_home_folder`. Control negativo: M21 (`~/` sin leer la carpeta personal).
+  - Recibo (2026-11-27, macOS arm64): pasan; M21 → `1 failed`.
+
+## 4. La lista (D2, D4)
+
+- [x] 4.1 Motor de candidatos (`suggest`, `rank`): comandos, opciones, proyectos, Skills, entradas, sesiones y rutas; principio primero y luego *fuzzy*; acotado a 50; lineal. Oráculo: `test_typing_filters_by_the_start_first`, `test_then_fuzzy_after_the_prefix_matches`, `test_arguments_complete_from_harness_data`, `test_the_session_list_shows_its_project_and_title`, `test_nothing_completes_where_text_is_typed_freely`, `test_the_list_is_bounded`, `test_ranking_is_linear`.
+  - Recibo (2026-11-27, macOS arm64): pasan.
+- [x] 4.2 Lo ajeno se dibuja literal y acotado: nombres que no se ven tal cual no se ofrecen; filas `Content` sin marcado; títulos y descripciones saneados en una línea. Oráculo: `test_hostile_names_are_never_offered`, `test_a_hostile_name_is_drawn_and_inserted_literally` (`[@click=app.quit]x.md` se inserta tal cual y la aplicación sigue abierta), `test_negative_control_a_row_parsed_as_markup_would_style_the_name`, `test_a_title_in_the_list_is_one_clean_bounded_line`, `test_the_preview_is_clean_and_bounded`. Control negativo: M1 (filas como marcado), M2 (cualquier nombre se ofrece), M3 (título sin sanear) y M20 (vista previa sin sanear).
+  - Recibo (2026-11-27, macOS arm64): pasan; M1, M2, M3 y M20 → `1 failed` cada una.
+- [x] 4.3 Rutas: relativas a la carpeta de trabajo, carpetas primero, `~/` sin expandir en el texto, ocultos solo con `.`, enlaces como nombre y nunca seguidos, errores en silencio, solo nombres. Oráculo: `test_a_folder_lists_folders_first_then_files_relative_to_the_working_folder`, `test_tilde_lists_the_home_folder_and_stays_in_the_text`, `test_hidden_names_only_when_the_name_typed_starts_with_a_dot`, `test_a_link_is_a_name_and_is_never_followed`, `test_a_folder_that_cannot_be_listed_gives_nothing_and_no_error`, `test_a_folder_without_permission_gives_nothing`, `test_listing_reads_names_never_contents` (espía de `open`). Control negativo: M4 (enlaces como carpetas), M5 (ocultos siempre) y M22 (el listado abre los ficheros).
+  - Recibo (2026-11-27, macOS arm64): pasan; M4, M5 y M22 → `1 failed` cada una.
+- [x] 4.4 Escribir no se para: listado acotado (100 000 entradas, 0,5 s), en un hilo, y la respuesta vieja se tira. Oráculo: `test_a_folder_of_fifty_thousand_entries_is_listed_in_bounded_time` (cifra medida: 50 000 entradas en 0,12 s; 20 000 en 0,05 s) y `test_listing_runs_off_the_screen_thread_and_a_stale_answer_is_dropped` (un listado que tarda 10 s no frena las teclas). Control negativo: M6 (sin tope), M7 (listado en el hilo de la pantalla) y M8 (se muestra la respuesta vieja).
+  - Recibo (2026-11-27, macOS arm64): pasan; M6, M7 y M8 → `1 failed` cada una. M7 sobrevivió a la primera versión de la prueba (medía solo las dos últimas teclas, después del listado); la prueba mide ahora desde la primera tecla y M7 → `1 failed in 10.72s`.
+- [x] 4.5 La lista en la pantalla completa (`SuggestionList`, no enfocable, sin fila elegida al abrir, estilo propio en `DEFAULT_CSS`). Oráculo: `test_slash_opens_the_commands_and_typing_filters_without_losing_a_key`, `test_arrows_choose_enter_takes_the_chosen_and_never_sends`, `test_enter_with_no_row_chosen_sends_what_is_typed`, `test_paths_complete_folders_first_and_tab_takes_the_only_one`. Control negativo: M10 (Intro sin elegir toma la primera fila).
+  - Recibo (2026-11-27, macOS arm64): pasan; M10 → `1 failed`. Mover el CSS de la aplicación a `DEFAULT_CSS` no cambia la captura de la tarea 4.9 (`diff` de las dos capturas: solo cambian el identificador y la hora de la sesión).
+- [x] 4.6 Orden de las teclas (D4): Esc cierra la lista antes de recorrer bloques; flechas al historial con la lista cerrada; `ctrl+n` y la paleta siguen funcionando; un valor puesto por un programa no abre la lista; `/con` sigue siendo `/context` para los bloques. Oráculo: `test_esc_closes_the_list_first_then_starts_browsing`, `test_up_and_down_recall_the_history_when_the_list_is_closed`, `test_ctrl_n_and_the_palette_work_with_the_list_open`, `test_programmatic_values_open_no_list`, `test_a_cut_name_of_context_is_still_context_for_the_blocks`. Control negativo: M9 (Esc no es primero de la lista), M12 (un valor de programa abre la lista) y M19 (un nombre cortado no es `/context`).
+  - Recibo (2026-11-27, macOS arm64): pasan; M9, M12 y M19 → `1 failed` cada una. Al escribir el escenario de `ctrl+n` se vio que `ctrl+n` no cierra la lista: no toca la entrada, así que lo escrito y su lista se quedan. Se corrigió el escenario y el diseño, no el código.
+- [x] 4.7 La caja de aprobación: la lista no se abre encima, la cierra al abrirse y sus teclas no completan nada; completar nunca envía ni ejecuta. Oráculo: `test_the_list_never_opens_over_the_approval_box_and_its_keys_do_nothing` y `test_completing_never_sends_or_runs` (0 llamadas al proveedor, 0 ejecuciones). Control negativo: M11 (la lista se queda bajo la caja).
+  - Recibo (2026-11-27, macOS arm64): pasan; M11 → `1 failed`.
+- [x] 4.8 Teclas que llegan de una vez a una terminal real. Oráculo: `test_keys_written_in_one_go_still_open_the_list`, `test_tab_after_keys_not_yet_seen_by_the_list_completes_what_is_typed` y la prueba PTY `test_short_commands_and_completion_at_a_real_terminal` (el `main.py chat` real con el Mock: `"/new demo-a\t"` en una escritura, la vista previa antes de Intro con 1 sola sesión en la base, `/sk\t`, `arch\t`, la ruta con Tab, `Approval requested`, y en SQLite los proyectos `[None, "demo-alpha"]` y la ejecución `awaiting_approval`). Control negativo: M13 (una sola marca para toda la ráfaga), M14 (Tab toma una fila vieja) y M23 (Tab como atajo con prioridad).
+  - Recibo (2026-11-27, macOS arm64): pasan; M13 y M14 → `1 failed`; M23 → `1 failed in 60.22s` (la prueba PTY espera la vista previa y no llega). Fallo real encontrado con esta prueba: con Tab como atajo con prioridad, la aplicación lo atendía al recibirlo, antes de que la entrada procesara las teclas de la misma escritura; la lista no se abría y Tab completaba sobre texto viejo. Arreglado en el commit `6e359bd` (Tab en `PromptInput._on_key` y la lista comprobada contra el texto antes del cursor).
+- [x] 4.9 Capturas de texto con `Pilot` (110 × 32) de la lista tras `/`, tras `/skill ` y en una ruta, y la cuenta de teclas de las dos líneas de Wilson. Oráculo: la captura de `/` en `README.md` es la salida literal del guion; la cuenta, `NEW 12 '/new demo-alpha '` y `SKILL 24 '/skill architecture-memory tests/fixtures/skill-inputs/fuente-decision.md'`.
+  - Recibo (2026-11-27, macOS arm64): guiones fuera del repositorio; las cifras de `proposal.md` salen de ahí.
+
+## 5. Texto plano (D5)
+
+- [x] 5.1 `--plain`: mismas formas cortas y mismo eco, sin lista ni Tab; `readline` fuera (no existe en el CPython de Windows; `libedit` en macOS; lectura en un hilo auxiliar). Oráculo: las pruebas de la sección 3 corren sobre el núcleo con `ScriptedTerminal`, que es el texto plano; `grep -rn "readline" harness/` → nada nuevo.
+  - Recibo (2026-11-27, macOS arm64): pasan; el grep solo encuentra `self._in.readline(...)` en `harness/mcp/worker.py` (lectura de un fichero, no el módulo).
+
+## 6. Documentación y comprobaciones transversales
+
+- [x] 6.1 `README.md`: tabla de comandos con las formas cortas, el párrafo «Formas cortas», «Completar» con la tabla de teclas y la captura, y el paso a paso con el Mock escrito en formas cortas. Oráculo: `grep -n "Formas cortas\|Completar\|/new demo-alpha \"Demo Corte 9\"" README.md`.
+  - Recibo (2026-11-27, macOS arm64): las tres coincidencias presentes.
+- [x] 6.2 Sin código por plataforma, sin SQL nuevo fuera de literales con `?`, sin dependencias nuevas. Oráculo: `tests/unit/test_portability.py`, `tests/unit/test_sql_literals.py` y `git diff 1611064 -- pyproject.toml uv.lock` vacío.
+  - Recibo (2026-11-27, macOS arm64): las dos pruebas pasan (dentro de `691 passed` de `tests/unit/test_shell_*.py tests/security tests/unit/test_portability.py tests/unit/test_sql_literals.py`); el diff de dependencias está vacío.
+- [x] 6.3 Matriz SEC: `uv run python scripts/check_sec_matrix.py`. Oráculo: código 0.
+  - Recibo (2026-11-27, macOS arm64): `sec-matrix: PASS (15 rows, 135 tests)`.
+
+## 7. Cierre
+
+- [ ] 7.1 Sobre el árbol limpio e integrado con `develop`, las dos tandas, una vez cada una y con `caffeinate -i`: `uv run pytest -q -m "not edge and not copilot"` y `uv run pytest -q -m edge`. Además, `scripts/check_public_safety.py`, `scripts/check_sec_matrix.py` y `openspec validate --all --strict`. Oráculo: código 0 en todo.
+- [ ] 7.2 Al archivar (después de `shell-appearance`): convertir «Lista de completado bajo la entrada» en MODIFIED del requisito «Completado de comandos» (que completaba el número de `/resume`) y releer los demás requisitos añadidos contra `openspec/specs/interactive-shell/spec.md`.
+- [ ] 7.3 Revisión independiente de la frontera entre lo ajeno y el cromo en la lista, de las formas cortas y del orden de las teclas.
+- [ ] 7.4 **Demo del corte** (Wilson, macOS, con el Mock). Wilson la reproduce sobre el SHA del merge (zsh, desde la raíz del repositorio):
+
+  ```zsh
+  w="$(mktemp -d)"
+  cp -R tests/fixtures/vault-synthetic "$w/vault"
+  python3 -c 'import json,sys; print(json.dumps({"tarea: architecture-memory/extract": open(sys.argv[1], encoding="utf-8").read()}))' tests/fixtures/skill-inputs/decision-ok.json > "$w/respuestas.json"
+  export HARNESS_DATA_DIR="$w/data" HARNESS_VAULT_ROOT="$w/vault" HARNESS_MOCK_RESPONSES="$w/respuestas.json" HARNESS_MOCK_DELAY_MS=0
+  uv run python main.py
+  ```
+
+  1. Escribir `/` y ver los comandos; `sk` y ver `/skill` primero; Esc.
+  2. `/new demo-a`, Tab: ver `running: /new --project demo-alpha` bajo la entrada; Intro; el panel dice `demo-alpha`.
+  3. `/sk` Tab `arch` Tab `tests/fi` Tab `sk` Tab `fu` Tab: ver la ruta entera y `running: /skill architecture-memory --file source=…`; Intro; aprobar en la caja.
+  4. `/s` e Intro: error que nombra `/status`, `/sessions` y `/skill`, sin ejecutar nada.
+  5. `/resume ` y ver las sesiones con su proyecto; ↓, Intro (pone el identificador), Intro (cambia).
+  6. Repetir 2 con `uv run python main.py chat --plain`: el eco `running:` sale igual.
+
+  Evidencia: una nota con lo visto o un vídeo que no sale del equipo. Estado: **NOT RUN**.
