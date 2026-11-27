@@ -32,14 +32,15 @@ EXACT = "exact"  # what `/context` shows: exactly what is sent, so never folded 
 CONTEXT = "context"  # the summary line of what the memory added: metadata
 LISTING = "listing"  # the notes omitted and the files attached: never folded by default
 SKILL = "skill"  # a skill's step bookkeeping: metadata, collapsed by default
+RESULT = "result"  # how a skill run ended and what it applied: never folded by default
 ALERT = "alert"  # an error, a warning, an interruption: never folded by default
 NOTICE = "notice"  # any other harness output
 METADATA = frozenset({CONTEXT, SKILL})
-ALWAYS_WHOLE = frozenset({ALERT, LISTING, EXACT})
+ALWAYS_WHOLE = frozenset({ALERT, LISTING, EXACT, RESULT})
 
 _CONTEXT_WORDS = ("context:",)
 _LISTING_WORDS = ("omitted:", "attached:")
-_SKILL_WORDS = ("skill:", "applied:")
+_SKILL_WORDS = ("skill:",)
 _ALERT_WORDS = ("error:", "warning:", "interrupted:", "Not confirmed", "That is not")
 _NOT_SHOWN = re.compile(r"\[\d+ more character\(s\) not shown\]")
 # The state of a turn comes from whole harness lines, matched from their first character: a
@@ -161,6 +162,8 @@ def category(first_row_text: str, *, foreign: bool, label: str | None,
         return CONTEXT
     if line.startswith(_LISTING_WORDS):
         return LISTING
+    if line.startswith("applied:") or _SKILL_STATUS.fullmatch(line.rstrip()):
+        return RESULT
     if line.startswith(_SKILL_WORDS):
         return SKILL
     if line.startswith(_ALERT_WORDS) or _NOT_SHOWN.fullmatch(line):

@@ -50,6 +50,7 @@ from harness.shell.blocks import (
     KEEP_OPEN_TURNS,
     NOTICE,
     REPLY,
+    RESULT,
     SKILL,
     Fold,
     category,
@@ -701,7 +702,8 @@ class Turn(Vertical):
         """The lines a turn's state is read from: the harness's own alerts and skill steps,
         never a block that can carry a vault path or a listing (review 2026-11-27)."""
         return [row_text(row) for block in self.items
-                if not block.foreign and block.kind in (ALERT, SKILL) for row in block.rows]
+                if not block.foreign and block.kind in (ALERT, SKILL, RESULT)
+                for row in block.rows]
 
     @property
     def has_alert(self) -> bool:

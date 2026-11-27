@@ -827,3 +827,24 @@ async def test_harness_lines_of_different_kinds_are_separate_blocks_on_screen(tm
         assert [b.kind for b in items] == [blocks.CONTEXT, blocks.NOTICE]
         assert items[1].total == 2  # the run of one kind, one block
         await tui.send(pilot, "/exit")
+
+
+async def test_the_outcome_of_a_skill_run_is_on_the_screen(tmp_path):
+    """The step bookkeeping folds to one line, but how the run ended (`skill: run … is
+    completed`) and what it applied are always whole: cut with an ellipsis at the pane's
+    width, the run's end was invisible (approval-buttons integration, 2026-11-27)."""
+    from tests.unit.test_shell_tui_buttons import _enabled
+
+    tui, _ = _skill_tui(tmp_path)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        await _approval(tui, pilot)
+        await _enabled(tui, pilot, "approve")
+        await pilot.press("tab", "enter")
+        await tui.until(pilot, lambda: any("is completed" in t for t in tui.blocks("harness")))
+        await pilot.pause(0.1)
+        assert any(line.strip().startswith("skill: run ") and line.rstrip().endswith(
+            "is completed") for line in tui.screen().split("\n"))
+        turn = _turns(tui)[-1]
+        turn.set_closed(True, manual=True)
+        assert "· completed " in str(turn.summary_line.render())
+        await tui.send(pilot, "/exit")
