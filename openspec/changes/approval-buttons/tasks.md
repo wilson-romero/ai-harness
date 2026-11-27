@@ -147,6 +147,11 @@ Wilson ejecutó `develop` en Windows 11. Dos hallazgos son de esta caja: `test_k
   - Hecho: `Tui.approval_box()` (`tests/tui_support.py`) espera a `shown`. Se usa en `_approval` (`test_shell_tui.py`, del que dependen `test_shell_tui_buttons.py` y la traza), en `_open` (`test_shell_tui_grid.py`, todos los tamaños), en `test_shell_tui_blocks.py` y en `test_keys_typed_ahead_of_the_box_cannot_approve`. Comprobado por grep: `test_shell_tui_replies.py` y `test_shell_tui_styles.py` no abren la caja.
   - Oráculo: `test_the_box_is_waited_for_until_its_widgets_exist` (80×24, 100×30, 120×40). La caja tarda 0,3 s en componerse y se empuja como lo hace el núcleo (`open_approval`); justo después, la consulta da `NoMatches`, y `approval_box` espera hasta tener `#reject` y `#approval-confirm`.
   - Recibo (2026-11-27, macOS): 16 passed en `test_shell_tui_grid.py`. Control negativo: con `approval_box` reducido a la espera anterior (`isinstance` solo), 3 failed con `NoMatches '#reject'` y `NoMatches '#approval-confirm'`, los dos errores de Windows; restaurado, pasa.
+- [x] 7.4 Baterías de la rama, una vez cada una con `caffeinate -i`, sobre `934557e` (2026-11-27, macOS arm64, Python 3.14.8). Oráculo: código 0 en cada tanda.
+  - `-m "not edge and not copilot"`: 1949 passed en 332,13 s, código 0;
+  - `-m edge`: 156 passed en 1185,13 s, código 0, ninguno repetido;
+  - después, `openspec validate --all --strict` → 25 passed, 0 failed; `scripts/check_sec_matrix.py` → `sec-matrix: PASS (15 rows, 137 tests)`; `public-safety: PASS (452 file(s))`.
+  - Estas cifras valen también para `hardening` 8.1 y `copilot-web-provider` 9.1.
 - [ ] 7.3 Confirmación en Windows (no es puerta). En PowerShell, en la rama:
   - `uv run pytest tests/unit/test_shell_tui_arming.py tests/unit/test_shell_tui_buttons.py -v` → todo pasa;
   - `uv run pytest tests/unit/test_shell_tui_grid.py tests/unit/test_shell_tui_blocks.py tests/unit/test_shell_tui.py -v`, tres veces, y la batería completa `uv run pytest -m "not edge and not copilot"` → ningún `NoMatches`;
