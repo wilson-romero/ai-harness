@@ -2,7 +2,7 @@
 
 Cada `[x]` lleva su recibo debajo, con fecha y plataforma. Los oráculos se nombran en cada tarea. Todo se ejecutó en macOS 26.2 arm64 con Python 3.14.8 y Textual 8.2.8. Windows no se ha ejecutado: no hay código por plataforma (`tests/unit/test_portability.py`).
 
-Los controles negativos se aplicaron con un guion fuera del repositorio: aplica una mutación, ejecuta la prueba que la tiene que detectar, restaura el fichero y usa `PYTHONDONTWRITEBYTECODE=1` y `-p no:cacheprovider`. El guion está en el *scratchpad* de la sesión de desarrollo y no entra al repositorio. Cada mutación se cita en su tarea como «Mn». Resultado de la última pasada (2026-11-27, sobre el árbol de la tarea 7.1): las 23 mutaciones detectadas, ninguna sobrevive.
+Los controles negativos se aplicaron con un guion fuera del repositorio: aplica una mutación, ejecuta la prueba que la tiene que detectar, restaura el fichero y usa `PYTHONDONTWRITEBYTECODE=1` y `-p no:cacheprovider`. El guion está en el *scratchpad* de la sesión de desarrollo y no entra al repositorio. Cada mutación se cita en su tarea como «Mn». Resultado (2026-11-27): las 23 mutaciones detectadas, ninguna sobrevive (M12 repetida tras `77443b4`, tarea 7.1).
 
 ## 1. Rama, premisas y estudio
 
@@ -68,7 +68,9 @@ Los controles negativos se aplicaron con un guion fuera del repositorio: aplica 
 
 ## 7. Cierre
 
-- [ ] 7.1 Sobre el árbol limpio e integrado con `develop`, las dos tandas, una vez cada una y con `caffeinate -i`: `uv run pytest -q -m "not edge and not copilot"` y `uv run pytest -q -m edge`. Además, `scripts/check_public_safety.py`, `scripts/check_sec_matrix.py` y `openspec validate --all --strict`. Oráculo: código 0 en todo.
+- [x] 7.1 Sobre el árbol limpio e integrado con `develop`, las dos tandas, una vez cada una y con `caffeinate -i`: `uv run pytest -q -m "not edge and not copilot"` y `uv run pytest -q -m edge`. Además, `scripts/check_public_safety.py`, `scripts/check_sec_matrix.py` y `openspec validate --all --strict`. Oráculo: código 0 en todo.
+  - Primera tanda sin Edge (2026-11-27, macOS arm64, sobre `eb6e132`): código 1, `2 failed, 1885 passed`. Uno, `test_programmatic_values_open_no_list`: al fijar la prueba de `ctrl+n` (4.6), un reemplazo de texto cambió también la aserción de esta prueba; restaurada en `77443b4` (M12 vuelve a fallar al mutar). Otro, `test_keys_typed_ahead_of_the_box_cannot_approve` (de `approval-buttons`): falló una vez por tiempos y pasó 11 de 11 veces sola, 6 de ellas con la CPU ocupada; con la caja abierta la entrada no tiene el foco, así que Tab no pasa por el código de este change.
+  - Recibo (2026-11-27, macOS arm64, sobre `cc90b51`, tras integrar `develop` `a59c7ac`): sin Edge → `1887 passed, 157 deselected in 296.72s`, código 0. Edge → `155 passed, 1889 deselected in 1296.37s`, código 0. `openspec validate --all --strict` → `24 passed, 0 failed`, código 0; `public-safety: PASS (439 file(s), 5 denylist term(s))`, código 0; `sec-matrix: PASS (15 rows, 135 tests)`, código 0; `uv lock --check` → «Resolved 47 packages». Las pruebas marcadas `copilot` no se ejecutaron.
 - [ ] 7.2 Al archivar (después de `shell-appearance`): convertir «Lista de completado bajo la entrada» en MODIFIED del requisito «Completado de comandos» (que completaba el número de `/resume`) y releer los demás requisitos añadidos contra `openspec/specs/interactive-shell/spec.md`.
 - [ ] 7.3 Revisión independiente de la frontera entre lo ajeno y el cromo en la lista, de las formas cortas y del orden de las teclas.
 - [ ] 7.4 **Demo del corte** (Wilson, macOS, con el Mock). Wilson la reproduce sobre el SHA del merge (zsh, desde la raíz del repositorio):
