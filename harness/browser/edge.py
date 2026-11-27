@@ -9,6 +9,7 @@ signals or kills browser processes by name or by PID.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -45,8 +46,17 @@ STOP_TIMEOUT_S = 5.0
 SHUTDOWN_S = CLOSE_TIMEOUT_S + STOP_TIMEOUT_S
 LOCK_POLL_S = 0.25
 # Measured (P8, macOS arm64, Edge 158): a second launch on a profile already open fails at
-# once with this text in Playwright's error.
-PROFILE_IN_USE_MARKERS = ("ProcessSingleton", "profile is already in use")
+# once with this text in Playwright's error. The third is Playwright's own wording when the
+# browser log says the launch went to the browser already running.
+PROFILE_IN_USE_MARKERS = ("ProcessSingleton", "profile is already in use",
+                          "Opening in existing browser session")
+# Revised on 2026-11-27 (P8, Windows 11, two runs): there the second Edge hands its command line
+# to the Edge that holds the profile and exits, and Playwright only reports the browser closed
+# at once. That close counts as "in use" only together with a lock artefact the holder keeps in
+# the profile: `SingletonLock` (a link, where the system has links) or `lockfile` (held open,
+# removed when its holder closes). Both names are looked for on every system.
+CLOSED_AT_LAUNCH_MARKERS = ("Target page, context or browser has been closed",)
+PROFILE_LOCK_ARTEFACTS = ("SingletonLock", "lockfile")
 
 
 class EdgeLauncher:
@@ -126,7 +136,8 @@ class EdgeLauncher:
 
 def launch_error(exc: PlaywrightError, profile: Path) -> ProfileInUse | BrowserLaunchFailed:
     message = str(exc)
-    if any(marker in message for marker in PROFILE_IN_USE_MARKERS):
+    if any(marker in message for marker in PROFILE_IN_USE_MARKERS) or (
+            _closed_at_launch(exc, message) and _profile_held(profile)):
         return ProfileInUse(
             "the dedicated Edge profile is already open in another Edge window; "
             "close that window and try again"
@@ -136,6 +147,16 @@ def launch_error(exc: PlaywrightError, profile: Path) -> ProfileInUse | BrowserL
     return BrowserLaunchFailed(
         f"Microsoft Edge could not be started: {first_line.replace(str(profile), '<profile>')}"
     )
+
+
+def _closed_at_launch(exc: PlaywrightError, message: str) -> bool:
+    # Playwright's TargetClosedError is not exported by its public API: its name and its text.
+    return (type(exc).__name__ == "TargetClosedError"
+            or any(marker in message for marker in CLOSED_AT_LAUNCH_MARKERS))
+
+
+def _profile_held(profile: Path) -> bool:
+    return any(os.path.lexists(profile / name) for name in PROFILE_LOCK_ARTEFACTS)
 
 
 def edge_version(context: BrowserContext) -> str | None:
