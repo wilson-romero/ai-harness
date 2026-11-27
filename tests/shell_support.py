@@ -153,6 +153,7 @@ def make_conversation(
     context_max_bytes: int = CONTEXT_DEFAULT_BYTES,
     engine_options: Mapping | None = None,
     columns: int = 10_000,  # a terminal this wide never cuts a line; the cut is tested apart
+    answer_notice: str | None = None,  # `chat` passes CONCISE_NOTICE unless switched off
 ) -> tuple[Conversation, SessionService, object]:
     provider = provider if provider is not None else CountingProvider()
 
@@ -161,7 +162,8 @@ def make_conversation(
             raise UnknownProvider(name)
         return provider
 
-    service = SessionService(conn, data_dir, factory, "mock", timeout_s)
+    service = SessionService(conn, data_dir, factory, "mock", timeout_s,
+                             answer_notice=answer_notice)
 
     def memory() -> MemorySettings:
         if vault is None:

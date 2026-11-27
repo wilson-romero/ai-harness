@@ -19,6 +19,7 @@ import time
 
 import pytest
 
+from harness.core.answer_style import CONCISE_NOTICE
 from tests.conftest import REPO_ROOT, query, run_main, subprocess_env, wait_for_running
 
 pty = pytest.importorskip("pty", reason="no pseudo-terminal module on this system")
@@ -107,13 +108,18 @@ def _restored(child: FullScreenChild) -> bool:
     return off > child.raw.rfind(ALT_SCREEN_ON) and CURSOR_SHOWN in child.raw[off - 200:]
 
 
-def test_a_question_on_the_full_screen_and_ctrl_q(data_dir):
-    child = FullScreenChild(data_dir, "chat")
+@pytest.mark.parametrize("notice", [None, "on"], ids=["default", "notice-on"])
+def test_a_question_on_the_full_screen_and_ctrl_q(data_dir, notice):
+    # The Mock reports how much it received: the question alone by default; with
+    # `HARNESS_CONCISE_ANSWERS=on`, the notice (prompt-economy D3), a blank line and the question.
+    env = {} if notice is None else {"HARNESS_CONCISE_ANSWERS": notice}
+    received = len("hola") + (0 if notice is None else len(CONCISE_NOTICE) + 2)
+    child = FullScreenChild(data_dir, "chat", **env)
     try:
         child.read_until(READY)
         assert ALT_SCREEN_ON in child.raw
         child.type("hola\r")
-        child.read_until("Received 4 characters")
+        child.read_until(f"Received {received} characters")
         child.type("\x11")  # ctrl+q
         assert child.wait() == 0
     finally:
