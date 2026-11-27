@@ -40,10 +40,20 @@ from harness.core.service import SessionService
 from harness.core.strict_json import decode_text_limited
 from harness.memory.config import MemorySettings, ensure_data_dir_outside_vault
 from harness.memory.context import ProjectContext, build_context, new_nonce
-from harness.memory.paths import resolve_project, validate_project_slug
+from harness.memory.paths import PROJECTS_DIR, is_safe_name, resolve_project, validate_project_slug
 from harness.memory.search import DEFAULT_LIMIT, parse_query, search_vault
 from harness.providers.base import LLMProvider, close_resources, open_resources
-from harness.shell.parser import Command, Empty, LineError, Question, parse_line
+from harness.shell.commands import help_text
+from harness.shell.completion import (
+    MAX_PROJECTS,
+    MAX_SESSIONS,
+    MAX_SKILLS,
+    CompletionData,
+    SessionChoice,
+    SkillChoice,
+)
+from harness.shell.parser import Command, Empty, LineError, Question, parse_line, parse_short
+from harness.shell.shortforms import RUNNING, Known, expand, format_command
 from harness.shell.render import (  # noqa: F401 - re-exported: the names tests and docs use
     CONTINUATION_PREFIX,
     FOREIGN_PREFIX,
@@ -68,7 +78,7 @@ from harness.shell.terminal import (
 )
 from harness.skills.approvals import APPROVAL_RULE, Proposal, approval_header
 from harness.skills.config import SkillSettings
-from harness.skills.definition import _SKILL_NAME_RE, skills_root
+from harness.skills.definition import _SKILL_NAME_RE, InvalidSkill, load_skill, skills_root
 from harness.skills.effects import Effect, default_effects
 from harness.skills.engine import MAX_INPUT_BYTES, OPEN_RUN_STATES, RunOutcome, SkillEngine
 from harness.storage.locks import SessionLock
@@ -99,23 +109,7 @@ FILE_NOTICE = (
 FILE_OPEN = "<<<FICHERO {nonce}"
 FILE_CLOSE = "FICHERO {nonce}>>>"
 
-HELP = """\
-Commands (a line that starts with / is never sent to the provider; start it with // to ask
-a question that begins with /):
-  /help                 this list
-  /status               session, project, provider and last request
-  /new [--project SLUG] [NAME]   switch to a new session
-  /sessions             numbered list of sessions
-  /resume N             switch to session number N of the last /sessions list
-  /history              the history of this session
-  /memory TERMS         search the memory (of the session's project, if it has one)
-  /context              the memory block sent with each question of this session
-  /skill NAME [NAME=VALUE ...] [--file NAME=PATH ...]   run a skill in this session
-  /file PATH            attach a text file to the next question (it is never stored)
-  /exit                 leave (end of input leaves too)
-Ctrl+C interrupts a question in progress; it is never resent. Ctrl+C at the approval prompt
-leaves the approval undecided. At that prompt, n asks for the word reject to confirm; any other
-answer leaves the approval pending."""
+HELP = help_text()  # written from the one table of commands (command-completion D1)
 
 
 def terminal_columns() -> int:
@@ -151,7 +145,10 @@ def read_text_file(raw_path: str, max_bytes: int = MAX_FILE_BYTES) -> tuple[str,
     open, so a swap after the check is refused). Opened without blocking, never read past
     the limit; a NUL byte means it is not text.
     """
-    path = Path(raw_path)
+    try:
+        path = home_path(raw_path)
+    except (OSError, RuntimeError):
+        raise UsageError("/file: the home folder (~) is not known here") from None
     name = safe_line(path.name or raw_path).text
     try:
         info = os.lstat(path)
@@ -194,6 +191,14 @@ def read_text_file(raw_path: str, max_bytes: int = MAX_FILE_BYTES) -> tuple[str,
     except InvalidInput as refused:
         raise UsageError(str(refused)) from None
     return name, text
+
+
+def home_path(raw_path: str) -> Path:
+    """A path as typed, with a leading `~/` meaning the home folder (command-completion D2):
+    completion keeps the `~` in the text, so the command reads it the same way."""
+    if raw_path.startswith(("~/", "~" + os.sep)):
+        return Path.home() / raw_path[2:]
+    return Path(raw_path)
 
 
 def attachment_block(name: str, text: str, nonce: str | None = None) -> str:
@@ -295,6 +300,7 @@ class Conversation:
                 skill_names=self._skill_names,
                 panel=self._panel,
                 sessions=self._session_choices,
+                completion=self._completion_data,
             ))
         if session_id is not None:
             self._switch_to(self._take_existing(session_id))
@@ -349,7 +355,7 @@ class Conversation:
                 self._say("end of input: leaving the conversation")
                 return
             try:
-                parsed = parse_line(line)
+                parsed = self._parse(line)
             except LineError as refused:
                 self._say(f"error: {refused}")
                 continue
@@ -359,6 +365,77 @@ class Conversation:
                 self._say("leaving the conversation")
                 return
             await self._run_action(parsed)
+
+    def _parse(self, line: str) -> Question | Command | Empty:
+        """The line, with its short forms expanded (command-completion D3). A command typed
+        short is shown in full (`running: ...`) before it runs, so what runs is on the screen
+        first; a command typed in full runs as it always did."""
+        parsed = parse_short(line)
+        if not isinstance(parsed, Command):
+            return parsed
+        try:
+            typed: Question | Command | Empty | None = parse_line(line)
+        except LineError:
+            typed = None  # the name was shortened
+        full = expand(parsed, self._known())
+        if full != typed:
+            self._say(RUNNING + terminal_safe(format_command(full)))
+        return full
+
+    def _known(self) -> Known:
+        return Known(is_project=self._is_project, skill_inputs=self._skill_inputs_of)
+
+    def _is_project(self, slug: str) -> bool:
+        """Whether `slug` is the name of a project folder of the vault (exact, no link)."""
+        try:
+            validate_project_slug(slug)
+            resolve_project(self._deps.memory().vault_root, slug)
+        except HarnessError:
+            return False
+        return True
+
+    def _skill_inputs_of(self, name: str) -> tuple[str, ...] | None:
+        """The inputs a valid skill declares, from its own folder; None if it is not one."""
+        try:
+            settings = self._deps.skills()
+            effects = (self._deps.effects if self._deps.effects is not None
+                       else default_effects(self._deps.data_dir))
+            skill = load_skill(skills_root(settings.skills_dir), name, effects)
+        except (HarnessError, InvalidSkill, OSError):
+            return None
+        return tuple(skill.workflow.inputs)
+
+    def _completion_data(self) -> CompletionData:
+        """Harness data for the list under the input (command-completion D2), read in the
+        conversation's thread between actions: project folder names, skills with their
+        description and inputs, sessions. Names only; anything that cannot be read is left
+        out, never an error."""
+        projects: list[str] = []
+        try:
+            folder = self._deps.memory().vault_root / PROJECTS_DIR
+            with os.scandir(folder) as scan:
+                for entry in scan:
+                    if len(projects) >= MAX_PROJECTS:
+                        break
+                    if is_safe_name(entry.name) and entry.is_dir(follow_symlinks=False) \
+                            and not entry.is_symlink():
+                        projects.append(entry.name)
+        except (HarnessError, OSError, ValueError):
+            pass
+        skills: list[SkillChoice] = []
+        for name in self._skill_names()[:MAX_SKILLS]:
+            try:
+                settings = self._deps.skills()
+                effects = (self._deps.effects if self._deps.effects is not None
+                           else default_effects(self._deps.data_dir))
+                skill = load_skill(skills_root(settings.skills_dir), name, effects)
+            except (HarnessError, InvalidSkill, OSError):
+                continue
+            skills.append(SkillChoice(name, terminal_safe(skill.description),
+                                      tuple(skill.workflow.inputs)))
+        sessions = [SessionChoice(str(s.session_id), s.project_id or "-", terminal_safe(s.name))
+                    for s in self._service.recent_sessions(MAX_SESSIONS)]
+        return CompletionData(tuple(sorted(projects)), tuple(skills), tuple(sessions))
 
     async def _run_action(self, parsed: Question | Command) -> None:
         if isinstance(parsed, Question):
@@ -691,6 +768,9 @@ class Conversation:
                       f"{s.project_id or '-'}  {updated}  {terminal_safe(s.name)}")
 
     def _cmd_resume(self, number: str) -> None:
+        if not number.isdigit():
+            self._resume_by_id(number)
+            return
         if not self._listed:
             raise UsageError("/resume takes a number from /sessions; run /sessions first")
         # ASCII digits only: "²" is a digit for `isdigit` and not a number for `int`.
@@ -704,6 +784,24 @@ class Conversation:
             return
         self._switch_to(self._take_existing(str(session_id)))
         self._say(f"resumed session {session_id} ({terminal_safe(self._session.name)})")
+
+    def _resume_by_id(self, raw: str) -> None:
+        """`/resume ID` (command-completion D3): a session's id, or a start of it of at least
+        8 characters that only one session has. Completion inserts the whole id."""
+        wanted = raw.lower()
+        if len(wanted) < 8:
+            raise UsageError("/resume takes a number from /sessions or a session id (at least "
+                             "its first 8 characters)")
+        found = [s.session_id for s in self._service.list_sessions()
+                 if str(s.session_id).startswith(wanted)]
+        if len(found) != 1:
+            raise UsageError(f"/resume: {'no session' if not found else 'more than one session'}"
+                             f" has an id that starts with {terminal_safe(raw)[:40]!r}")
+        if found[0] == self._session_id:
+            self._say("already in that session")
+            return
+        self._switch_to(self._take_existing(str(found[0])))
+        self._say(f"resumed session {found[0]} ({terminal_safe(self._session.name)})")
 
     def _cmd_history(self) -> None:
         entries = self._service.history(str(self._session_id))

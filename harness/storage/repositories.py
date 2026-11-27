@@ -38,6 +38,13 @@ def list_sessions(conn: sqlite3.Connection) -> list[Session]:
     return [Session(**dict(row)) for row in rows]
 
 
+def recent_sessions(conn: sqlite3.Connection, limit: int) -> list[Session]:
+    """The newest `limit` sessions, in the order of `list_sessions`."""
+    rows = conn.execute(
+        "SELECT * FROM sessions ORDER BY updated_at DESC, session_id DESC LIMIT ?", (limit,))
+    return [Session(**dict(row)) for row in rows]
+
+
 def set_session_status(conn: sqlite3.Connection, session_id: UUID, status: SessionStatus) -> None:
     conn.execute(
         "UPDATE sessions SET status = ?, updated_at = ? WHERE session_id = ?",

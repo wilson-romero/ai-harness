@@ -183,6 +183,9 @@ class SessionService:
     def list_sessions(self) -> list[Session]:
         return repo.list_sessions(self._conn)
 
+    def recent_sessions(self, limit: int) -> list[Session]:
+        return repo.recent_sessions(self._conn, limit)
+
     def history(self, raw_session_id: str) -> list[HistoryEntry]:
         session = self._require_session(raw_session_id)
         return repo.history(self._conn, session.session_id)
