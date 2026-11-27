@@ -154,6 +154,9 @@ def make_conversation(
     engine_options: Mapping | None = None,
     columns: int = 10_000,  # a terminal this wide never cuts a line; the cut is tested apart
     answer_notice: str | None = None,  # `chat` passes CONCISE_NOTICE unless switched off
+    environ: Mapping[str, str] | None = None,  # `/plan`: the MCP servers' environment
+    mcp_config=None,  # `/plan`: a callable giving the allowlist
+    clock=None,  # `/plan`: the approval's clock
 ) -> tuple[Conversation, SessionService, object]:
     provider = provider if provider is not None else CountingProvider()
 
@@ -182,6 +185,9 @@ def make_conversation(
         effects=effects,
         engine_options=engine_options,
         columns=lambda: columns,
+        environ=environ,
+        mcp_config=mcp_config,
+        clock=clock,
     ))
     return conversation, service, provider
 

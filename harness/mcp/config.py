@@ -38,6 +38,7 @@ MIN_RESULT_BYTES = 1024
 MAX_RESULT_BYTES = 1024 * 1024
 MAX_STRING_LENGTH = 4096
 MAX_PATTERN_LENGTH = 256
+DESCRIPTION_MAX = 120
 
 
 class ConfigError(HarnessError):
@@ -99,6 +100,17 @@ class ToolEntry(_Strict):
     arguments: dict[Annotated[str, Field(pattern=f"^{ARGUMENT_NAME_PATTERN}$")], Argument] = Field(
         default_factory=dict, max_length=64
     )
+    # What the tool reads, in the person's words, for the catalogue of `/plan` (code-mode D8,
+    # study decision 5 (a)). Never the server's description, which is untrusted.
+    description: str | None = Field(default=None, min_length=1, max_length=DESCRIPTION_MAX)
+
+    @field_validator("description")
+    @classmethod
+    def _one_line(cls, value: str | None) -> str | None:
+        if value is not None and (safe_foreign_line(value).text != value or value != value.strip()):
+            raise ValueError("must be one line of plain text, with no control, format or "
+                             "invisible character, no credential and no surrounding blanks")
+        return value
 
 
 class ServerEntry(_Strict):

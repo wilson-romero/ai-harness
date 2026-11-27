@@ -22,6 +22,7 @@ from harness.core.errors import (
 from harness.core.service import SessionService
 from harness.core.watchdog import Watchdog
 from harness.mcp.commands import add_mcp_parser, run_mcp_command
+from harness.mcp.plan_cli import add_plan_parser, run_plan_command
 from harness.memory.config import (
     MemorySettings,
     ensure_data_dir_outside_vault,
@@ -98,6 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
     maintain.add_argument("--dry-run", action="store_true", help="report only (required)")
     add_skill_parser(commands)
     add_mcp_parser(commands)
+    add_plan_parser(commands)  # code-mode slice 2
     add_chat_parser(commands)
     return parser
 
@@ -136,6 +138,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _run(args: argparse.Namespace) -> int:
     if args.command == "mcp":
         return run_mcp_command(args)
+    if args.command == "plan":  # code-mode slice 2
+        return run_plan_command(args)
     if args.command == "chat":
         return run_chat(args)
     settings = Settings.from_env(os.environ)

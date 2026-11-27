@@ -94,7 +94,8 @@ def test_unbalanced_quote_is_an_error():
 
 def test_every_command_of_d10_and_nothing_else():
     assert set(COMMANDS) == {"help", "status", "new", "sessions", "resume", "history",
-                             "memory", "context", "skill", "file", "exit"}
+                             "memory", "context", "skill", "file", "exit",
+                             "plan"}  # code-mode slice 2
 
 
 def test_parsing_is_linear():

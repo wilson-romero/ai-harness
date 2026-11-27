@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import sqlite3
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -20,28 +19,18 @@ from typing import TYPE_CHECKING
 
 from harness.config import Settings
 from harness.core.errors import HarnessError
-from harness.mcp.audit import (
-    CallRow,
-    args_key,
-    call_lock,
-    forget_lock,
-    new_call_id,
-    record_denied,
-    record_denied_after_listing,
-    record_finished,
-    record_running,
-    recover_stale,
-)
+from harness.mcp.audit import args_key, recover_stale
 from harness.mcp.config import LoadedConfig, ServerEntry, load_config
-from harness.mcp.policy import (
-    USAGE_REASONS,
-    Decision,
-    decide_before_start,
-    decide_offered,
-    parse_arguments,
+from harness.mcp.gateway import (
+    COMPLETED,
+    DENIED,
+    LOG_ROTATE_BYTES,  # noqa: F401 - re-exported: the name the tests use
+    CallReport,
+    call_tool,
+    server_log,
 )
+from harness.mcp.policy import USAGE_REASONS, Decision, decide_offered, parse_arguments
 from harness.storage.database import open_database
-from harness.storage.private import private_dir
 from harness.text.safe_text import safe_foreign_line
 
 if TYPE_CHECKING:
@@ -54,7 +43,6 @@ RECURSION_MARKER = "AI_HARNESS_MCP_CHILD"  # the same name as client.RECURSION_M
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
-LOG_ROTATE_BYTES = 1024 * 1024
 RESULT_PREFIX = "| "
 
 
@@ -160,94 +148,49 @@ def _call(
     data_dir: Path,
     environ: Mapping[str, str],
 ) -> int:
-    from harness.mcp.client import Outcome, SessionRequest, run_session
-
+    """The call runs through `gateway.call_tool`, the one path a plan's steps use too
+    (code-mode D10); here only what is printed is decided."""
     parsed = parse_arguments(raw_args)
     conn = open_database(data_dir)
     try:
         key = args_key(data_dir)
         recover_stale(conn, data_dir)
-        decision = decide_before_start(config, server, tool, parsed)
-        if not decision.allowed:
-            record_denied(conn, server, tool, decision.reason, decision.operation,
-                          parsed.canonical, parsed.size, key)
-            _print_denied(decision)
-            return EXIT_USAGE if decision.reason in USAGE_REASONS else EXIT_ERROR
-        entry = config.servers[server]
-        declared = entry.tools[tool]
-        call_id = new_call_id()
-        lock = call_lock(data_dir, call_id)
-        lock.acquire()  # a new name: nobody else can hold it
         try:
-            row = record_running(conn, call_id, server, tool, declared.operation,
-                                 parsed.canonical, key)
-
-            def check(offered: Mapping[str, OfferedTool]) -> Decision:
-                found = offered.get(tool)
-                if found is None:
-                    return decide_offered(declared, None, tool)
-                return decide_offered(declared, found.input_schema, tool, found.annotations)
-
-            request = SessionRequest(
-                entry, _server_log(data_dir, server), tool, parsed.value,
-                declared.max_result_bytes, check,
-            )
-            try:
-                outcome = run_session(request, environ)
-            except KeyboardInterrupt as interrupt:
-                outcome = getattr(interrupt, "outcome", Outcome(error_code="interrupted"))
-                record_finished(conn, row, "failed", "interrupted", outcome.server_stopped,
-                                None, outcome.duration_ms)
-                _warn_if_alive(outcome)
-                raise
-            return _finish(conn, row, server, tool, entry, declared.max_result_bytes, outcome)
-        finally:
-            lock.release()
-            forget_lock(data_dir, call_id)
+            report = call_tool(conn, data_dir, config, server, tool, parsed, key,
+                               lambda: _server_log(data_dir, server), environ)
+        except KeyboardInterrupt as interrupt:
+            _warn_if_alive(interrupt.outcome)  # type: ignore[attr-defined]
+            raise
     finally:
         conn.close()
+    if report.outcome is None:  # denied before anything started
+        _print_denied(report.decision)
+        return EXIT_USAGE if report.decision.reason in USAGE_REASONS else EXIT_ERROR
+    return _finish(report, server, tool, config.servers[server],
+                   config.servers[server].tools[tool].max_result_bytes)
 
 
-def _finish(
-    conn: sqlite3.Connection,
-    row: CallRow,
-    server: str,
-    tool: str,
-    entry: ServerEntry,
-    limit: int,
-    outcome: Outcome,
-) -> int:
-    from harness.mcp.render import render_error, render_result
-
+def _finish(report: CallReport, server: str, tool: str, entry: ServerEntry, limit: int) -> int:
+    outcome = report.outcome
+    assert outcome is not None
     _warn_if_alive(outcome)
-    if outcome.decision is not None and not outcome.decision.allowed:
-        record_denied_after_listing(conn, row, outcome.decision.reason, outcome.server_stopped,
-                                    outcome.duration_ms)
-        _print_denied(outcome.decision)
+    if report.status == DENIED:
+        _print_denied(report.decision)
         return EXIT_ERROR
-    result = outcome.result
-    if outcome.error_code is not None or result is None:
-        code = outcome.error_code or "internal_error"
-        status = "timeout" if code == "timeout" else "failed"
-        record_finished(conn, row, status, code, outcome.server_stopped, outcome.call_bytes or None,
-                        outcome.duration_ms)
-        print(f"error: {_explain(outcome, entry, limit)}", file=sys.stderr)
-        _summary(server, tool, status, outcome, 0)
-        return EXIT_ERROR
-    if result.is_error:
-        message = render_error(result)
-        record_finished(conn, row, "failed", "tool_error", outcome.server_stopped,
-                        outcome.call_bytes, outcome.duration_ms)
+    if report.status == COMPLETED:
+        assert report.rendered is not None
+        print(prefixed(report.rendered.text))
+        _summary(server, tool, "completed", outcome, report.rendered.redactions)
+        return EXIT_OK
+    if report.error_code == "tool_error":
+        assert report.rendered is not None
         print("error: the tool reported an error:", file=sys.stderr)
-        print(prefixed(message.text), file=sys.stderr)
-        _summary(server, tool, "failed", outcome, message.redactions)
+        print(prefixed(report.rendered.text), file=sys.stderr)
+        _summary(server, tool, "failed", outcome, report.rendered.redactions)
         return EXIT_ERROR
-    rendered = render_result(result)
-    record_finished(conn, row, "completed", None, outcome.server_stopped, outcome.call_bytes,
-                    outcome.duration_ms)
-    print(prefixed(rendered.text))
-    _summary(server, tool, "completed", outcome, rendered.redactions)
-    return EXIT_OK
+    print(f"error: {_explain(outcome, entry, limit)}", file=sys.stderr)
+    _summary(server, tool, report.status, outcome, 0)
+    return EXIT_ERROR
 
 
 def prefixed(text: str) -> str:
@@ -326,30 +269,9 @@ def _shown(name: str) -> str:
 
 
 def _server_log(data_dir: Path, server: str) -> Path | None:
-    """`<data>/logs/mcp/<server>.stderr.log`; None if unusable.
-
-    Each session appends at most `transport.STDERR_KEEP_BYTES` (1 MiB) to it; before a session
-    a file past `LOG_ROTATE_BYTES` (1 MiB) becomes `.1`, replacing the previous one. So the two
-    files of a server never hold more than about 4 MiB. The directory and the files are
-    readable by their owner only where the system has mode bits.
-    """
-    directory = data_dir / "logs" / "mcp"
-    path = directory / f"{server}.stderr.log"
-    try:
-        private_dir(directory)  # and its missing parents (security review 2026-11-27, F-08)
-        if hasattr(os, "getuid"):
-            os.chmod(directory, 0o700)
-            if path.exists():
-                os.chmod(path, 0o600)
-        if path.exists() and path.stat().st_size > LOG_ROTATE_BYTES:
-            try:
-                os.replace(path, path.with_name(path.name + ".1"))
-            except PermissionError:
-                # Revised on 2026-11-26: another session still writes it, and the system does
-                # not replace an open file (Windows, WinError 32). Append now, rotate next time.
-                pass
-    except OSError:
+    """`gateway.server_log`, saying so on stderr when the log cannot be written."""
+    path = server_log(data_dir, server)
+    if path is None:
         print("warning: the server's stderr log cannot be written; it is discarded",
               file=sys.stderr)
-        return None
     return path
