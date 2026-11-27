@@ -430,7 +430,7 @@ class Conversation:
             skills.append(SkillChoice(name, terminal_safe(skill.description),
                                       tuple(skill.workflow.inputs)))
         sessions = [SessionChoice(str(s.session_id), s.project_id or "-", terminal_safe(s.name))
-                    for s in self._service.list_sessions()[:MAX_SESSIONS]]
+                    for s in self._service.recent_sessions(MAX_SESSIONS)]
         return CompletionData(tuple(sorted(projects)), tuple(skills), tuple(sessions))
 
     async def _run_action(self, parsed: Question | Command) -> None:
