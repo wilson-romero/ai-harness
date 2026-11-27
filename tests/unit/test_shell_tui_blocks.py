@@ -11,6 +11,7 @@ import time
 import pytest
 from rich.color import Color
 from textual.content import Content
+from textual.widgets import Button
 
 from harness.shell import blocks
 from harness.shell.blocks import (
@@ -29,10 +30,10 @@ from harness.shell.tui import (
     STYLES,
     UNCUT,
     ApprovalScreen,
-    CodeInput,
     ForeignBlock,
     NoticeBlock,
     PromptInput,
+    ProposalArea,
     Turn,
     TuiTerminal,
     chrome_line,
@@ -470,11 +471,24 @@ async def test_skill_step_bookkeeping_is_one_line_by_default(tmp_path):
     tui, _ = _skill_tui(tmp_path)
     async with tui.app.run_test(size=SIZE) as pilot:
         await _approval(tui, pilot)
-        assert not tui.app.screen.query(ForeignBlock) and not tui.app.screen.query(Turn)
-        assert isinstance(tui.app.focused, CodeInput)
-        await pilot.press("ctrl+o", "escape")  # the blocks' keys do nothing in the box
-        assert isinstance(tui.app.screen, ApprovalScreen)
+        box = tui.app.screen
+        assert not box.query(ForeignBlock) and not box.query(Turn)
+        assert isinstance(tui.app.focused, ProposalArea)
+        await tui.until(pilot, lambda: box.armed)
+        await pilot.pause(0.2)
+        buttons = {b.id: b.disabled for b in box.query(Button)}
+        # The blocks' keys do nothing in the box: they press, enable or focus no button, and
+        # the proposal area never folds (approval-buttons integration, 2026-11-27).
+        await pilot.press("ctrl+o", "escape", "alt+up", "alt+down", "ctrl+up", "ctrl+down",
+                          "plus", "minus", "ctrl+o")
+        await pilot.pause(0.2)
+        assert tui.app.screen is box and not box.pressed
+        assert isinstance(tui.app.focused, ProposalArea)
+        assert {b.id: b.disabled for b in box.query(Button)} == buttons
         assert not tui.app.query_one(PromptInput).browsing
+        assert not box.query(ForeignBlock) and not box.query(NoticeBlock)
+        assert box.query_one(ProposalArea).display
+        assert not tui.terminal.waiting_for_line()  # the approval is still pending
         await pilot.press("ctrl+c")
         await tui.ready(pilot)
         steps = [b for b in tui.app.session_log.query(NoticeBlock) if b.kind == blocks.SKILL]
@@ -695,7 +709,8 @@ async def test_a_box_or_the_palette_ends_browsing(tmp_path):
         prompt = tui.app.query_one(PromptInput)
         await pilot.press("escape")
         assert prompt.browsing
-        tui.app.open_approval(["hash: synthetic"], ["propuesta sintética"], "Approve?")
+        tui.app.open_approval(["hash: synthetic"], ["propuesta sintética"], "0" * 64,
+                              "Approve?")
         await tui.until(pilot, lambda: isinstance(tui.app.screen, ApprovalScreen))
         await pilot.pause(0.1)
         assert not prompt.browsing
