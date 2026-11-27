@@ -44,6 +44,8 @@ from textual.widgets.option_list import Option
 
 from harness.shell.blocks import (
     ALERT,
+    HeightOf,
+    body_text,
     CONTEXT,
     KEEP_OPEN_TURNS,
     NOTICE,
@@ -84,6 +86,7 @@ from harness.shell.render import (
     MD_QUOTE,
     MD_RULE,
     MD_STRONG,
+    MIN_COLUMNS,
     STATUS,
     Row,
     harness_rows,
@@ -102,10 +105,10 @@ CRASHED = ("ai-harness: the full screen stopped on an internal error; nothing of
 READY_HINT = "Type a question, or / for a command"
 BUSY_HINT = "working: ctrl+c interrupts"
 BROWSE_HINT = "browsing the blocks: esc or any letter goes back to typing"
-FOOTER = ("ctrl+p commands  esc browse blocks  ctrl+o open/close  ctrl+c interrupts  "
-          "ctrl+n new session  ctrl+q leaves")
-BROWSE_FOOTER = ("up/down move  enter/space open/close  + expand all  - collapse all  "
-                 "home/end first/latest  esc back to typing")
+# The keys that matter most first: a narrow terminal cuts the end of the line.
+FOOTER = ("ctrl+p commands  ctrl+c interrupts  ctrl+q leaves  ctrl+n new session  "
+          "esc blocks  ctrl+o open/close")
+BROWSE_FOOTER = "up/down move  enter open/close  +/- all  end latest  esc back to typing"
 ARM_S = 0.5  # an approval answer submitted sooner than this after the box opened is refused
 HISTORY_MAX = 200  # lines typed at the conversation input, kept in memory only
 TICK_S = 1.0
@@ -498,15 +501,17 @@ class FoldBlock(Block):
     foreign = False
 
     def __init__(self, rows: list[Row], *, kind: str, who: str, preview: int,
-                 classes: str) -> None:
+                 classes: str, height_of: HeightOf | None = None) -> None:
         self.rows = rows
         self.kind = kind
         self.who = who
         self.preview = preview
+        self.height_of: HeightOf = height_of or (lambda row: 1)
         self.manual = False
         self.truncated = False
         self.renders = 0  # how many times its content was built (the tests count them)
-        self.fold = default_fold(kind, len(rows), preview)
+        self.long = folds_by_default(rows, preview, self.height_of)
+        self.fold = default_fold(kind, rows, preview, self.height_of)
         super().__init__(Content(""), classes=f"{classes} block")
         self._show()
 
@@ -526,7 +531,7 @@ class FoldBlock(Block):
         if self.fold is Fold.EXPANDED:
             return self.total
         if self.fold is Fold.PREVIEW:
-            return rows_in_preview(self.rows, self.preview)
+            return rows_in_preview(self.rows, self.preview, self.height_of)
         return 0
 
     def hidden_rows(self) -> int:
@@ -547,8 +552,9 @@ class FoldBlock(Block):
 
     def add_rows(self, rows: list[Row]) -> None:
         self.rows = self.rows + rows
+        self.long = folds_by_default(self.rows, self.preview, self.height_of)
         if not self.manual:
-            self.fold = default_fold(self.kind, self.total, self.preview)
+            self.fold = default_fold(self.kind, self.rows, self.preview, self.height_of)
         self._show()
 
     def mark_truncated(self) -> None:
@@ -588,8 +594,9 @@ class ForeignBlock(FoldBlock):
     foreign = True
 
     def __init__(self, rows: list[Row], title: str, *, kind: str = FOREIGN_KIND,
-                 preview: int = UNCUT) -> None:
-        super().__init__(rows, kind=kind, who=title, preview=preview, classes="foreign")
+                 preview: int = UNCUT, height_of: HeightOf | None = None) -> None:
+        super().__init__(rows, kind=kind, who=title, preview=preview, classes="foreign",
+                         height_of=height_of)
 
     def summary(self) -> Content:
         return chrome_line(CLOSED, self._words(), outline(self.rows), foreign=True)
@@ -602,7 +609,7 @@ class ForeignBlock(FoldBlock):
         if self.fold is Fold.COLLAPSED:
             self.border_title = self.border_subtitle = None
             return
-        foldable = folds_by_default(self.total, self.preview)
+        foldable = self.long
         title = self._words() if foldable or self.truncated else self.who
         self.border_title = plain(title)
         hidden = self.hidden_rows()
@@ -617,9 +624,10 @@ NOTICE_WHO = {CONTEXT: "context", SKILL: "skill steps", ALERT: "harness", NOTICE
 class NoticeBlock(FoldBlock):
     """Rows of the harness. Folded, its footer is a line of chrome after the rows."""
 
-    def __init__(self, rows: list[Row], *, kind: str, preview: int) -> None:
+    def __init__(self, rows: list[Row], *, kind: str, preview: int,
+                 height_of: HeightOf | None = None) -> None:
         super().__init__(rows, kind=kind, who=NOTICE_WHO.get(kind, "harness"),
-                         preview=preview, classes="harness")
+                         preview=preview, classes="harness", height_of=height_of)
 
     def summary(self) -> Content:
         rows = self.rows
@@ -1082,7 +1090,7 @@ COMMAND_ENTRIES: tuple[tuple[str, str, str], ...] = (
 
 BLOCK_ENTRIES: dict[str, tuple[str, ...]] = {
     "toggle": ("toggle",), "expand_all": ("all", 1), "collapse_all": ("all", 0),
-    "latest": ("edge", 1),
+    "latest": ("latest",),
 }
 
 
@@ -1312,6 +1320,17 @@ class HarnessApp(App[int]):
     def _preview(self) -> int:
         return preview_lines(self._log().size.height or self.size.height or 24)
 
+    def _height_of(self, foreign: bool) -> HeightOf:
+        """The screen rows a row takes in a block of the pane as wide as it is now (a foreign
+        block loses its border and padding): Textual's own wrapping of the row's text."""
+        width = max(MIN_COLUMNS, (self._log().scrollable_content_region.width
+                                  or self.size.width or 80) - (4 if foreign else 0))
+
+        def height_of(row: Row) -> int:
+            return max(1, len(Content(body_text(row)).wrap(width)))
+
+        return height_of
+
     def start_turn(self, line: str) -> None:
         """The person sent `line`: a new turn. Older turns fold to their summary line by
         themselves (D2), except the one before it, one the person opened or closed, and the
@@ -1331,7 +1350,7 @@ class HarnessApp(App[int]):
         if foreign:
             kind = category("", foreign=True, label=label)
             turn.add(ForeignBlock(rows, label or FOREIGN_TITLE, kind=kind,
-                                  preview=self._preview()))
+                                  preview=self._preview(), height_of=self._height_of(True)))
         else:
             first = row_text(rows[0]) if rows else ""
             kind = category(first, foreign=False, label=None)
@@ -1342,7 +1361,8 @@ class HarnessApp(App[int]):
                 if turn.closed:
                     turn.refresh_summary()
             else:
-                turn.add(NoticeBlock(rows, kind=kind, preview=self._preview()))
+                turn.add(NoticeBlock(rows, kind=kind, preview=self._preview(),
+                                     height_of=self._height_of(False)))
         self._follow()
 
     def show_rows(self, rows: list[Row], label: str | None) -> None:
@@ -1533,6 +1553,10 @@ class HarnessApp(App[int]):
                 self._log().scroll_end(animate=False)
         elif what == "edge":
             self._log().scroll_end(animate=False)
+        elif what == "latest":
+            if self.query_one(PromptInput).browsing and items:
+                self._select(items[-1], scroll=False)
+            self._log().anchor()  # and it follows what arrives again
         elif what == "page":
             log = self._log()
             (log.scroll_page_down if args[0] > 0 else log.scroll_page_up)(animate=False)

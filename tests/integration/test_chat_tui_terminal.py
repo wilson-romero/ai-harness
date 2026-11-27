@@ -9,6 +9,7 @@ imported, with that reason.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import signal
@@ -217,3 +218,27 @@ def test_a_hangup_during_a_question_exits_cleanly(data_dir):
     assert os.waitstatus_to_exitcode(status) == 0
     assert query(data_dir, "SELECT status FROM requests") == [("uncertain",)]
     assert run_main(data_dir, "ask", session_id, "otra").returncode == 0  # the session is free
+
+
+def test_a_long_reply_folds_and_opens_at_a_real_terminal(data_dir, tmp_path):
+    """collapsible-blocks: a long Mock reply arrives folded with its footer; Escape and Enter
+    open it without sending anything, and ctrl+q leaves a restored terminal."""
+    body = "\n".join(f"- Punto sintético {n}." for n in range(1, 61))
+    answers = tmp_path / "respuestas.json"
+    answers.write_text(json.dumps({"HLS": f"## Resumen\nSintético.\n\n## Riesgos\n{body}"}),
+                       encoding="utf-8")
+    child = FullScreenChild(data_dir, "chat", HARNESS_MOCK_RESPONSES=str(answers))
+    try:
+        child.read_until(READY)
+        child.type("revisa el HLS\r")
+        child.read_until("more lines · enter/click to expand")
+        child.type("\x1b")  # Escape: browsing, the newest reply selected
+        child.read_until("browsing the blocks")
+        child.type("\r")  # Enter opens it in place: no question is sent
+        child.read_until("Punto sintético 17.")  # a row the preview did not show
+        child.type("\x11")
+        assert child.wait() == 0
+    finally:
+        child.kill()
+    assert _restored(child)
+    assert query(data_dir, "SELECT COUNT(*) FROM requests") == [(1,)]

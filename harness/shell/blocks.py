@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import enum
 import re
+from collections.abc import Callable
 
 from harness.shell.render import GUTTER, MD_HEADING, Row, row_text
 from harness.text.safe_text import terminal_safe
@@ -21,6 +22,8 @@ FOLD_GRACE = 4  # a block only this much longer than the preview is shown whole
 PREVIEW_MAX_CHARS = 32_000  # of the rows a folded block shows (bounds the work of a preview)
 KEEP_OPEN_TURNS = 2  # the newest turn and the one before it never fold by themselves
 EXCERPT_MAX = 200  # characters of foreign or typed text in a collapsed line
+
+HeightOf = Callable[[Row], int]  # the screen rows a row takes in its block, once wrapped
 
 # Categories of a block, from the harness's own first words (never from foreign text).
 REPLY = "reply"  # the provider's answer to a question
@@ -54,19 +57,35 @@ def preview_lines(viewport_rows: int) -> int:
     return max(MIN_PREVIEW_LINES, viewport_rows - PREVIEW_RESERVE)
 
 
-def folds_by_default(total_rows: int, preview: int) -> bool:
-    return total_rows > preview + FOLD_GRACE
+def _one_row(row: Row) -> int:  # noqa: ARG001 - the height of a row nobody measured
+    return 1
 
 
-def rows_in_preview(rows: list[Row], preview: int) -> int:
-    """How many whole rows a folded block shows: at most `preview`, at most PREVIEW_MAX_CHARS
-    of text, never fewer than one. A row is never cut: the footer counts whole rows."""
-    shown, chars = 0, 0
-    for row in rows[:preview]:
+def folds_by_default(rows: list[Row], preview: int, height_of: HeightOf = _one_row) -> bool:
+    """Whether the rows take more of the pane than the preview and its grace, measured with
+    `height_of` (the screen rows a row takes once wrapped). Stops as soon as it knows."""
+    used = 0
+    for row in rows:
+        used += height_of(row)
+        if used > preview + FOLD_GRACE:
+            return True
+    return False
+
+
+def rows_in_preview(rows: list[Row], preview: int, height_of: HeightOf = _one_row) -> int:
+    """How many whole rows a folded block shows: as many as fit in `preview` screen rows
+    (each row measured with `height_of`) and in PREVIEW_MAX_CHARS of text, never fewer than
+    one. A row is never cut: the footer counts whole rows."""
+    shown, used, chars = 0, 0, 0
+    for row in rows:
+        height = height_of(row)
         chars += sum(len(text) for _, text in row)
-        if shown and chars > PREVIEW_MAX_CHARS:
+        if shown and (used + height > preview or chars > PREVIEW_MAX_CHARS):
             break
         shown += 1
+        used += height
+        if used >= preview:
+            break
     return shown
 
 
@@ -137,14 +156,15 @@ def is_not_shown_notice(line: str) -> bool:
     return bool(_NOT_SHOWN.fullmatch(line.strip()))
 
 
-def default_fold(kind: str, total_rows: int, preview: int) -> Fold:
+def default_fold(kind: str, rows: list[Row], preview: int,
+                 height_of: HeightOf = _one_row) -> Fold:
     """Metadata collapsed to one line once it has more than one; alerts whole; anything else
-    whole unless it is longer than the preview (and its grace), then folded."""
+    whole unless it takes more of the pane than the preview (and its grace), then folded."""
     if kind == ALERT:
         return Fold.EXPANDED
     if kind in METADATA:
-        return Fold.COLLAPSED if total_rows > 1 else Fold.EXPANDED
-    return Fold.PREVIEW if folds_by_default(total_rows, preview) else Fold.EXPANDED
+        return Fold.COLLAPSED if len(rows) > 1 else Fold.EXPANDED
+    return Fold.PREVIEW if folds_by_default(rows, preview, height_of) else Fold.EXPANDED
 
 
 def turn_state(harness_lines: list[str], has_reply: bool, truncated: bool) -> str:

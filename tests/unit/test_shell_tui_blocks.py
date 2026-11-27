@@ -457,12 +457,19 @@ async def test_skill_step_bookkeeping_is_one_line_by_default(tmp_path):
         await tui.send(pilot, "/exit")
 
 
+def _rows(count: int) -> list:
+    return [[("foreign", f"fila {n}")] for n in range(count)]
+
+
 def test_default_folds():
-    assert blocks.default_fold(blocks.CONTEXT, 3, 20) is Fold.COLLAPSED
-    assert blocks.default_fold(blocks.CONTEXT, 1, 20) is Fold.EXPANDED
-    assert blocks.default_fold(blocks.ALERT, 500, 20) is Fold.EXPANDED
-    assert blocks.default_fold(blocks.REPLY, 24, 20) is Fold.EXPANDED  # within the grace
-    assert blocks.default_fold(blocks.REPLY, 25, 20) is Fold.PREVIEW
+    assert blocks.default_fold(blocks.CONTEXT, _rows(3), 20) is Fold.COLLAPSED
+    assert blocks.default_fold(blocks.CONTEXT, _rows(1), 20) is Fold.EXPANDED
+    assert blocks.default_fold(blocks.ALERT, _rows(500), 20) is Fold.EXPANDED
+    assert blocks.default_fold(blocks.REPLY, _rows(24), 20) is Fold.EXPANDED  # the grace
+    assert blocks.default_fold(blocks.REPLY, _rows(25), 20) is Fold.PREVIEW
+    # Wrapped rows count by the screen rows they take: 12 rows of 3 screen rows each fold.
+    assert blocks.default_fold(blocks.REPLY, _rows(12), 20, lambda row: 3) is Fold.PREVIEW
+    assert rows_in_preview(_rows(12), 20, lambda row: 3) == 6
     assert blocks.category("context: demo", foreign=False, label=None) == blocks.CONTEXT
     assert blocks.category("error: x", foreign=False, label=None) == blocks.ALERT
     assert blocks.category("[12 more character(s) not shown]", foreign=False,
@@ -522,4 +529,49 @@ async def test_a_folded_mebibyte_reply_costs_its_preview(tmp_path):
         await pilot.pause(0.2)
         assert time.monotonic() - started < 20
         assert block.hidden_rows() == 0
+        await tui.send(pilot, "/exit")
+
+
+async def test_the_palette_starts_browsing_and_jumps_to_the_latest(tmp_path):
+    tui = Tui(tmp_path)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        await _ask(tui, pilot, long_reply(50), "primera")
+        await _palette(tui, pilot, "browse blocks")
+        prompt = tui.app.query_one(PromptInput)
+        await tui.until(pilot, lambda: prompt.browsing and tui.app.focused is prompt)
+        assert tui.app.selected is _replies(tui)[-1]
+        await pilot.press("escape")
+        await _palette(tui, pilot, "open or close")
+        await tui.until(pilot, lambda: _replies(tui)[-1].fold is Fold.EXPANDED)
+        await _palette(tui, pilot, "jump to latest")
+        await pilot.pause(0.2)
+        log = tui.app._log()
+        assert log.scroll_y == log.max_scroll_y
+        await tui.send(pilot, "/exit")
+
+
+def test_the_folding_module_is_standard_library_and_writes_nothing():
+    from pathlib import Path
+
+    source = Path(blocks.__file__).read_text(encoding="utf-8")
+    imports = [line for line in source.splitlines() if line.startswith(("import ", "from "))]
+    assert all("textual" not in line and "rich" not in line for line in imports)
+    assert "open(" not in source and "write" not in source
+
+
+async def test_a_folded_reply_of_wrapped_lines_fits_the_pane_as_it_arrives(tmp_path):
+    """The preview is measured in screen rows: lines that wrap take more than one. Negative
+    control: counting each line as one row makes the preview taller than the pane."""
+    tui = Tui(tmp_path)
+    wide = "\n".join(["## Resumen", *[f"- Riesgo sintético {n}: " + "palabra " * 14
+                                      for n in range(40)]])
+    async with tui.app.run_test(size=(100, 30)) as pilot:
+        await _ask(tui, pilot, wide)
+        block = _replies(tui)[-1]
+        log = tui.app._log()
+        assert block.fold is Fold.PREVIEW
+        assert block.outer_size.height <= log.size.height
+        screen = tui.screen()
+        assert "## Resumen" in screen and "more lines · enter/click to expand" in screen
+        assert rows_in_preview(block.rows, block.preview) > block.shown_rows()
         await tui.send(pilot, "/exit")
