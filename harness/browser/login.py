@@ -32,6 +32,7 @@ from harness.browser.page_state import (
 )
 from harness.config import Settings
 from harness.providers.copilot_ui import MEASUREMENT_DIR, UiMeasurement, load_measurement
+from harness.storage.private import private_dir, private_file
 
 POLL_S = 0.25
 CHECK_S = 20.0  # how long the configured address may take to show the chat or the guest page
@@ -53,7 +54,8 @@ def recorded_ready_path(data_dir: Path) -> str | None:
 
 def _record_ready_path(data_dir: Path, path: str) -> None:
     target = login_path(data_dir)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    private_dir(target.parent)  # owner-only where the system uses permission bits (F-08)
+    private_file(target)
     stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     target.write_text(json.dumps({"ready_path": path, "recorded_at": stamp}) + "\n", "utf-8")
 

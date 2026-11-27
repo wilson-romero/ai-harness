@@ -14,7 +14,23 @@ from harness.core.errors import UnknownProvider
 from harness.core.service import SessionService
 from harness.skills.effects import EffectContext, NoEffect, Prepared
 from harness.skills.engine import SkillEngine
+from harness.shell.render import CONTINUATION_PREFIX, FOREIGN_PREFIX
 from tests.conftest import REPO_ROOT
+
+
+def unmark_rows(rows: list[str]) -> str:
+    """The content of an approval notice from its marked rows (security review 2026-11-27,
+    F-04): each line starts with FOREIGN_PREFIX, each continuation row with
+    CONTINUATION_PREFIX. Raises if a row carries neither mark."""
+    lines: list[str] = []
+    for row in rows:
+        if row.startswith(CONTINUATION_PREFIX) and lines:
+            lines[-1] += row[len(CONTINUATION_PREFIX):]
+        elif row.startswith(FOREIGN_PREFIX):
+            lines.append(row[len(FOREIGN_PREFIX):])
+        else:
+            raise AssertionError(f"an unmarked row inside the notice: {row!r}")
+    return "\n".join(lines)
 
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "skills"
 GOOD_ECHO = "## Resumen\nTexto resumido.\n\n## Preguntas pendientes\n- Ninguna."

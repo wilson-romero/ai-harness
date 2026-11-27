@@ -19,6 +19,8 @@ import time
 from pathlib import Path
 from uuid import UUID
 
+from harness.storage.private import private_dir, private_file
+
 _NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _POLL_S = 0.05
 
@@ -54,7 +56,8 @@ class NamedLock:
         """Take the lock if it is free, waiting up to `wait_s`. False if another holder has it."""
         if self._conn is not None:
             return True
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        private_dir(self._path.parent)  # owner-only where the system uses permission bits
+        private_file(self._path)
         deadline = time.monotonic() + wait_s
         while True:
             failure = None

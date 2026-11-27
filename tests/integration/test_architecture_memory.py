@@ -39,6 +39,7 @@ from tests.skill_support import (
     ScriptedProvider,
     all_text,
     build,
+    unmark_rows,
 )
 
 INPUTS = REPO_ROOT / "tests" / "fixtures" / "skill-inputs"
@@ -84,7 +85,7 @@ def shown_note(terminal) -> str:
     lines = text.split("\n")
     first = lines.index(RULE)
     last = len(lines) - 1 - lines[::-1].index(RULE)
-    return "\n".join(lines[first + 1:last])
+    return unmark_rows(lines[first + 1:last])
 
 
 def shown_target(terminal) -> str:
