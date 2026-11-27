@@ -25,6 +25,19 @@
                         as a virtualized list does
     bounce=1            the server receives the prompt, the page shows an error notice as a
                         turn and keeps the prompt in the editor (no user turn, never emptied)
+  A response-mode selector, only with modes=... (change response-mode). Invented labels: the
+  options are "Synthetic automatic", "Synthetic brisk" and "Synthetic pondering" (auto, quick,
+  deep). The page posts the mode it is in with each prompt and every mode it switches to.
+    modes=menu          a button (#synthetic-mode-trigger, constant label) opens a role=menu of
+                        role=menuitemradio options marked with aria-checked
+    modes=listbox       a role=combobox button (data-testid synthetic-mode-picker) whose label
+                        is the current mode opens a role=listbox of role=option, aria-selected
+    mode_start=M        the mode the page starts in (default auto)
+    mode_persist=1      the chosen mode survives a reload (kept in the profile's storage)
+    mode_stuck=1        choosing an option closes the list and changes nothing
+    mode_late_ms=N      a chosen mode applies N ms after the click
+    mode_fallback=M     the page switches to mode M when a reply ends
+    mode_newchat=1      choosing an option also opens a new, empty chat
   A reply the server sends with `html` (a prompt with ZQX-RICH-<name>) streams as text, then
   is replaced by that HTML, as a page renders the Markdown it received.
 -->
@@ -71,6 +84,18 @@
   const deaf = params.get("deaf") === "1";
   const bounce = params.get("bounce") === "1";
   const shownPairs = Number(params.get("window") || 0);
+  const modesShape = params.get("modes") || "";
+  const MODE_LABELS = { auto: "Synthetic automatic", quick: "Synthetic brisk", deep: "Synthetic pondering" };
+  const modeStuck = params.get("mode_stuck") === "1";
+  const modeLateMs = Number(params.get("mode_late_ms") || 0);
+  const modeFallback = params.get("mode_fallback") || "";
+  const modeNewChat = params.get("mode_newchat") === "1";
+  const modePersist = params.get("mode_persist") === "1";
+  let mode = params.get("mode_start") || "auto";
+  if (modePersist) {
+    try { mode = localStorage.getItem("synthetic-mode") || mode; } catch (e) { /* none */ }
+  }
+  let modeTrigger = null, modeList = null;
   const thread = document.getElementById("synthetic-thread");
   const composer = document.getElementById("synthetic-composer");
   const send = document.getElementById("synthetic-send");
@@ -130,14 +155,77 @@
       if (first) thread.insertBefore(element, first);  // history goes above what is shown
     }
   }
+  function renderMode() {
+    if (!modeTrigger) return;
+    if (modesShape === "listbox") modeTrigger.textContent = MODE_LABELS[mode];
+    const mark = modesShape === "menu" ? "aria-checked" : "aria-selected";
+    for (const option of modeList.children) {
+      option.setAttribute(mark, option.dataset.mode === mode ? "true" : "false");
+    }
+  }
+  function setMode(next) {
+    mode = next;
+    if (modePersist) {
+      try { localStorage.setItem("synthetic-mode", next); } catch (e) { /* none */ }
+    }
+    renderMode();
+    fetch("/api/mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: next }),
+    });
+  }
+  function showModes(open) {
+    modeList.hidden = !open;
+    modeTrigger.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  function chooseMode(next) {
+    showModes(false);
+    if (modeStuck) return;
+    const apply = () => { setMode(next); if (modeNewChat) newChat(); };
+    if (modeLateMs) setTimeout(apply, modeLateMs); else apply();
+  }
+  function buildModes() {
+    const menu = modesShape === "menu";
+    modeTrigger = document.createElement("button");
+    modeTrigger.type = "button";
+    modeTrigger.setAttribute("aria-expanded", "false");
+    if (menu) {
+      modeTrigger.id = "synthetic-mode-trigger";
+      modeTrigger.setAttribute("aria-haspopup", "menu");
+      modeTrigger.textContent = "Synthetic mode";
+    } else {
+      modeTrigger.setAttribute("role", "combobox");
+      modeTrigger.setAttribute("aria-haspopup", "listbox");
+      modeTrigger.dataset.testid = "synthetic-mode-picker";
+    }
+    modeList = document.createElement(menu ? "div" : "ul");
+    modeList.setAttribute("role", menu ? "menu" : "listbox");
+    modeList.hidden = true;
+    for (const key of ["auto", "quick", "deep"]) {
+      const option = document.createElement(menu ? "div" : "li");
+      option.setAttribute("role", menu ? "menuitemradio" : "option");
+      option.tabIndex = -1;
+      option.dataset.mode = key;
+      option.textContent = MODE_LABELS[key];
+      option.addEventListener("click", () => chooseMode(key));
+      modeList.appendChild(option);
+    }
+    modeTrigger.addEventListener("click", () => showModes(modeList.hidden));
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape") showModes(false); });
+    composer.before(modeTrigger);
+    document.body.appendChild(modeList);  // as a portal: outside the chat, at the end
+    renderMode();
+  }
   async function submit() {
     const prompt = composer.value;
     if (!prompt) return;
+    const sentMode = modesShape ? mode : null;
     if (bounce) {
       await fetch("/api/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversation, prompt }),
+        body: JSON.stringify({ conversation, prompt, mode: sentMode }),
       });
       addTurn("assistant notice", "ZZ-ERROR-NOTICE");
       return;
@@ -150,7 +238,7 @@
     const response = await fetch("/api/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ conversation, prompt }),
+      body: JSON.stringify({ conversation, prompt, mode: sentMode }),
     });
     const data = await response.json();
     conversation = data.conversation;
@@ -191,6 +279,7 @@
       }
       turn.appendChild(bar);
     }
+    if (modeFallback && modeTrigger) setMode(modeFallback);
     stop.hidden = true;
     send.hidden = false;
     if (idDelay !== null && !idNever) {
@@ -204,6 +293,7 @@
   composer.addEventListener("input", () => { send.disabled = !composer.value; });
   send.addEventListener("click", () => { if (!deaf) submit(); });
   document.getElementById("synthetic-new-chat").addEventListener("click", newChat);
+  if (modesShape === "menu" || modesShape === "listbox") buildModes();
   if (readyMs) {
     composer.hidden = true;
     setTimeout(() => { composer.hidden = false; }, readyMs);

@@ -49,15 +49,21 @@ def test_browser_package_never_interacts_with_the_page():
 
 
 def test_provider_types_only_into_the_editor_and_sends_only_with_the_measured_control():
-    """The Copilot provider has exactly three input actions: fill the editor, press Enter in
-    the editor, click the measured send control. Nothing else is typed, pressed or clicked."""
+    """The Copilot provider has exactly three input actions that write or send: fill the
+    editor, press Enter in the editor, click the measured send control. Revised 2026-11-27
+    (response-mode D3): three more, only in the measured response-mode selector, before
+    anything is typed: click its opener, click the option of one mode, press Escape to close
+    its list. Nothing else is typed, pressed or clicked."""
     found = _offenders(INPUT_ACTIONS, "harness/providers")
     actions = sorted(line.split(": ", 1)[1] for line in found)
-    assert len(actions) == 3, found
+    assert len(actions) == 6, found
     assert all(line.startswith("harness/providers/copilot_web.py:") for line in found)
     assert any(a.startswith("await composer.fill(self.request.prompt") for a in actions)
     assert any(a.startswith('await composer.press("Enter"') for a in actions)
     assert any(a.startswith("await self.locators.send.resolve(page).first.click(") for a in actions)
+    assert any(a.startswith("await trigger.click(") for a in actions)
+    assert any(a.startswith("await option.click(") for a in actions)
+    assert any(a.startswith('await self.page.keyboard.press("Escape")') for a in actions)
 
 
 LAUNCH = re.compile(r"\.launch_persistent_context\(|\bchromium\.launch\(|\.connect_over_cdp\(")

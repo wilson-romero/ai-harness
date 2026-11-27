@@ -177,6 +177,48 @@ class ConversationRef(_Strict):
         return f"{parts.scheme}://{parts.netloc}{path}{query}"
 
 
+ModeName = Literal["auto", "quick", "deep"]
+MODE_LABEL_MAX = 60  # an option's accessible name, as the probe keeps it
+
+
+class ResponseModeControl(_Strict):
+    """The response-mode selector of the page (response-mode D3, D7), measured by the probe's
+    `response-mode` step: the control that opens the list, the option of each mode the person
+    mapped, and how the current mode is read back.
+
+    `checked_option`: with the list open, the one option marked `aria-checked`,
+    `aria-selected` or `aria-current`. `trigger_label`: the opening control's label holds the
+    label (`labels`) of exactly one option (the longest, if one holds another).
+    """
+
+    trigger: LocatorSpec
+    options: dict[ModeName, LocatorSpec]
+    labels: dict[ModeName, str] = Field(default_factory=dict)
+    readback: Literal["checked_option", "trigger_label"]
+
+    @model_validator(mode="after")
+    def _usable(self) -> Self:
+        if not self.options:
+            raise ValueError("a response-mode control needs at least one option")
+        if self.trigger in self.options.values():
+            raise ValueError("the control that opens the list cannot also be an option")
+        if len(set(map(_spec_key, self.options.values()))) != len(self.options):
+            raise ValueError("two modes cannot share one option")
+        for label in self.labels.values():
+            if not label.strip() or len(label) > MODE_LABEL_MAX or not label.isprintable():
+                raise ValueError("an option label is a short printable text")
+        if self.readback == "trigger_label":
+            if set(self.labels) != set(self.options):
+                raise ValueError("trigger_label needs the label of every option")
+            if len(set(self.labels.values())) != len(self.labels):
+                raise ValueError("trigger_label needs distinct labels")
+        return self
+
+
+def _spec_key(spec: LocatorSpec) -> str:
+    return spec.model_dump_json()
+
+
 class EndSignal(_Strict):
     name: Literal["stop_hidden", "send_ready", "done_control", "aria_busy", "text_stable"]
     window_ms: int | None = Field(default=None, gt=0)
@@ -221,12 +263,29 @@ class UiMeasurement(_Strict):
     longest_response_ms: int | None = Field(default=None, ge=0)
     recommended_timeout_s: float | None = Field(default=None, gt=0)
     login: LoginShape | None = None
+    # Optional: without it only the automatic mode exists (response-mode D2).
+    response_mode: ResponseModeControl | None = None
 
     @model_validator(mode="after")
     def _complete_means_complete(self) -> Self:
         gaps = self.missing_parts()
         if self.complete and gaps:
             raise ValueError(f"marked complete but missing: {', '.join(gaps)}")
+        return self
+
+    @model_validator(mode="after")
+    def _mode_control_is_no_other_control(self) -> Self:
+        """The selector is never the editor, the send, stop or new-chat button (response-mode
+        D3): a click meant for the mode must not send or start another conversation."""
+        control = self.response_mode
+        if control is None:
+            return self
+        loc = self.locators
+        others = {_spec_key(s) for s in (loc.composer, loc.send, loc.stop, loc.new_conversation)
+                  if s is not None}
+        mine = [control.trigger, *control.options.values()]
+        if any(_spec_key(spec) in others for spec in mine):
+            raise ValueError("the response-mode control reuses a locator of another control")
         return self
 
     def missing_parts(self) -> tuple[str, ...]:

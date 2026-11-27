@@ -47,6 +47,7 @@ HUGE_REPLY_CHARS = 250_000
 class Received:
     conversation: str
     prompt: str
+    mode: str | None = None  # the mode the page was in when it sent it (response-mode)
 
 
 @dataclass
@@ -58,6 +59,7 @@ class SyntheticCopilot:
     login_events: list[str] = field(default_factory=list)
     page_hits: int = 0
     conversations: dict[str, list[dict[str, str]]] = field(default_factory=dict)
+    mode_events: list[str] = field(default_factory=list)  # every mode the page switched to
 
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
@@ -102,12 +104,13 @@ class SyntheticCopilot:
         with self._lock:
             return len(self.prompts)
 
-    def receive(self, conversation: str | None, prompt: str) -> tuple[str, str]:
+    def receive(self, conversation: str | None, prompt: str,
+                mode: str | None = None) -> tuple[str, str]:
         with self._lock:
             if not conversation or conversation not in self.conversations:
                 conversation = secrets.token_hex(8)
                 self.conversations[conversation] = []
-            self.prompts.append(Received(conversation, prompt))
+            self.prompts.append(Received(conversation, prompt, mode))
             reply = make_reply(prompt)
             self.conversations[conversation] += [
                 {"role": "user", "text": prompt},
@@ -215,9 +218,14 @@ def _handler(app: SyntheticCopilot) -> type[BaseHTTPRequestHandler]:
             path = urlsplit(self.path).path
             if path == "/api/send":
                 data = json.loads(body)
-                conversation, reply = app.receive(data.get("conversation"), data["prompt"])
+                conversation, reply = app.receive(data.get("conversation"), data["prompt"],
+                                                  data.get("mode"))
                 self._json({"conversation": conversation, "reply": reply,
                             "html": rich_reply(data["prompt"])})
+            elif path == "/api/mode":
+                with app._lock:
+                    app.mode_events.append(str(json.loads(body).get("mode")))
+                self._json({"ok": True})
             elif path == "/api/login-event":
                 with app._lock:
                     app.login_events.append(body.decode() or "unknown")

@@ -1,0 +1,12 @@
+{
+  "trigger": {"test_id": "synthetic-mode-picker"},
+  "options": {
+    "quick": {"role": "option", "name": "Synthetic brisk", "exact": true},
+    "deep": {"role": "option", "name": "Synthetic pondering", "exact": true}
+  },
+  "labels": {
+    "quick": "Synthetic brisk",
+    "deep": "Synthetic pondering"
+  },
+  "readback": "trigger_label"
+}
