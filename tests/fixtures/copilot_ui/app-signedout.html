@@ -1,0 +1,27 @@
+<!doctype html>
+<!--
+  Synthetic signed-out landing page: it offers to sign in and still shows a prompt box.
+  Invented structure. The probe must recognise it and never type into it.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Synthetic welcome ZZ-CANARY-PAGE-TITLE-6122</title></head>
+<body>
+<header><a href="/login" class="cta-button" data-event="Welcome_SignIn">Sign in</a></header>
+<main class="guest-landing">
+  <section class="unauth-prompt-section">
+    <textarea class="unauth-prompt-input" aria-label="Ask"></textarea>
+    <button type="button" class="unauth-prompt-submit">Go</button>
+  </section>
+</main>
+<script>
+  document.querySelector(".unauth-prompt-submit").addEventListener("click", () => {
+    const box = document.querySelector(".unauth-prompt-input");
+    fetch("/api/send", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversation: null, prompt: box.value }) });
+  });
+  document.querySelector(".unauth-prompt-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") document.querySelector(".unauth-prompt-submit").click();
+  });
+</script>
+</body>
+</html>

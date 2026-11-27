@@ -1,0 +1,42 @@
+<!doctype html>
+<!--
+  Synthetic sign-in page for automated tests. It reports every key press, input and click to
+  the test server, so a test can prove that the harness never touched it. With `auto_ms` it
+  "signs in" by itself after that delay, standing in for a person.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Synthetic sign-in</title>
+</head>
+<body>
+<form id="synthetic-login-form" onsubmit="return false">
+  <label>Synthetic user <input id="synthetic-user" name="user"></label>
+  <label>Synthetic secret <input id="synthetic-secret" name="secret" type="password"></label>
+  <button id="synthetic-sign-in" type="button">Synthetic sign in</button>
+</form>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const report = (kind) => fetch("/api/login-event", { method: "POST", body: kind });
+  for (const kind of ["keydown", "input", "mousedown", "click"]) {
+    document.addEventListener(kind, () => report(kind), true);
+  }
+  if (params.get("editor") === "1") {
+    // A sign-in page that happens to carry controls with the chat's locators: only the host
+    // check keeps the harness from typing here.
+    const box = document.createElement("textarea");
+    box.id = "synthetic-composer";
+    const send = document.createElement("button");
+    send.type = "button";
+    send.textContent = "Send synthetic message";
+    document.body.append(box, send);
+  }
+  const autoMs = params.get("auto_ms");
+  if (autoMs !== null) {
+    setTimeout(() => { location.href = params.get("complete"); }, Number(autoMs));
+  }
+})();
+</script>
+</body>
+</html>

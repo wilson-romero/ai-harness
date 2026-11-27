@@ -28,6 +28,10 @@ La revisión SHALL contener los encabezados `Resumen`, `Alternativas`, `Restricc
 - **WHEN** la respuesta guionizada no contiene `## Preguntas pendientes`
 - **THEN** la ejecución queda `failed` con `validation_failed` y el nombre del encabezado, y stdout no contiene la respuesta
 
+#### Scenario: Encabezados que solo están dentro de un bloque de código
+- **WHEN** la respuesta tiene los seis encabezados, pero `## Preguntas pendientes` solo aparece dentro de un bloque de código
+- **THEN** la ejecución queda `failed` con `validation_failed` y ese encabezado: un encabezado dentro de código no cuenta (precisión del 2026-11-26, `skill-engine` D6 revisada)
+
 ### Requirement: La plantilla pide distinguir evidencia, supuesto y propuesta
 La plantilla de la revisión SHALL pedir al modelo que distinga lo que el documento o la memoria afirman (evidencia), lo que asume (supuesto) y lo que propone (propuesta), y que no invente hechos. Esto SHALL comprobarse sobre el texto enviado, no sobre la respuesta.
 

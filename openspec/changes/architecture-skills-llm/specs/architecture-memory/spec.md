@@ -44,11 +44,23 @@ Antes de escribir, el sistema SHALL mostrar en la terminal la nota completa tal 
 - **THEN** la ejecución queda `cancelled` y el vault queda intacto
 
 ### Requirement: Decisión ya registrada
-Si el vault ya contiene una nota con el mismo identificador de decisión, la ejecución SHALL terminar en `failed` nombrando la nota existente antes de pedir aprobación, y SHALL NOT escribir ni modificar nada.
+Si el vault ya contiene una nota con el mismo identificador de decisión, la ejecución SHALL terminar en `failed` nombrando la nota existente antes de pedir aprobación, y SHALL NOT escribir ni modificar nada. Si una decisión guardada desde el mismo texto fuente en el mismo proyecto sigue en el vault, la ejecución SHALL terminar así antes de llamar al proveedor (revisada el 2026-11-25).
 
 #### Scenario: Mismo título en el mismo proyecto
 - **WHEN** el vault ya tiene una decisión de `demo-alpha` con el mismo título normalizado y se ejecuta `architecture-memory` otra vez
 - **THEN** la ejecución queda `failed` con `duplicate_decision` y la ruta de la nota existente, sin ninguna fila en `approvals`
+
+#### Scenario: Mismo texto fuente en el mismo proyecto
+- **WHEN** una decisión de `demo-alpha` se guardó desde un texto fuente, su nota sigue en `Decisiones/` y se ejecuta `architecture-memory` otra vez con el mismo texto, aunque cambien sus finales de línea (revisada el 2026-11-25)
+- **THEN** la ejecución queda `failed` con `duplicate_decision` y la ruta de la nota existente sin que el proveedor reciba ninguna llamada, sin ninguna fila en `approvals` y sin escribir nada
+
+#### Scenario: Fuente de una aprobación rechazada
+- **WHEN** la persona rechazó o dejó sin responder la aprobación de una decisión y se ejecuta `architecture-memory` otra vez con el mismo texto fuente (revisada el 2026-11-25)
+- **THEN** la nueva ejecución pregunta al proveedor como la primera vez
+
+#### Scenario: Aprobación reanudada sin entradas
+- **WHEN** la persona deja sin responder la aprobación de una decisión, la reanuda con `skill resume RUN_ID` sin pasar entradas y la aprueba, y después se ejecuta `architecture-memory` con el mismo texto fuente (revisada el 2026-11-25)
+- **THEN** la segunda ejecución queda `failed` con `duplicate_decision` sin que el proveedor reciba ninguna llamada
 
 ### Requirement: Credenciales enmascaradas en la nota
 Los campos de texto de la decisión SHALL pasar por la redacción de formatos de credenciales conocidos antes de preparar la nota, y la terminal SHALL indicar cuántas sustituciones hubo. Lo que se aprueba y se escribe es el texto ya enmascarado.

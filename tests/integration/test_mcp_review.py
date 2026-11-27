@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import time
+import warnings
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from tests.integration.test_mcp_cli import (  # noqa: F401 - fixtures
     ws,
 )
 from tests.mcp_support import (
+    LOOPBACK_PORT_ZERO,
     REPO_ROOT,
     child_env,
     hang_guard,  # noqa: F401 - fixture
@@ -36,6 +38,7 @@ from tests.mcp_support import (
     result_lines,
     run_bounded,
     run_main_bounded,
+    unexpected_sockets,
 )
 
 STUCK_WORKER = REPO_ROOT / "tests" / "fixtures" / "mcp" / "stuck_worker.py"
@@ -186,10 +189,10 @@ def test_a_noisy_server_that_answers_completes_with_its_stderr_cut(mcp, ws, data
     code, out, err, _ = mcp("call", "synthetic", "get_project_metadata", "--args", ALPHA)
     assert code == 0, err
     assert json.loads(result_lines(out))["name"] == "Demo Alpha"
-    assert "the server wrote 8388608 bytes on stderr; only the first 1048576 were kept" in err
+    assert "warning: 7340032 of the 8388608 bytes the server wrote on stderr are not in its log" in err
     log = (data_dir / "logs" / "mcp" / "synthetic.stderr.log").read_bytes()
     assert KEEP < len(log) <= KEEP + COUNT_LINE
-    assert b"7340032 more bytes of stderr were dropped" in log
+    assert b"7340032 more bytes of stderr were dropped; the log reached its cap of" in log
     assert rows(data_dir)[0]["status"] == "completed"
     assert server.stopped()
 
@@ -202,7 +205,7 @@ def test_a_flood_after_the_answer_keeps_the_result(mcp, ws, data_dir):  # noqa: 
     code, out, err, _ = mcp("call", "synthetic", "get_project_metadata", "--args", ALPHA)
     assert code == 0, err
     assert json.loads(result_lines(out))["name"] == "Demo Alpha"
-    assert "bytes on stderr; only the first 1048576 were kept" in err
+    assert "bytes the server wrote on stderr are not in its log" in err
     assert (data_dir / "logs" / "mcp" / "synthetic.stderr.log").stat().st_size <= (
         KEEP + COUNT_LINE)
     row = rows(data_dir)[0]
@@ -288,33 +291,87 @@ def test_a_server_error_reply_is_not_reported_as_an_exit(mcp, ws, data_dir):  # 
 # -- 9. the "no listening socket" oracle covers creation and the session process --------------
 
 
-def _sockets_run(ws, data_dir, tmp_path, args):  # noqa: F811
+#
+# Revised on 2026-11-25 (hotfix 0.2.1). On Windows `socket.socketpair` is the pure-Python
+# `_fallback_socketpair`: the event loop's own pair is made by a listener on 127.0.0.1, port 0,
+# that accepts one connection and is closed before the pair is returned. The oracle accepts a
+# socket only when its call stack is that pair made by asyncio's `_make_self_pipe`
+# (`audit_site/socket_origin.py`), never by its address. `fallback` forces the emulation on any
+# system, so Windows's condition runs here too.
+
+
+def _sockets_run(ws, data_dir, tmp_path, args, fallback=False):  # noqa: F811
     logs = tmp_path / "sockets"
     logs.mkdir()
     env = child_env(HARNESS_DATA_DIR=str(data_dir), HARNESS_MCP_CONFIG=str(ws.config),
-                    AI_HARNESS_TEST_SOCKET_LOG=str(logs), PYTHONPATH=str(AUDIT_SITE))
+                    AI_HARNESS_TEST_SOCKET_LOG=str(logs), PYTHONPATH=str(AUDIT_SITE),
+                    AI_HARNESS_TEST_FALLBACK_SOCKETPAIR="1" if fallback else "0")
     code, out, err, _ = run_bounded(args, env, tmp_path / "run", deadline_s=60)
     reports = [json.loads(p.read_text(encoding="utf-8")) for p in logs.glob("sockets-*.json")]
-    return code, err, reports
+    return code, out, err, reports
 
 
-def test_the_socket_oracle_sees_a_listen_without_bind(ws, data_dir, tmp_path):  # noqa: F811
-    code, err, reports = _sockets_run(ws, data_dir, tmp_path, [
-        sys.executable, "-c", "import socket; s = socket.socket(); s.listen(1); s.close()"])
+def _foreign(report: dict) -> list[dict]:
+    return [e for e in report["events"] if not e["self_pipe"]]
+
+
+FOREIGN_SOCKETS = {
+    # a listener bound to loopback, port 0, like the emulation's, but made by the caller
+    "bound_listener": "import socket\ns = socket.socket()\ns.bind(('127.0.0.1', 0))\n"
+                      "s.listen(1)\ns.close()\n",
+    # the very same emulation, called from outside the event loop
+    "emulation_outside_the_loop": "import socket\na, b = socket._fallback_socketpair()\n"
+                                  "a.close()\nb.close()\n",
+    # listen() binds implicitly, without a bind event; Windows refuses it (WinError 10022)
+    "listen_without_bind": "import socket\ns = socket.socket()\ntry:\n    s.listen(1)\n"
+                           "except OSError:\n    print('listen refused')\ns.close()\n",
+}
+
+
+@pytest.mark.parametrize("control", sorted(FOREIGN_SOCKETS))
+def test_the_socket_oracle_sees_a_socket_made_outside_the_loop(ws, data_dir, tmp_path, control):  # noqa: F811
+    code, out, err, reports = _sockets_run(ws, data_dir, tmp_path, [
+        sys.executable, "-c", FOREIGN_SOCKETS[control]])
     assert code == 0, err
     [report] = reports
-    assert [e for e in report["events"] if not e["socketpair"]], report
+    foreign = _foreign(report)
+    assert [e for e in foreign if e["event"] == "socket.__new__"], report
+    if control != "listen_without_bind":
+        assert [e for e in foreign if e.get("address") == "('127.0.0.1', 0)"], report
+    elif "listen refused" in out:
+        # The system refuses a listen without bind, so there is no such listener to catch;
+        # the socket's creation is still caught, which is what the oracle relies on.
+        warnings.warn("this system refuses listen() without bind", stacklevel=1)
 
 
-def test_no_socket_is_created_by_the_harness_or_its_session_process(ws, data_dir, tmp_path):  # noqa: F811
+def test_the_socket_oracle_accepts_the_loops_own_emulated_pair(ws, data_dir, tmp_path):  # noqa: F811
+    code, out, err, reports = _sockets_run(ws, data_dir, tmp_path, [
+        sys.executable, "-c", "import asyncio\nasyncio.run(asyncio.sleep(0))\n"], fallback=True)
+    assert code == 0, err
+    [report] = reports
+    binds = [e for e in report["events"] if e["event"] == "socket.bind"]
+    assert binds, unexpected_sockets(report, report["events"])
+    outside = [e for e in binds if e["address"] not in LOOPBACK_PORT_ZERO]
+    assert outside == [], unexpected_sockets(report, outside)
+    assert _foreign(report) == [], unexpected_sockets(report, _foreign(report))
+
+
+@pytest.mark.parametrize("socketpair", ["native", "fallback"])
+def test_no_socket_is_created_by_the_harness_or_its_session_process(ws, data_dir, tmp_path, socketpair):  # noqa: F811
     server = ws.server()
-    code, err, reports = _sockets_run(ws, data_dir, tmp_path, [
+    code, out, err, reports = _sockets_run(ws, data_dir, tmp_path, [
         sys.executable, "main.py", "mcp", "call", "synthetic", "get_project_metadata",
-        "--args", ALPHA])
+        "--args", ALPHA], fallback=socketpair == "fallback")
     assert code == 0, err
     assert len(reports) == 2, [r["argv"] for r in reports]  # the CLI and its session process
     for report in reports:
-        assert [e for e in report["events"] if not e["socketpair"]] == [], report
+        assert _foreign(report) == [], unexpected_sockets(report, _foreign(report))
+        binds = [e for e in report["events"] if e["event"] == "socket.bind"]
+        outside = [e for e in binds if e["address"] not in LOOPBACK_PORT_ZERO]
+        assert outside == [], unexpected_sockets(report, outside)
+        if socketpair == "fallback":
+            # the emulation ran in this process and was recognised
+            assert binds, unexpected_sockets(report, report["events"])
     assert server.stopped()
 
 

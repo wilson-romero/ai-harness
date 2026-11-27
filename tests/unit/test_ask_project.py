@@ -6,7 +6,7 @@ import pytest
 
 from harness.core.errors import ProjectMismatch
 from harness.memory.context import build_context
-from tests.conftest import SECRET_SAMPLES, query, write_note
+from tests.conftest import SECRET_SAMPLES, note_header, query, write_note
 
 CANARY = "CANARIO-SQLITE-4242"
 
@@ -43,7 +43,7 @@ def test_session_project(cli, env, data_dir, recorder):
     assert code == 0, err
     assert out.strip() == "respuesta sintética"
     (sent,) = recorder.prompts
-    assert "--- nota: projects/demo-alpha/_project.md" in sent and sent.endswith("pregunta")
+    assert note_header("projects/demo-alpha/_project.md") in sent and sent.endswith("pregunta")
     assert "context: demo-alpha, 7 note(s) included" in err
     paths = [row[0] for row in query(data_dir, "SELECT note_path FROM request_context")]
     assert sorted(paths) == sorted([
@@ -139,7 +139,7 @@ def test_history_with_the_original_question(cli, env):
     assert code == 0
     lines = out.strip().splitlines()
     assert lines[0] == "[completed] user: Resume el contexto"
-    assert "MEMORIA" not in out and "nota:" not in out
+    assert "MEMORIA" not in out and note_header("projects/demo-alpha/_project.md") not in out
 
 
 def test_token_in_a_note_sent_to_the_provider(cli, env, vault, recorder):

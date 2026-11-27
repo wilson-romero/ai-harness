@@ -4,7 +4,9 @@ risk the pytest process itself.
 Usage: python driver.py MODE STATE_DIR ARGV...
 - `interrupt`: once the synthetic server has logged the call, deliver Ctrl+C to the main thread
   (`_thread.interrupt_main`, the same on every platform).
-- `sockets`: record every `socket.bind` audit event (SDK import included) in STATE_DIR.
+- `sockets`: record every `socket.bind` audit event (SDK import included) in STATE_DIR, each
+  with whether its call stack is the event loop's own socket pair (`audit_site/socket_origin`).
+  `AI_HARNESS_TEST_FALLBACK_SOCKETPAIR=1` forces the pure-Python `socketpair` Windows uses.
 - `interrupt-stuck`: replace the harness's session process with `stuck_worker.py` (it hangs
   in C code holding the GIL) and deliver Ctrl+C once it has started.
 The exit code is the CLI's.
@@ -20,6 +22,9 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "audit_site"))
+
+import socket_origin  # noqa: E402 - test-only, next to this file
 
 mode, state = sys.argv[1], Path(sys.argv[2])
 argv = sys.argv[3:]
@@ -29,13 +34,7 @@ binds: list[dict] = []
 def _socket_hook(event: str, args: tuple) -> None:
     if event != "socket.bind":
         return
-    frame = sys._getframe(1)
-    from_socketpair = False
-    while frame is not None:
-        if frame.f_code.co_name == "socketpair" and frame.f_code.co_filename.endswith("socket.py"):
-            from_socketpair = True
-        frame = frame.f_back
-    binds.append({"address": repr(args[1]), "socketpair": from_socketpair})
+    binds.append({"address": repr(args[1]), **socket_origin.classify(sys._getframe(1))})
 
 
 def _interrupt_when_called() -> None:
@@ -59,6 +58,7 @@ def _interrupt_when_stuck() -> None:
 
 
 if mode == "sockets":
+    socket_origin.force_fallback()
     sys.addaudithook(_socket_hook)
 elif mode == "interrupt-stuck":
     import harness.mcp.client as client_module
@@ -74,4 +74,6 @@ from harness.cli import main  # noqa: E402 - after the hook, so the SDK import i
 code = main(argv)
 if mode == "sockets":
     (state / "binds.json").write_text(json.dumps(binds), encoding="utf-8")
+    (state / "binds-environment.json").write_text(json.dumps(socket_origin.environment()),
+                                                  encoding="utf-8")
 sys.exit(code)

@@ -22,6 +22,7 @@ from harness.storage.database import DATABASE_NAME
 from tests.conftest import SECRET_SAMPLES
 from tests.mcp_support import (
     DEFAULT_TOOLS,
+    LOOPBACK_PORT_ZERO,
     REPO_ROOT,
     Server,
     child_env,
@@ -30,6 +31,7 @@ from tests.mcp_support import (
     result_lines,
     run_bounded,
     server_entry,
+    unexpected_sockets,
     write_config,
 )
 
@@ -122,6 +124,34 @@ def test_the_servers_stderr_goes_to_its_log_not_to_the_terminal(mcp, ws, data_di
     assert "CANARIO-STDERR-SINTETICO" not in out + err
     log = data_dir / "logs" / "mcp" / "synthetic.stderr.log"
     assert "CANARIO-STDERR-SINTETICO" in log.read_text(encoding="utf-8")
+    assert server.stopped()
+
+
+def test_a_credential_split_across_two_stderr_writes_is_redacted_in_the_log(mcp, ws, data_dir):
+    """SEC-01 on the server's log (revised 2026-11-25): the token arrives in two writes."""
+    server = ws.server("stderr-split-secret")
+    code, _, err, _ = mcp("tools", "synthetic")
+    assert code == 0, err
+    log = (data_dir / "logs" / "mcp" / "synthetic.stderr.log").read_text(encoding="utf-8")
+    assert "CANARIO-STDERR-SINTETICO" in log  # the line was logged at all
+    assert "[REDACTED:github]" in log
+    assert "S" * 18 not in log  # neither half of the token
+    assert server.stopped()
+
+
+def test_a_burst_of_utf8_continuation_bytes_on_stderr_does_not_end_the_session(mcp, ws,
+                                                                               data_dir):
+    """Second review of 2026-11-25, finding 1: this input made the redactor raise and the
+    session die with an ExceptionGroup. Now it is one line over the limit: dropped, marked."""
+    server = ws.server("stderr-continuation-bytes")
+    code, out, err, _ = mcp("tools", "synthetic")
+    assert code == 0, err
+    assert "get_project_metadata" in out
+    log = (data_dir / "logs" / "mcp" / "synthetic.stderr.log").read_bytes()
+    assert log == (b"[ai-harness: a line of 70000 bytes was dropped: too long to redact]\n"
+                   b"\n[ai-harness: 70000 more bytes of stderr were dropped; lines too long to "
+                   b"redact or private key blocks, marked above]\n")
+    assert "warning: 70000 of the 70000 bytes the server wrote on stderr are not in its log" in err
     assert server.stopped()
 
 
@@ -518,18 +548,30 @@ def test_the_table_refuses_content_shaped_values(data_dir, conn):
 # -- 4.4 no listening surface ------------------------------------------------------------------
 
 
-def test_no_socket_is_bound_during_a_call(ws, data_dir, tmp_path):
-    """Audit hook installed before the SDK is imported. A bind made by the standard library's
-    `socketpair` emulation (Windows) is reported apart; none other may happen."""
+@pytest.mark.parametrize("socketpair", ["native", "fallback"])
+def test_no_socket_is_bound_during_a_call(ws, data_dir, tmp_path, socketpair):
+    """Audit hook installed before the SDK is imported. Only the event loop's own socket pair
+    may bind, recognised by its call stack (revised on 2026-11-25, hotfix 0.2.1: on Windows
+    that pair is `socket._fallback_socketpair`, which binds `('127.0.0.1', 0)`; `fallback`
+    forces it here, so Windows's condition runs on every system)."""
     server = ws.server()
-    env = child_env(HARNESS_DATA_DIR=str(data_dir), HARNESS_MCP_CONFIG=str(ws.config))
+    env = child_env(HARNESS_DATA_DIR=str(data_dir), HARNESS_MCP_CONFIG=str(ws.config),
+                    AI_HARNESS_TEST_FALLBACK_SOCKETPAIR="1" if socketpair == "fallback" else "0")
     code, out, err, _ = run_bounded(
         [sys.executable, str(DRIVER), "sockets", str(server.state), "mcp", "call",
          "synthetic", "get_project_metadata", "--args", ALPHA],
         env, tmp_path / "run", deadline_s=60,
     )
     assert code == 0, err
-    binds = json.loads((server.state / "binds.json").read_text(encoding="utf-8"))
-    assert [bind for bind in binds if not bind["socketpair"]] == []
-    print(f"\nsocket binds: {len(binds)} (socketpair emulation only)")
+    binds = [{"event": "socket.bind", **bind}
+             for bind in json.loads((server.state / "binds.json").read_text(encoding="utf-8"))]
+    report = {"argv": ["driver.py", "sockets"], "environment": json.loads(
+        (server.state / "binds-environment.json").read_text(encoding="utf-8"))}
+    foreign = [bind for bind in binds if not bind["self_pipe"]]
+    assert foreign == [], unexpected_sockets(report, foreign)
+    outside = [bind for bind in binds if bind["address"] not in LOOPBACK_PORT_ZERO]
+    assert outside == [], unexpected_sockets(report, outside)
+    if socketpair == "fallback":
+        assert binds, report  # the emulation really ran, and was recognised
+    print(f"\nsocket binds: {len(binds)} (the event loop's own pair only)")
     assert server.stopped()

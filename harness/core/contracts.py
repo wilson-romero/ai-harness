@@ -56,6 +56,10 @@ class LLMRequest(_Contract):
     session_id: UUID
     prompt: str = Field(min_length=1)
     timeout_s: float = Field(gt=0)
+    # The session's remote conversation, if a provider bound one, and how many of the
+    # session's requests completed (design D5).
+    remote_ref: str | None = None
+    completed_turns: int = Field(default=0, ge=0)
 
 
 class LLMResponse(_Contract):
@@ -66,6 +70,9 @@ class LLMResponse(_Contract):
     duration_ms: int = Field(ge=0)
     detail: str | None = None
     warnings: tuple[str, ...] = ()
+    # The provider read only part of the answer (a size or structure bound): a person gets it
+    # with a warning; a Skill never takes it as a step's output.
+    truncated: bool = False
 
 
 class HistoryEntry(_Contract):

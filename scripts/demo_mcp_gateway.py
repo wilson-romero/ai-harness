@@ -17,6 +17,10 @@ from pathlib import Path
 
 from demo_common import ROOT, base_env, check, harness_bounded, header, run, step
 
+sys.path.insert(0, str(ROOT))
+from harness.mcp.client import GUARANTEED_EXTRA_S  # noqa: E402 - the documented guarantee
+from harness.mcp.transport import REAP_WAIT_S, STOP_GRACE_S  # noqa: E402
+
 SERVER = ROOT / "tests" / "fixtures" / "mcp" / "synthetic_server.py"
 PROJECT = {"type": "string", "max_length": 64, "pattern": "[a-z0-9][a-z0-9-]*", "required": True}
 TOOLS = {
@@ -118,14 +122,30 @@ def demo() -> list[str]:
         check("2 credential(s) redacted" in result.stderr, "the redactions were not counted")
 
         step("(g) a tool that never ends: timeout within its deadline, server stopped")
+        # Revised on 2026-11-26 (hotfix 0.2.1): the oracle is what the deadline promises. The
+        # call deadline counts from when the call is sent, so it is measured from the moment
+        # the server logged the call to the server's last heartbeat: at most the call deadline
+        # plus the stop sequence (close its input, wait, kill, reap). The command's total time
+        # also holds two process start-ups, seconds each on a machine that scans every new
+        # process; it is held to the documented guarantee (startup + call + 15 s), not to a
+        # guess.
         started = time.monotonic()
         result = harness_bounded(env, "mcp", "call", "hanging", "get_project_metadata",
                                  "--args", ALPHA, deadline_s=60)
         elapsed = time.monotonic() - started
-        print(f"elapsed: {elapsed:.1f} s (call deadline 3 s)")
         check(result.returncode == 1 and "timeout" in result.stderr, "no timeout reported")
-        check(elapsed < 3 + 10, "the command outlived its deadline")
+        check("(call, 3 s)" in result.stderr, "the timeout was not the call deadline")
         check(heartbeat_stopped(states["hanging"]), "the hanging server is still alive")
+        received = (states["hanging"] / "calls.log").stat().st_mtime
+        last_beat = (states["hanging"] / "heartbeat").stat().st_mtime
+        cut_after = last_beat - received
+        stop_s = STOP_GRACE_S + REAP_WAIT_S
+        print(f"call received -> server's last heartbeat: {cut_after:.1f} s "
+              f"(call deadline 3 s, then at most {stop_s:.0f} s to stop it)")
+        print(f"whole command: {elapsed:.1f} s (guarantee: startup 10 s + call 3 s + "
+              f"{GUARANTEED_EXTRA_S:.0f} s)")
+        check(3 - 0.5 <= cut_after <= 3 + stop_s, "the call was not cut at its deadline")
+        check(elapsed < 10 + 3 + GUARANTEED_EXTRA_S, "the command outlived its guarantee")
 
         step("(h) a server that ignores the end of its input and SIGTERM: stopped anyway")
         result = harness_bounded(env, "mcp", "call", "stubborn", "get_project_metadata",

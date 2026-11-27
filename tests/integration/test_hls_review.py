@@ -11,7 +11,7 @@ import pytest
 from harness.core.errors import InvalidInput
 from harness.memory.context import build_context
 from harness.skills.config import DEFAULT_SKILLS_DIR
-from tests.conftest import REPO_ROOT, fingerprint, run_main
+from tests.conftest import REPO_ROOT, fingerprint, note_header, run_main
 from tests.skill_support import ScriptedProvider, build
 
 INPUTS = REPO_ROOT / "tests" / "fixtures" / "skill-inputs"
@@ -47,7 +47,7 @@ def test_complete_review_with_the_mock(conn, data_dir, vault):
     assert "## Preguntas pendientes" in outcome.output
     assert provider.calls == 1
     prompt = provider.prompts[0]
-    assert "<<<MEMORIA" in prompt and "projects/demo-alpha/_project.md" in prompt
+    assert "<<<MEMORIA" in prompt and note_header("projects/demo-alpha/_project.md") in prompt
     # The whole document is between the opening and the closing marker of its reference (the
     # same nonce), after the instructions, and nowhere else in the prompt.
     document = _fixture("hls-corto.md").strip("\n")
@@ -193,3 +193,21 @@ def test_the_demo_responses_file_matches_the_fixtures():
         KEY: _fixture("hls-review-ok.md"),
         "tarea: architecture-memory/extract": _fixture("decision-ok.json"),
     }
+
+
+def test_a_heading_only_inside_a_code_block_does_not_count(conn, data_dir, vault):
+    """Scenario «Encabezados que solo están dentro de un bloque de código» (2026-11-26): the
+    incomplete review plus `## Preguntas pendientes` inside a code block still fails."""
+    forged = _fixture("hls-review-incompleta.md") + "\n\n```md\n## Preguntas pendientes\n```\n"
+    engine, sessions, _ = _engine(conn, data_dir, vault, forged)
+    session = sessions.create_session("Revisión", "demo-alpha")
+    assert _run(engine, session, document=_fixture("hls-corto.md")).status == "failed"
+    code = conn.execute("SELECT error_code FROM skill_runs").fetchone()[0]
+    assert code == "validation_failed:required_headings:Preguntas pendientes"
+
+
+def test_control_the_same_heading_outside_the_code_block_completes(conn, data_dir, vault):
+    fixed = _fixture("hls-review-incompleta.md") + "\n\n## Preguntas pendientes\n\n- Ninguna.\n"
+    engine, sessions, _ = _engine(conn, data_dir, vault, fixed)
+    session = sessions.create_session("Revisión", "demo-alpha")
+    assert _run(engine, session, document=_fixture("hls-corto.md")).status == "completed"

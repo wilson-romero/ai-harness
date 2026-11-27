@@ -28,6 +28,11 @@ from tests.conftest import HARNESS_VARS, REPO_ROOT
 SERVER = REPO_ROOT / "tests" / "fixtures" / "mcp" / "synthetic_server.py"
 PROJECT_ARG = {"type": "string", "max_length": 64, "pattern": "[a-z0-9][a-z0-9-]*",
                "required": True}
+# An absolute program path that is valid on every platform. A literal such as
+# "/opt/x/server" is absolute on POSIX only: on Windows it has no drive, the allowlist
+# rejects it and the module fails at import time.
+ABSOLUTE_PROGRAM = sys.executable
+
 DEFAULT_TOOLS = {
     "get_project_metadata": {"operation": "read", "arguments": {"project": PROJECT_ARG}},
     "set_project_metadata": {
@@ -169,6 +174,25 @@ def result_lines(out: str) -> str:
     for line in out.splitlines():
         assert line.startswith("|"), f"unprefixed result line: {line!r}"
         lines.append(line[2:])
+    return "\n".join(lines)
+
+
+# The only addresses the event loop's own socket pair binds when it is the pure-Python
+# emulation (Windows): loopback, ephemeral port (hotfix 0.2.1).
+LOOPBACK_PORT_ZERO = {"('127.0.0.1', 0)", "('::1', 0)"}
+
+
+def unexpected_sockets(report: dict, events: list[dict]) -> str:
+    """The failure message of the socket oracle (revised on 2026-11-26): the process and its
+    environment, then every unexpected event in full (what, address, why it is not the event
+    loop's own pair, its whole stack), so one failing run says what happened."""
+    lines = [f"process {report.get('argv')}: {report.get('environment')}"]
+    for event in events:
+        what = event["event"] + (f" {event['address']}" if "address" in event else "")
+        if "family" in event:
+            what += f" family={event['family']}"
+        lines.append(f"- {what}: {event.get('why', '?')}")
+        lines.extend(f"    {frame}" for frame in event.get("stack", []))
     return "\n".join(lines)
 
 

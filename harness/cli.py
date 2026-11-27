@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import gc
 import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 from harness.config import Settings
-from harness.core.contracts import RequestStatus
+from harness.core.answer_style import with_notice
+from harness.core.contracts import RequestStatus, Session
 from harness.core.errors import (
     HarnessError,
     MemoryNotConfigured,
@@ -18,6 +20,7 @@ from harness.core.errors import (
     UsageError,
 )
 from harness.core.service import SessionService
+from harness.core.watchdog import Watchdog
 from harness.mcp.commands import add_mcp_parser, run_mcp_command
 from harness.memory.config import (
     MemorySettings,
@@ -34,6 +37,7 @@ from harness.memory.search import (
     validate_limit,
 )
 from harness.providers.registry import provider_factory
+from harness.shell.app import add_chat_parser, run_chat, stdio_is_terminal
 from harness.skills.commands import add_skill_parser, run_skill_command
 from harness.skills.engine import recover_runs
 from harness.storage.database import open_database
@@ -42,6 +46,9 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
 EXIT_INTERRUPTED = 130
+# harness/browser/edge.py SHUTDOWN_S, copied so that the CLI does not import Playwright.
+BROWSER_SHUTDOWN_S = 25.0
+WATCHDOG_MARGIN_S = 15.0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -65,6 +72,10 @@ def build_parser() -> argparse.ArgumentParser:
     history = commands.add_parser("history", help="show the history of a session")
     history.add_argument("session_id")
 
+    copilot = commands.add_parser("copilot", help="Copilot Web: manual login")
+    copilot_commands = copilot.add_subparsers(dest="copilot_command", required=True)
+    copilot_commands.add_parser("login", help="open the dedicated Edge profile to sign in by hand")
+
     memory = commands.add_parser("memory", help="read the local Markdown memory (read-only)")
     memory_commands = memory.add_subparsers(dest="memory_command", required=True)
     search = memory_commands.add_parser("search", help="find notes that contain every term")
@@ -86,6 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     maintain.add_argument("--dry-run", action="store_true", help="report only (required)")
     add_skill_parser(commands)
     add_mcp_parser(commands)
+    add_chat_parser(commands)
     return parser
 
 
@@ -103,7 +115,10 @@ def _utf8_output() -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     _utf8_output()
-    args = build_parser().parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if not raw and stdio_is_terminal():
+        raw = ["chat"]  # at a console, the program alone opens the conversation (D1)
+    args = build_parser().parse_args(raw)
     try:
         return _run(args)
     except UsageError as exc:
@@ -120,7 +135,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _run(args: argparse.Namespace) -> int:
     if args.command == "mcp":
         return run_mcp_command(args)
+    if args.command == "chat":
+        return run_chat(args)
     settings = Settings.from_env(os.environ)
+    if args.command == "copilot":
+        return _copilot_login(settings)
     if args.command == "memory":
         return _memory(args)
     if args.command == "skill":
@@ -144,6 +163,7 @@ def _run(args: argparse.Namespace) -> int:
             provider_factory(settings),
             settings.provider,
             settings.request_timeout_s,
+            answer_notice=settings.answer_notice,
         )
         service.recover()
         recover_runs(conn, settings.data_dir)
@@ -191,7 +211,14 @@ def _ask(
     prompt: str,
     context: ProjectContext | None = None,
 ) -> int:
-    response = asyncio.run(service.ask(session_id, prompt, context))
+    # Last-resort bound on the whole question: the deadline, then the browser's own cleanup
+    # time, then a margin. It fires even if the event loop is blocked (harness/core/watchdog.py).
+    limit_s = service.timeout_s + BROWSER_SHUTDOWN_S + WATCHDOG_MARGIN_S
+    with Watchdog(limit_s, "the question"):
+        try:
+            response = asyncio.run(_ask_quietly(service, session_id, prompt, context))
+        finally:
+            gc.collect()  # unreferenced browser futures report now, to the quiet handler
     for warning in response.warnings:
         print(f"warning: {warning}", file=sys.stderr)
     if response.status is RequestStatus.COMPLETED:
@@ -204,7 +231,21 @@ def _ask(
     return EXIT_ERROR
 
 
+async def _ask_quietly(
+    service: SessionService, session_id: str, prompt: str, context: ProjectContext | None
+):
+    """`service.ask` with the browser runner's handler: an error Playwright leaves behind after
+    the browser went away is not printed after the result (harness/browser/runner.py)."""
+    from harness.browser.runner import quiet_handler
+
+    asyncio.get_running_loop().set_exception_handler(quiet_handler)
+    return await service.ask(session_id, prompt, context)
+
+
 def _history(service: SessionService, session_id: str) -> int:
+    session = service.require_session(session_id)
+    if not service.provider_for(session).synthetic_content:
+        return _history_without_content(service, session)
     entries = service.history(session_id)
     if not entries:
         print("No messages.")
@@ -212,6 +253,30 @@ def _history(service: SessionService, session_id: str) -> int:
     for entry in entries:
         content = entry.content if entry.content is not None else "(content not stored)"
         print(f"[{entry.request_status}] {entry.role}: {content}")
+    return EXIT_OK
+
+
+def _history_without_content(service: SessionService, session: Session) -> int:
+    """A provider with real content stores none (D11): the remote conversation and, per
+    request, its state and time."""
+    print(f"session {session.session_id} ({session.provider}, {session.status})")
+    print(f"remote conversation: {session.remote_ref or '(none yet)'}")
+    requests = service.requests(session)
+    if not requests:
+        print("No requests.")
+    for request_id, status, started_at in requests:
+        print(f"[{status}] {request_id} {started_at}")
+    return EXIT_OK
+
+
+def _copilot_login(settings: Settings) -> int:
+    from harness.browser.login import manual_login  # Playwright loads only for this command
+    from harness.browser.runner import run_browser
+
+    print("Sign in to Copilot in the Edge window; it closes by itself when Copilot is ready.",
+          file=sys.stderr)
+    run_browser(manual_login(settings))
+    print("Copilot is ready in the dedicated profile.")
     return EXIT_OK
 
 
@@ -234,12 +299,14 @@ def _memory(args: argparse.Namespace) -> int:
     # They still refuse a data directory inside the vault, like `ask --project`, so that
     # such a configuration is caught by any memory command, before it can be used to write.
     memory = load_memory_settings(os.environ)
-    ensure_data_dir_outside_vault(Settings.from_env(os.environ).data_dir, memory.vault_root)
+    settings = Settings.from_env(os.environ)
+    ensure_data_dir_outside_vault(settings.data_dir, memory.vault_root)
     if args.memory_command == "search":
         return _search(memory.vault_root, terms, args.project, args.limit)
     if args.memory_command == "context":
         context = build_context(memory.vault_root, args.project, memory.context_max_bytes)
-        print(context.text)
+        # What `ask --project` sends before the question: the answer notice and the block.
+        print(with_notice(settings.answer_notice, context.text))
         _context_summary(context)
         return EXIT_OK
     return _maintain(memory.vault_root)

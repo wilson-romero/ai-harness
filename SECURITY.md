@@ -54,6 +54,7 @@ Se garantiza:
 - El código, o cualquier parte del hash, solo aparece dentro de la pregunta interactiva, junto al contenido. El mensaje de espera (código 3) y `skill status` muestran el identificador de la aprobación, su estado y su caducidad.
 - No se aprueba con stdin redirigido, con el fin de la entrada, con Enter, con una opción de la CLI ni con una variable de entorno; ningún texto de un modelo, nota o fichero aprueba.
 - Una aprobación está ligada a una propuesta, caduca (una respuesta después de la caducidad no la concede) y se usa una vez. Un efecto interrumpido se reconcilia antes de seguir y nunca se aplica dos veces.
+- En la conversación (`chat`, desde el 2026-11-25) el aviso es el mismo y se contesta en la misma terminal. Una línea escrita en el indicador normal es una pregunta o un comando, nunca una aprobación, aunque sea el código; no hay comando `/approve`, y Ctrl+C en el aviso lo deja sin decidir. Lo prueban `tests/unit/test_shell_skills.py` (con su control negativo) y la terminal real se cubre con la demo manual: no hay pseudoterminal portable para probarla en Windows.
 
 **No** se garantiza que haya una persona delante. Un proceso que corre con tu misma cuenta y maneja una pseudoterminal puede leer la propuesta y escribir el código: puede hacerse pasar por ti. Si alguien o algo controla tu cuenta, las aprobaciones no lo detienen. Decidido el 2026-11-24: se acepta este límite para el MVP, también para el efecto que escribe en el vault; un canal más fuerte (un diálogo del sistema operativo, un segundo dispositivo) se abriría con un change propio.
 
@@ -80,16 +81,19 @@ Lo que el harness garantiza con un servidor MCP:
 - El servidor recibe solo las variables de entorno nombradas en la lista y las básicas para arrancar un proceso.
 - El servidor recibe solo los argumentos declarados.
 - Toda herramienta que escribe se deniega en este corte.
-- El harness no tiene ninguna superficie de entrada: no abre puertos ni sockets de escucha, y solo habla con sus servidores por los tubos que él mismo crea. Lo comprueban dos tests:
-  - uno con un audit hook sobre la creación de cada socket (`socket.__new__`) y cada `socket.bind`, en el proceso del harness y en su proceso de sesión, durante un `mcp call`;
+- El harness no tiene ninguna superficie de entrada: no abre ningún socket que acepte conexiones de otros, y solo habla con sus servidores por los tubos que él mismo crea. Lo que sí pasa en Windows (revisado el 2026-11-25): al arrancar, el bucle de eventos de la biblioteca estándar crea su par de sockets interno con la emulación de `socketpair` de Python, que escucha un instante en `127.0.0.1` con un puerto efímero, acepta una sola conexión, comprueba que es la suya (las direcciones de los dos extremos) y cierra esa escucha antes de devolver el par. En macOS y Linux ese par es un `socketpair` nativo, sin puerto. Lo comprueban estos tests:
+  - un audit hook sobre la creación de cada socket (`socket.__new__`) y cada `socket.bind`, en el proceso del harness y en su proceso de sesión, durante un `mcp call`. Solo acepta los sockets cuya pila de llamadas es la del bucle (`_make_self_pipe` de asyncio llamando a `socketpair` o a `_fallback_socketpair` de `socket.py`); la dirección sola no basta: la misma emulación llamada desde otro sitio cuenta como socket ajeno. Corre también con la emulación forzada en macOS, que reproduce la condición de Windows;
+  - controles que el oráculo tiene que señalar: un socket atado a `127.0.0.1:0` que escucha, la emulación llamada fuera del bucle y, donde el sistema lo permite, un `listen()` sin `bind` (Windows lo rechaza);
   - uno estructural sobre `harness/mcp/`.
+
+  Lo que no prueban: sockets creados por código nativo que no pase por el módulo `socket` de Python (ninguna dependencia del harness lo hace hoy, pero el hook no lo vería), ni lo que hagan los servidores MCP, que son otros procesos. Durante ese instante de escucha en Windows otro proceso local podría conectarse antes que el bucle; la biblioteca estándar lo detecta al comparar direcciones y falla, así que el comando termina con error y esa conexión nunca llega al harness.
 
   La autorización de clientes (SEC-09) llegará con el servidor MCP propio, en un corte posterior. Hoy no hay ningún cliente que autorizar.
 - Lo que devuelve un servidor (resultados, descripciones, nombres, errores) se trata como datos no confiables:
   - se mide antes de leerlo (también su stderr: se guarda 1 MiB por sesión y pasado 64 MiB se detiene el servidor);
   - nunca se interpreta: el harness no evalúa ningún patrón, formato ni esquema que mande el servidor, y el SDK no valida resultados en el proceso del harness;
   - se sanea y se redacta antes de imprimirlo o auditarlo;
-  - nunca se guarda, salvo el stderr del servidor, que se guarda tal cual, **sin sanear ni redactar**, en `HARNESS_DATA_DIR/logs/mcp/` (legible solo por su dueño en macOS y Linux; en Windows no se fijan ACL).
+  - sus resultados, descripciones y errores nunca se guardan. Lo único del servidor que se guarda es su stderr, en `HARNESS_DATA_DIR/logs/mcp/` (como mucho 1 MiB escrito, 65 536 líneas y 4 MiB redactados por sesión), línea a línea y con las credenciales de formato conocido ya sustituidas por `[REDACTED:<tipo>]`, aunque un token llegue partido en varias lecturas (revisado el 2026-11-25). Una línea de más de 16 KiB se descarta entera, con una marca: una credencial en ella no se escribe, y el resto de esa línea tampoco. Una clave PEM se sustituye por una marca y sus líneas se descartan hasta la línea END, como mucho 32 KiB; después una marca lo dice y el log sigue en la línea siguiente. Pasado el tope o un presupuesto no se escribe nada más, tampoco la línea a medias, y la última línea del log dice por qué; una ráfaga de líneas vacías termina así el log de la sesión. Un fallo del registro no corta la sesión ni escribe nada sin redactar. Lo que no cubre: una credencial de formato desconocido, una clave de más de 32 KiB, una credencial cuyo comienzo se tragó otra (el resto de un JWT tras una clave de Anthropic o de Slack), una cadena hecha a mano de más de cuatro credenciales pegadas (las primeras) y, si el proceso de sesión muere sin cerrar el log, su última línea sin final. El resto del texto se guarda como lo escribió el servidor, sin sanear caracteres de control.
 
 Lo que **no** garantiza:
 
@@ -101,6 +105,20 @@ Lo que **no** garantiza:
 ## Matriz SEC y deuda conocida
 
 Qué propiedad de seguridad (SEC-01..SEC-15) prueba qué test, con su control negativo y sus límites, está en [`docs/security/sec-matrix.md`](docs/security/sec-matrix.md); `scripts/verify.sh` comprueba que lo que cita existe. Lo que no se hace o no se prueba, con su decisión, está en [`docs/security/known-debt.md`](docs/security/known-debt.md).
+
+## Perfil dedicado de Edge (Copilot Web)
+
+Estado (2026-11-27): el proveedor de Copilot Web está en `develop` (no en `main` ni en la versión 0.2.1), probado contra la página real solo en macOS. En Windows, los tests que lanzan Edge no se han ejecutado (NOT RUN).
+
+El harness lanza Edge con su sandbox activado y sin las opciones de Playwright que solo apagan protecciones de fondo (bloqueo de ventanas emergentes, actualización de componentes y de listas de protección). Coste medido (macOS, Edge 158): con la red en segundo plano activa, Edge tarda unos 10 s en cerrarse en cada pregunta con `ask` (en una conversación de `main.py chat`, una vez al salir), frente a 0,1 s con `--disable-background-networking`. Volver a poner esa opción ahorra ese tiempo, pero Edge deja de actualizar en segundo plano sus listas de protección. Lo decide Wilson. Dos opciones predeterminadas de Playwright se mantienen por decisión de Wilson (2026-11-25), para conservar la sesión iniciada: `--password-store=basic` y `--use-mock-keychain`. En macOS hacen que las cookies del perfil dedicado, y con ellas la sesión de Copilot, se cifren con una clave fija en vez de con el llavero del sistema. Consecuencia: **quien pueda leer el directorio del perfil puede descifrar las cookies de sesión y usar la sesión**. Por eso:
+
+- Mantén `HARNESS_DATA_DIR` (el perfil está en `HARNESS_DATA_DIR/edge-profile`) en un disco local, legible solo por tu usuario, y fuera de copias de seguridad compartidas y de carpetas sincronizadas.
+- El harness crea el directorio del perfil con permisos solo para su dueño (0700) y estrecha a 0700 uno suyo que ya existiera. Eso no protege de otro proceso que corra con tu mismo usuario.
+- En Windows no aplica la clave fija: el cifrado usa DPAPI, y el directorio hereda las ACL de su carpeta padre.
+
+**Qué queda en disco (precisión del 2026-11-26).** La base de datos del harness no guarda preguntas ni respuestas de Copilot, y sus logs tampoco. **El perfil dedicado es un perfil de navegador**: Edge guarda en él su caché, IndexedDB, almacenamiento local, historial y cookies, y la página de Copilot puede dejar ahí el texto de las conversaciones. El harness no lo lee ni lo borra. Protege la carpeta del perfil como protegerías el perfil de tu navegador, y bórrala entera (con Edge cerrado) si quieres quitar lo que contiene; después hará falta `copilot login` otra vez.
+
+La decisión se puede revisar cuando la sesión caduque y haya que iniciar sesión de nuevo de todas formas.
 
 ## Si algo se filtra
 

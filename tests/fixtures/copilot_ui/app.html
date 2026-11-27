@@ -1,0 +1,215 @@
+<!doctype html>
+<!--
+  Synthetic chat page for automated tests. It imitates nothing real: invented ids, invented
+  labels, invented canary strings. Behaviour is chosen with query parameters:
+    early=done_control  the done control appears halfway through the reply
+    pause_ms=N          the reply stops changing for N ms halfway through
+    never_finish=1      the reply stops halfway and never ends
+    forget=1            an existing conversation cannot be reopened
+    chunk_ms=N          delay between reply chunks (default 40)
+    id_delay_ms=N       the conversation id reaches the address N ms after the reply ends,
+                        as measured on the real page (default: as soon as the server answers)
+    id_never=1          the id never reaches the address
+    start_ms=N          the reply starts N ms after the server answers
+    ready_ms=N          the composer appears N ms after the page loads
+    chips=1             once the reply ends, a toolbar of follow-up suggestion buttons
+                        appears inside the turn, after the reply (as on the real page)
+    restore=1           the new-chat address goes to the last conversation (server redirect)
+    keepurl=1           a conversation that no longer exists shows an empty chat but keeps
+                        its id in the address; the next send opens another conversation
+    slowhist=1          an existing conversation's turns arrive 3.5 s after the page loads,
+                        inserted above anything already shown
+    deaf=1              the send button does nothing: the prompt stays in the editor
+    maxlength=N         the editor takes at most N characters
+    window=N            a reopened conversation shows only its last N questions and answers,
+                        as a virtualized list does
+    bounce=1            the server receives the prompt, the page shows an error notice as a
+                        turn and keeps the prompt in the editor (no user turn, never emptied)
+  A reply the server sends with `html` (a prompt with ZQX-RICH-<name>) streams as text, then
+  is replaced by that HTML, as a page renders the Markdown it received.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Synthetic chat ZZ-CANARY-PAGE-TITLE-6120</title>
+<style>
+  body { font-family: sans-serif; display: flex; gap: 1rem; }
+  nav { width: 12rem; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .turn { border: 1px solid #ccc; margin: .25rem 0; padding: .25rem; white-space: pre-wrap; }
+  #synthetic-composer { width: 30rem; height: 4rem; }
+</style>
+</head>
+<body>
+<nav id="synthetic-history">
+  <div id="synthetic-account">ZZ-CANARY-ACCOUNT-3391</div>
+  <a href="#" class="title">ZZ-CANARY-TITLE-7781 quarterly plan</a>
+  <a href="#" class="title">ZZ-CANARY-TITLE-7782 vendor review</a>
+</nav>
+<main>
+  <button id="synthetic-new-chat" type="button">New synthetic chat</button>
+  <section id="synthetic-thread"></section>
+  <textarea id="synthetic-composer" aria-label="Synthetic message box"></textarea>
+  <button id="synthetic-send" type="button">Send synthetic message</button>
+  <button id="synthetic-stop" type="button" hidden>Stop synthetic reply</button>
+</main>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const chunkMs = Number(params.get("chunk_ms") || 40);
+  const pauseMs = Number(params.get("pause_ms") || 0);
+  const early = params.get("early") || "";
+  const neverFinish = params.get("never_finish") === "1";
+  const forget = params.get("forget") === "1";
+  const idDelay = params.has("id_delay_ms") ? Number(params.get("id_delay_ms")) : null;
+  const idNever = params.get("id_never") === "1";
+  const startMs = Number(params.get("start_ms") || 0);
+  const readyMs = Number(params.get("ready_ms") || 0);
+  const chips = params.get("chips") === "1";
+  const keepUrl = params.get("keepurl") === "1";
+  const slowHist = params.get("slowhist") === "1";
+  const deaf = params.get("deaf") === "1";
+  const bounce = params.get("bounce") === "1";
+  const shownPairs = Number(params.get("window") || 0);
+  const thread = document.getElementById("synthetic-thread");
+  const composer = document.getElementById("synthetic-composer");
+  const send = document.getElementById("synthetic-send");
+  const stop = document.getElementById("synthetic-stop");
+  let conversation = null;
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  if (params.has("maxlength")) composer.maxLength = Number(params.get("maxlength"));
+
+  function addTurn(role, text) {
+    const turn = document.createElement("div");
+    turn.className = "turn " + role;
+    turn.textContent = text;
+    thread.appendChild(turn);
+    return turn;
+  }
+  function renderRich(turn, html) {
+    const rich = document.createElement("div");
+    rich.className = "synthetic-rich";
+    rich.style.whiteSpace = "normal";
+    rich.innerHTML = html;  // a test fixture from the local server, never page input
+    turn.appendChild(rich);
+  }
+  function addDone(turn) {
+    if (turn.querySelector(".synthetic-copy")) return;
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "synthetic-copy";
+    copy.textContent = "Copy";
+    turn.appendChild(copy);
+  }
+  function showConversation(id) {
+    conversation = id;
+    history.replaceState(null, "", "/c/" + id + location.search);
+  }
+  function newChat() {
+    conversation = null;
+    thread.replaceChildren();
+    history.replaceState(null, "", "/app" + location.search);
+  }
+  async function load() {
+    const match = location.pathname.match(/^\/c\/([^/]+)$/);
+    if (!match) return;
+    const response = forget ? null : await fetch("/api/conversation/" + match[1]);
+    if (!response || !response.ok) {
+      if (keepUrl) { conversation = null; thread.replaceChildren(); return; }  // the id stays
+      newChat();
+      return;
+    }
+    const data = await response.json();
+    conversation = match[1];
+    if (slowHist) await sleep(3500);
+    const first = thread.firstChild;
+    for (const turn of shownPairs ? data.turns.slice(-2 * shownPairs) : data.turns) {
+      const element = addTurn(turn.role, turn.html ? "" : turn.text);
+      if (turn.html) renderRich(element, turn.html);
+      if (turn.role === "assistant") addDone(element);
+      if (first) thread.insertBefore(element, first);  // history goes above what is shown
+    }
+  }
+  async function submit() {
+    const prompt = composer.value;
+    if (!prompt) return;
+    if (bounce) {
+      await fetch("/api/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversation, prompt }),
+      });
+      addTurn("assistant notice", "ZZ-ERROR-NOTICE");
+      return;
+    }
+    composer.value = "";
+    send.disabled = true;
+    addTurn("user", prompt);
+    send.hidden = true;
+    stop.hidden = false;
+    const response = await fetch("/api/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conversation, prompt }),
+    });
+    const data = await response.json();
+    conversation = data.conversation;
+    if (idDelay === null && !idNever) showConversation(data.conversation);
+    if (startMs) await sleep(startMs);
+    const turn = addTurn("assistant", "");
+    // A screen-reader label, visually hidden, before the reply (as real chat pages have).
+    const label = document.createElement("h6");
+    label.className = "sr-only";
+    label.textContent = "ZZ-SR-LABEL said:";
+    const body = document.createTextNode("");
+    turn.append(label, body);
+    turn.setAttribute("aria-busy", "true");
+    const reply = data.reply;
+    const half = Math.floor(reply.length / 2);
+    const step = Math.max(5, Math.ceil(reply.length / 60));
+    for (let i = 0; i < reply.length; i += step) {
+      if (i >= half && i - step < half) {
+        if (early === "done_control") addDone(turn);
+        if (neverFinish) return;
+        if (pauseMs) await sleep(pauseMs);
+      }
+      body.textContent = reply.slice(0, i + step);
+      await sleep(chunkMs);
+    }
+    if (data.html) { body.textContent = ""; renderRich(turn, data.html); }
+    turn.setAttribute("aria-busy", "false");
+    addDone(turn);
+    if (chips) {
+      const bar = document.createElement("div");
+      bar.setAttribute("role", "toolbar");
+      for (const n of [1, 2, 3]) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "synthetic-suggestion";
+        chip.textContent = "ZZ-CHIP-" + n + " follow-up suggestion";
+        bar.appendChild(chip);
+      }
+      turn.appendChild(bar);
+    }
+    stop.hidden = true;
+    send.hidden = false;
+    if (idDelay !== null && !idNever) {
+      const id = data.conversation;
+      setTimeout(() => showConversation(id), idDelay);
+    }
+  }
+
+  // Like many chat pages, sending is possible only once something is typed.
+  send.disabled = true;
+  composer.addEventListener("input", () => { send.disabled = !composer.value; });
+  send.addEventListener("click", () => { if (!deaf) submit(); });
+  document.getElementById("synthetic-new-chat").addEventListener("click", newChat);
+  if (readyMs) {
+    composer.hidden = true;
+    setTimeout(() => { composer.hidden = false; }, readyMs);
+  }
+  load();
+})();
+</script>
+</body>
+</html>

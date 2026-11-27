@@ -6,7 +6,13 @@ import pytest
 
 from harness.core.contracts import RequestStatus, Session, SessionStatus
 from harness.storage import repositories as repo
-from harness.storage.database import connect, migrate, open_database, transaction
+from harness.storage.database import (
+    MIGRATIONS_DIR,
+    connect,
+    migrate,
+    open_database,
+    transaction,
+)
 
 
 def _new_session(conn, name="Synthetic") -> Session:
@@ -30,7 +36,8 @@ def test_first_run_creates_the_schema(conn):
     }
     session_core = {"sessions", "requests", "messages", "audit_events", "schema_migrations"}
     assert tables == session_core | {
-        "request_context", "skill_runs", "skill_steps", "approvals", "tool_calls"
+        "request_context", "skill_runs", "skill_steps", "approvals", "tool_calls",
+        "effect_sources",
     }
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
@@ -45,7 +52,7 @@ def test_migrating_twice_changes_nothing(data_dir):
     assert migrate(second) == []
     after = second.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
     assert [tuple(r) for r in after] == [tuple(r) for r in before]
-    assert [r["version"] for r in after] == [1, 2, 3, 4, 5]
+    assert [r["version"] for r in after] == [1, 2, 3, 4, 5, 6, 7]
     assert repo.get_session(second, session.session_id) == session
     second.close()
 
@@ -205,3 +212,48 @@ def test_skill_run_needs_an_existing_session(conn):
     with pytest.raises(sqlite3.IntegrityError):
         with transaction(conn):
             _new_run(conn, Ghost)
+
+
+def test_a_remote_reference_belongs_to_one_session(conn):
+    """Review 2026-11-26 (SEC-02): binding a reference another session holds is refused
+    with a controlled error, and nothing changes."""
+    first, second = _new_session(conn, "A"), _new_session(conn, "B")
+    with transaction(conn):
+        assert repo.bind_remote_ref(conn, first.session_id, "conv-0001")
+    with pytest.raises(repo.RemoteRefTaken), transaction(conn):
+        repo.bind_remote_ref(conn, second.session_id, "conv-0001")
+    assert repo.get_session(conn, second.session_id).remote_ref is None
+    assert repo.get_session(conn, first.session_id).remote_ref == "conv-0001"
+    # Control: another reference binds as usual, and sessions with none do not conflict.
+    with transaction(conn):
+        assert repo.bind_remote_ref(conn, second.session_id, "conv-0002")
+    _new_session(conn, "C")
+    _new_session(conn, "D")
+
+
+def test_migration_007_unbinds_every_session_of_a_shared_reference(data_dir, tmp_path):
+    """Duplicates written before migration 007: nobody can tell whose context the remote
+    conversation holds, so every session that shares it is unbound (and audited); a
+    reference held by one session only is kept."""
+    up_to_6 = tmp_path / "migrations-006"
+    up_to_6.mkdir()
+    for path in sorted(MIGRATIONS_DIR.glob("00[1-6]_*.sql")):
+        (up_to_6 / path.name).write_text(path.read_text("utf-8"), "utf-8")
+    conn = connect(data_dir)
+    assert migrate(conn, up_to_6) == [1, 2, 3, 4, 5, 6]
+    a, b, c = _new_session(conn, "A"), _new_session(conn, "B"), _new_session(conn, "C")
+    with transaction(conn):
+        repo.bind_remote_ref(conn, a.session_id, "conv-shared")
+        repo.bind_remote_ref(conn, b.session_id, "conv-shared")  # allowed before 007
+        repo.bind_remote_ref(conn, c.session_id, "conv-own")
+    assert migrate(conn) == [7]
+    refs = {r["name"]: r["remote_ref"] for r in conn.execute("SELECT name, remote_ref FROM sessions")}
+    assert refs == {"A": None, "B": None, "C": "conv-own"}
+    audited = conn.execute(
+        "SELECT session_id, outcome FROM audit_events WHERE event_type = 'session.unbound'"
+    ).fetchall()
+    assert sorted(tuple(r) for r in audited) == sorted(
+        [(str(a.session_id), "duplicate_remote_ref"), (str(b.session_id), "duplicate_remote_ref")])
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE sessions SET remote_ref = 'conv-own' WHERE name = 'A'")
+    conn.close()

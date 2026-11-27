@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -16,14 +17,37 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+OPEN_RETRY_S = 5.0
+# Revised on 2026-11-26. A process killed while it holds the WAL database can keep its `-shm`
+# file mapped for a moment after it is reported dead (Windows). The next opener truncates
+# `-shm`, and SQLite before its fix of 2026-10-05 fails that with SQLITE_IOERR_TRUNCATE
+# ("disk I/O error"; SQLITE_IOERR_SHMOPEN in older versions). That error, at open only, is
+# transient: it is retried for a bounded time. Any other error is raised at once.
+_TRANSIENT_OPEN_ERRORS = {"SQLITE_IOERR_TRUNCATE", "SQLITE_IOERR_SHMOPEN"}
+
+
 def connect(data_dir: Path) -> sqlite3.Connection:
     """Open the local database. Transactions are explicit: see `transaction`."""
     data_dir.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(data_dir / DATABASE_NAME, autocommit=True, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    return conn
+    deadline = time.monotonic() + OPEN_RETRY_S
+    pause = 0.02
+    while True:
+        conn = sqlite3.connect(data_dir / DATABASE_NAME, autocommit=True, timeout=5.0)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("PRAGMA journal_mode = WAL")
+            return conn
+        except sqlite3.OperationalError as exc:
+            conn.close()
+            transient = getattr(exc, "sqlite_errorname", None) in _TRANSIENT_OPEN_ERRORS
+            if not transient or time.monotonic() >= deadline:
+                raise
+        except BaseException:
+            conn.close()
+            raise
+        time.sleep(pause)
+        pause = min(pause * 2, 0.25)
 
 
 @contextmanager

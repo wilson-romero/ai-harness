@@ -293,13 +293,50 @@ def test_changing_a_template_changes_the_hash(root):
     assert after.sha256 != before.sha256 and after.version == before.version
 
 
-def test_crlf_line_ends_and_bom_give_the_same_hash(root):
-    for path in (root / "demo-echo").rglob("*"):
+def _rewrite(folder: Path, change) -> None:
+    """Apply `change` to the text of every file, given with LF line ends whatever the checkout
+    left on disk (revised on 2026-11-26: on Windows `core.autocrlf` checks the fixtures out with
+    CRLF, and a change written for LF text turned them into CR CR LF or CR CR)."""
+    for path in folder.rglob("*"):
         if path.is_file():
-            text = path.read_bytes().decode("utf-8")
-            path.write_bytes(b"\xef\xbb\xbf" + text.replace("\n", "\r\n").encode("utf-8"))
-    assert b"\r\n" in (root / "demo-echo" / "SKILL.md").read_bytes()
+            text = path.read_bytes().decode("utf-8").replace("\r\n", "\n")
+            path.write_bytes(change(text).encode("utf-8"))
+
+
+def _check_out(folder: Path, checkout: str) -> None:
+    """The copy as git leaves it: `lf`, or `autocrlf` as a Windows checkout writes it."""
+    if checkout == "autocrlf":
+        _rewrite(folder, lambda text: text.replace("\n", "\r\n"))
+
+
+CHECKOUTS = pytest.mark.parametrize("checkout", ["lf", "autocrlf"])
+
+
+@CHECKOUTS
+def test_crlf_line_ends_and_bom_give_the_same_hash(root, checkout):
+    folder = root / "demo-echo"
+    _check_out(folder, checkout)
+    _rewrite(folder, lambda text: "\ufeff" + text.replace("\n", "\r\n"))
+    assert b"\r\r" not in (folder / "SKILL.md").read_bytes()
+    assert b"\r\n" in (folder / "SKILL.md").read_bytes()
     assert load_skill(root, "demo-echo", EFFECTS).sha256 == DEMO_ECHO_SHA256
+
+
+@CHECKOUTS
+def test_a_lone_carriage_return_is_a_line_end(root, checkout):
+    """D4 (revised on 2026-11-25): `\\r\\n` first, then any `\\r` left, become `\\n`. A file
+    saved with old Mac line ends gives the same hash; CR CR LF is two line ends."""
+    folder = root / "demo-echo"
+    _check_out(folder, checkout)
+    _rewrite(folder, lambda text: text.replace("\n", "\r"))
+    assert b"\n" not in (folder / "SKILL.md").read_bytes()
+    assert load_skill(root, "demo-echo", EFFECTS).sha256 == DEMO_ECHO_SHA256
+    template = folder / "templates" / "draft.md"
+    lines = template.read_bytes().decode("utf-8").split("\r")
+    template.write_bytes("\r\r\n".join(lines).encode("utf-8"))
+    loaded = load_skill(root, "demo-echo", EFFECTS)
+    assert loaded.sha256 != DEMO_ECHO_SHA256
+    assert loaded.templates["templates/draft.md"] == "\n\n".join(lines)
 
 
 # -- 2.5 limits on disk --------------------------------------------------------------------------
