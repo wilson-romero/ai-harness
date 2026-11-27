@@ -62,6 +62,10 @@
 - [x] 3.2 Las pruebas marcadas `edge` (el proveedor de Copilot Web contra páginas sintéticas locales), una vez, con `caffeinate -i`, porque pasan por la aprobación del motor.
   - Oráculo: código 0 de `uv run pytest -m edge`.
   - Recibo (2026-11-27, macOS arm64, sobre `38f1d31`): código 0, 153 passed y 1612 deselected, en 1391,40 s.
+  - Recibo tras la revisión y el merge de `develop` (`57c413d`, sin conflictos), sobre `100cda0`:
+    - `uv run pytest -m edge`: código 0, 155 passed en 1205,67 s;
+    - `uv run pytest -m "not edge and not copilot"`: código 0, 1644 passed en 286,03 s;
+    - `openspec validate --all --strict`: 21 de 21.
 
 ## 4. Documentación
 
