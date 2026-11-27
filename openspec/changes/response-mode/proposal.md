@@ -29,7 +29,6 @@ El dueño decidió el 2026-11-27: un comando de sesión `/mode auto|quick|deep`,
 - Adivinar selectores, nombres de opciones o el mapeo de opciones a modos: vienen solo de la medida; el mapeo lo elige una persona al medir.
 - Medir cuánto tarda una respuesta `deep` real (la sonda no envía): el plazo por defecto es una decisión justificada, no una medida.
 - Cambiar el modo de los pasos de Skill con plazo propio: un paso con `timeout_s` declarado lo conserva aunque la sesión esté en `deep` (límite escrito en el diseño).
-- Completar con Tab las palabras `auto|quick|deep` (otra rama cambia la tabla de completado).
 - Cambiar las banderas de arranque de Edge o su sandbox.
 
 ## Capabilities
@@ -44,7 +43,7 @@ Ninguna. Comprobado el 2026-11-27 con `grep -rn -i "modo\|mode\b\|HARNESS_REQUES
 
 ## Impact
 
-- Código: `harness/core/contracts.py`, un módulo nuevo `harness/core/response_mode.py`, `harness/core/service.py`, `harness/config.py`, `harness/providers/base.py`, `harness/providers/mock.py`, `harness/providers/copilot_ui.py`, `harness/providers/copilot_web.py`, `harness/storage/repositories.py`, `harness/storage/migrations/008_response_mode.sql`, `harness/cli.py`, `harness/shell/app.py`, `harness/shell/conversation.py`, `harness/shell/parser.py` (una entrada de la tabla), `harness/shell/terminal.py` (un campo de `PanelState`), `harness/shell/tui.py` (una línea del panel), `scripts/copilot_probe.py`.
+- Código: `harness/core/contracts.py`, un módulo nuevo `harness/core/response_mode.py`, `harness/core/service.py`, `harness/config.py`, `harness/providers/base.py`, `harness/providers/mock.py`, `harness/providers/copilot_ui.py`, `harness/providers/copilot_web.py`, `harness/storage/repositories.py`, `harness/storage/migrations/008_response_mode.sql`, `harness/cli.py`, `harness/shell/app.py`, `harness/shell/conversation.py`, `harness/shell/commands.py` (una entrada de la tabla única de comandos), `harness/shell/completion.py` (los valores de `/mode`), `harness/shell/terminal.py` (un campo de `PanelState`), `harness/shell/tui.py` (una línea del panel), `scripts/copilot_probe.py`.
 - Tests: página sintética y servidor (`tests/copilot_app.py`, que registra en qué modo estaba la página al recibir cada prompt), una medida sintética del control, pruebas del proveedor, del servicio, de la CLI, de la conversación, de la migración y de la sonda.
 - Documentación: `README.md` (comando, opción y variable), `docs/runbook/copilot.md` (cómo medir el control), el plan de cortes (Corte 11).
 - Sin dependencias nuevas. Migración 008.

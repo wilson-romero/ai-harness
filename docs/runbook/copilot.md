@@ -182,6 +182,8 @@ Qué significa cada resultado:
 | `the response mode … could not be confirmed on the page` | El selector no mostró el modo pedido. No se escribió ni se envió nada. Repite; si persiste, vuelve a medir el selector (`response-mode`, abajo) o usa `/mode auto`. |
 | `Copilot cannot set the response mode … yet` | Falta medir el selector. No se registró nada. `copilot_probe.py response-mode`. |
 | `the page changed its conversation while the response mode was set` | Elegir el modo cambió de conversación. No se escribió nada y la sesión conserva la suya. |
+| `the list of response modes stayed open` | La lista de modos no se cerró. No se escribió nada, en ningún modo. Ciérrala en Edge y repite; si persiste, vuelve a medir el selector. |
+| `… resolves to another control of the page` | El selector medido apunta al editor o a un botón de enviar, parar o chat nuevo. No se hizo clic. En `auto` solo avisa; en `quick`/`deep` falla. Vuelve a medir el selector. |
 | `did not finish … the harness stopped itself` (código 124) | Último recurso: algo bloqueó el proceso más allá del plazo y de su limpieza. El comando siguiente deja esa pregunta en `uncertain`; nada se reenvía. |
 
 `history` de una sesión de Copilot muestra el identificador de su conversación y, por solicitud, su estado y su hora (UTC), **sin texto**: la base de datos del harness no guarda preguntas ni respuestas de Copilot. El perfil dedicado es un perfil de navegador: Edge guarda en él caché, IndexedDB, historial y cookies, y ahí puede quedar texto de las conversaciones (ver `SECURITY.md`, «Qué queda en disco»).
@@ -210,7 +212,7 @@ uv run python scripts/copilot_probe.py response-mode
 
 Qué guarda (en `HARNESS_DATA_DIR/copilot/`, nunca en el repo): el localizador del botón que abre el selector (`data-testid`, o rol y nombre accesible), de cada opción su rol y su nombre accesible (cortado a 60 caracteres), qué opción es cada modo, cómo se lee el modo actual, y si elegir un modo cambió la dirección o los turnos (debe ser «no»). Ningún otro texto de la página, ninguna cuenta.
 
-El resumen dice `response mode: confirmed auto, quick, deep` (o los que existan) y `left as found: yes`. Si dice `not confirmed with any locator of the opener`, escribe a mano en `candidates.json` una entrada `response_mode_trigger` con el localizador del botón (codegen, anexo) y repite. Si dice `choosing a mode changed the conversation`, no se escribe nada: el harness no puede usar ese selector sin cambiar de conversación.
+El resumen dice `response mode: confirmed auto, quick, deep` (o los que existan) y `left as found: yes`. Si dice `not confirmed with any locator of the opener`, escribe a mano en `candidates.json` una entrada `response_mode_trigger` con el localizador del botón (codegen, anexo) y repite. Si dice `choosing a mode changed the conversation`, no se escribe nada: el harness no puede usar ese selector sin cambiar de conversación. Tampoco se escribe nada si la página no quedó en el modo en que estaba (`left as found: no`), si el modo de partida no es uno de los que mapeaste (`the starting mode is not among the mapped ones`) o si aún no hay `ui.json` (`measure first`): sin los turnos medidos no se puede comprobar la conversación. Una forma de leer el modo solo vale si lee otra cosa antes de elegir cada modo.
 
 Después, en la conversación: `/mode deep` y una pregunta. En `history`, la solicitud dice `mode deep` (o `mode quick (asked deep)` si la página cambió de modo sola).
 

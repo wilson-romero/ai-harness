@@ -61,11 +61,23 @@ Con un modo `quick` o `deep`, Copilot Web SHALL poner el modo con el control med
 - **THEN** la solicitud termina en `failed` antes de escribir nada y la página no recibe ningún prompt
 
 ### Requirement: Poner el modo no cambia de conversación
-Poner el modo SHALL dejar la página en la misma conversación remota de la sesión, o en una conversación nueva vacía si la sesión aún no tiene ninguna. Si al poner el modo la página pasa a otra conversación o aparece un turno, la solicitud SHALL terminar en `failed` sin escribir nada.
+Poner el modo SHALL dejar la página en la misma conversación remota de la sesión, o en una conversación nueva vacía si la sesión aún no tiene ninguna. Si al poner el modo la página pasa a otra conversación o aparece un turno de usuario después del último que había, la solicitud SHALL terminar en `failed` sin escribir nada. Los turnos que aparecen encima de los que había (un historial que llega tarde) SHALL NOT impedir la pregunta.
 
 #### Scenario: Elegir el modo abre otra conversación
 - **WHEN** la sesión ya tiene una conversación remota y al elegir la opción de modo la página abre una conversación nueva
 - **THEN** la solicitud termina en `failed` sin escribir nada, la página no recibe ningún prompt y la sesión conserva su referencia remota
+
+#### Scenario: Un historial que llega mientras se elige
+- **WHEN** al elegir el modo la página inserta turnos antiguos encima de la conversación
+- **THEN** la pregunta se escribe y termina en `completed`, en `deep` y en `auto`
+
+#### Scenario: La lista de modos no se cierra
+- **WHEN** tras elegir el modo la lista de modos sigue abierta
+- **THEN** la solicitud termina en `failed` sin escribir nada, en cualquier modo
+
+#### Scenario: El selector medido resulta ser otro control
+- **WHEN** un localizador medido del selector se resuelve en la página en el botón de conversación nueva, el de enviar, el de parar o el editor
+- **THEN** no se hace clic en él; en `quick` o `deep` la solicitud termina en `failed` sin escribir nada, y en `auto` se avisa y la página queda como está
 
 ### Requirement: El registro dice el modo que quedó
 Cada solicitud SHALL registrar el modo pedido y el modo confirmado en la página. Si después de la respuesta la página está en otro modo, el registro SHALL guardar el modo releído y la respuesta SHALL llevar un aviso. Si no se puede releer, SHALL conservarse el modo confirmado antes del envío, con un aviso, sin cambiar el estado de la solicitud.
@@ -102,6 +114,14 @@ La sonda SHALL tener un paso `response-mode` que, con la persona, registra cómo
 #### Scenario: Medida en la página sintética
 - **WHEN** el paso `response-mode` se ejecuta contra la página sintética con el selector de modo
 - **THEN** `ui.json` gana el control con sus opciones y su forma de lectura, la página no recibe ningún prompt y ningún canario de la página aparece en lo guardado
+
+#### Scenario: Una lectura que no distingue modos
+- **WHEN** la forma de leer el modo da el mismo modo antes y después de elegirlo
+- **THEN** esa forma no confirma el modo y, si ninguna lo hace, no se escribe nada en `ui.json`
+
+#### Scenario: La página no queda como estaba o cambió de conversación
+- **WHEN** el modo de partida no es uno de los mapeados, la página no vuelve a él, o elegir cambia la dirección o los turnos
+- **THEN** la sonda no escribe nada en `ui.json` y su resultado queda incompleto
 
 #### Scenario: Sin control que medir
 - **WHEN** el paso `response-mode` se ejecuta contra una página sin selector de modo

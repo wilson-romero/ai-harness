@@ -61,6 +61,31 @@ Cada mutación se aplicó sobre el árbol de trabajo, se ejecutó solo la prueba
 - [x] 6.6 Sonda que acepta el primer localizador sin confirmar los modos → falla `test_a_selector_that_does_not_change_is_not_written`.
   - Recibo (2026-11-27, macOS arm64, Python 3.14.8): `if True:` en lugar de exigir todos los modos confirmados → `1 failed`, exit 1.
 
+## 6b. Revisión independiente del 2026-11-27 (sobre 1572b0a)
+
+Cada hallazgo, con su prueba vista en rojo antes del arreglo y una mutación que deshace el arreglo y la vuelve a poner en rojo (bytes restaurados). Rojo previo (2026-11-27, macOS arm64, Python 3.14.8): pruebas unitarias nuevas → `11 failed, 31 passed`; de navegador → `11 failed, 5 passed`. Las 5 que ya pasaban son controles y cobertura de ramas que ya funcionaban: un turno nuevo al elegir, la relectura que falla, URL y turnos cambiados en la sonda, «left as found: yes».
+
+- [x] R1 (MEDIA) Se compara como `guard`: la misma referencia y ningún turno de usuario después del último que había. Un historial que llega encima no bloquea, ni en `deep` ni en `auto`. Oráculo: `test_a_history_that_arrives_while_choosing_does_not_block` (2 casos, `mode_history`) y su control `test_a_new_turn_while_choosing_fails_before_typing` (`mode_append`).
+  - Recibo: volver a contar turnos → `2 failed`, exit 1.
+- [x] R2 (MEDIA-BAJA) `try/finally` cierra la lista en `read`/`select`, y `close` comprueba el cierre. Con la lista abierta antes de escribir, `failed` en cualquier modo. Oráculo: `test_a_list_that_stays_open_fails_before_typing` (2 casos, `mode_sticky`), `test_a_disabled_option_leaves_no_list_open_under_the_prompt` y `test_two_matching_options_leave_no_list_open`; el servidor recibe `list_open=false`.
+  - Recibo: sin la comprobación → `2 failed`; sin el `finally` → `2 failed`, exit 1.
+- [x] R3 (BAJA-MEDIA) En la sonda, una forma de leer confirma un modo solo si leía otra cosa justo antes de elegirlo. Oráculo: `test_a_reading_that_cannot_tell_modes_apart_is_not_written` (`mode_label`).
+  - Recibo: sin la condición → `1 failed`, exit 1.
+- [x] R4 (BAJA) En la página, antes de cualquier clic, ningún elemento visible del botón o de las opciones puede ser, contener o estar dentro del editor ni de los controles de enviar, parar o chat nuevo. Además, cada clic lo comprueba. Oráculo: `test_an_option_that_is_another_control_is_never_clicked` (`exact: false`, que pasa el esquema).
+  - Recibo: sin la comprobación → `1 failed`, exit 1.
+- [x] R5 (BAJA) El modo confirmado vive en el intento, empieza vacío en cada uno y se informa justo antes de `on_sent`. Oráculo: `test_a_retry_in_a_new_tab_does_not_keep_the_first_confirmation`.
+  - Recibo: informar al confirmar, como antes → `1 failed`, exit 1.
+- [x] R6 (BAJA) `HARNESS_REQUEST_TIMEOUT_S` y `HARNESS_DEEP_REQUEST_TIMEOUT_S` deben ser finitos y mayores que 0, y ningún número del entorno puede ser `nan`/`inf`. Oráculo: `test_a_deadline_is_a_finite_number_above_zero` (10 casos más el control).
+  - Recibo: sin la comprobación → `10 failed`, exit 1.
+- [x] R7 (BAJA) `ask --mode` guarda el modo y su auditoría solo después de las comprobaciones que rechazan antes de registrar. Oráculo: `test_ask_with_a_mode_keeps_nothing_when_the_question_is_refused` y su control `…_keeps_it_when_the_question_is_recorded`.
+  - Recibo: guardar antes → `1 failed`, exit 1.
+- [x] R8 (BAJA) La sonda no escribe sin `ui.json` previo, con un modo de partida no mapeado, si la página no quedó como estaba ni si cambió la URL o los turnos. Si ningún localizador confirma, intenta dejar la página como estaba. Oráculo: `test_an_unknown_starting_mode_is_not_written`, `test_without_a_measurement_the_turns_cannot_be_checked`, `test_a_selector_that_changes_the_conversation_is_not_written[address|turns]`, y «left as found: yes» en la medida buena.
+  - Recibo: sin la parada por el modo de partida → `1 failed`; sin la parada por falta de `ui.json` → `1 failed`, exit 1.
+- [x] R9 (documentación) Corregidos D2 (sin la promesa de «auto, page's choice», más las dos excepciones), D3, D4, D5, D7, D8, D9 (la tabla única y el completado) y D10, el spec (5 escenarios nuevos) y la propuesta. La regla de `test_browser_code_rules.py` comprueba el ámbito: las dos acciones del selector, solo dentro de `_ModeSelector`, y su docstring dice que la relectura ocurre tras la respuesta.
+  - Recibo: una tecla en `_Turn.apply_mode` → `1 failed`, exit 1.
+- [x] R10 Lotes, validaciones y comprobaciones tras los arreglos.
+  - Recibo (2026-11-27, macOS arm64, Python 3.14.8): `caffeinate -i uv run pytest -q -m "not edge and not copilot"` → `2050 passed, 190 deselected in 346.14s`, exit 0; `caffeinate -i uv run pytest -q -m edge` → `188 passed, 2052 deselected in 1608.93s`, exit 0, sin repeticiones; `openspec validate --all --strict` → `27 passed, 0 failed`; `check_public_safety.py` → PASS (471 ficheros), exit 0; `check_sec_matrix.py` → PASS (15 filas, 135 pruebas), exit 0. `origin/develop` (893694a) ya estaba en HEAD: no hizo falta merge.
+
 ## 7. Verificación
 
 - [x] 7.1 Lote sin navegador: `caffeinate -i uv run pytest -q -m "not edge and not copilot"`.
