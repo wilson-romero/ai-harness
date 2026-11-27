@@ -138,6 +138,9 @@ class ConversationDeps:
     effects: Mapping[str, Effect] | None = None
     engine_options: Mapping[str, object] | None = None  # extra SkillEngine options (tests)
     columns: Callable[[], int] = terminal_columns  # asked before each output
+    # The columns a reply's tables and code blocks are laid out in (reply-rendering D1); None:
+    # what `columns` leaves after the mark.
+    layout: Callable[[], int | None] = lambda: None
 
 
 def read_text_file(raw_path: str, max_bytes: int = MAX_FILE_BYTES) -> tuple[str, str]:
@@ -234,7 +237,8 @@ class Conversation:
             self._terminal.show("\n".join(plain_rows(rows)))
 
     def _foreign(self, text: str, *, markdown: bool = False) -> None:
-        rows, hidden = foreign_rows(text, self._deps.columns(), markdown=markdown)
+        rows, hidden = foreign_rows(text, self._deps.columns(), markdown=markdown,
+                                    layout=self._deps.layout())
         self._emit(rows)
         if hidden:
             self._say(f"[{hidden} more character(s) not shown]")
