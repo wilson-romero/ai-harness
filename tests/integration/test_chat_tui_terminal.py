@@ -278,3 +278,43 @@ def test_the_approval_buttons_at_a_real_terminal(data_dir, tmp_path):
     assert query(data_dir, "SELECT status FROM approvals") == [("consumed",)]
     detail = query(data_dir, "SELECT detail FROM audit_events WHERE event_type = 'approval.granted'")
     assert detail[0][0].endswith(";means=button")
+
+
+def test_short_commands_and_completion_at_a_real_terminal(data_dir, tmp_path):
+    """command-completion: the owner's two lines, typed short with Tab at the real program and
+    the Mock. Each Tab is waited for on the screen before the next key: completion never sends,
+    and what runs is shown in full (`running: ...`) before it runs."""
+    import shutil
+
+    vault = tmp_path / "vault"
+    shutil.copytree(REPO_ROOT / "tests" / "fixtures" / "vault-synthetic", vault)
+    responses = REPO_ROOT / "tests" / "fixtures" / "skill-inputs" / "respuestas-demo.json"
+    child = FullScreenChild(data_dir, "chat", HARNESS_VAULT_ROOT=str(vault),
+                            HARNESS_MOCK_RESPONSES=str(responses), HARNESS_MOCK_DELAY_MS="0")
+    try:
+        child.read_until(READY)
+        child.type("/new demo-a\t")
+        child.read_until("running: /new --project demo-alpha")  # the preview, before enter
+        assert query(data_dir, "SELECT COUNT(*) FROM sessions") == [(1,)]  # nothing ran
+        child.type("\r")
+        child.read_until("this pane shows")  # the new session's own pane
+        child.type("/sk\t")
+        child.read_until("architecture-memory")  # the list of skills under the input
+        child.type("arch\t")
+        child.type("tests/fixtures/skill-inputs/fuente-d\t")
+        child.read_until("fuente-decision.md")
+        child.read_until("running: /skill architecture-memory --file source=tests/fixtures/"
+                         "skill-inputs/fuente-decision.md")
+        child.type("\r")
+        child.read_until("Approval requested")
+        child.type("\x03")  # ctrl+c: the approval stays pending
+        child.read_until(READY)
+        child.type("\x11")
+        assert child.wait() == 0
+    finally:
+        child.kill()
+    assert _restored(child)
+    assert query(data_dir, "SELECT project_id FROM sessions ORDER BY rowid") == [
+        (None,), ("demo-alpha",)]
+    assert query(data_dir, "SELECT skill_name, status FROM skill_runs") == [
+        ("architecture-memory", "awaiting_approval")]
