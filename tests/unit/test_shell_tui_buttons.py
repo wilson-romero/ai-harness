@@ -11,6 +11,7 @@ from textual.widgets import Button, Input, Static
 
 from harness.shell.tui import (
     CONFIRM_REJECT,
+    NO_ROOM,
     SHOWN_ALL,
     ApprovalScreen,
     ProposalArea,
@@ -179,6 +180,47 @@ async def test_approve_waits_until_the_end_of_a_long_proposal_is_shown(tmp_path)
         await tui.until(pilot, lambda: any("is completed" in t for t in tui.blocks("harness")))
         await _finish(tui, pilot)
     assert len(effect.written()) == 1
+
+
+async def test_a_fractional_scroll_short_of_the_end_is_not_the_end(tmp_path):
+    """Independent review (2026-11-27): Textual draws at `round(scroll_y)`. A position 0.7
+    short of the end (a scrollbar drag with smooth scrolling) draws one row short: the last
+    line is not on the screen, so Approve stays disabled and one line is still below."""
+    tui, effect = _skill_tui(tmp_path, ScriptedProvider({"tarea: demo-echo/draft": LONG_ECHO}))
+    async with tui.app.run_test(size=SIZE) as pilot:
+        await _approval(tui, pilot)
+        await _enabled(tui, pilot, "reject")
+        area = _box(tui).query_one(ProposalArea)
+        await tui.until(pilot, lambda: area.max_scroll_y > 50)
+        area.scroll_to(y=area.max_scroll_y - 0.7, animate=False)
+        await pilot.pause(0.3)
+        assert area.scroll_offset.y == area.max_scroll_y - 1  # what is drawn
+        assert _button(tui, "approve").disabled
+        assert _text(tui, "approval-more").startswith("1 more line(s) below")
+        await pilot.click("#approve")
+        await pilot.pause(0.1)
+        assert not _box(tui).pressed
+        area.scroll_to(y=area.max_scroll_y, animate=False)  # negative control: the end
+        await _enabled(tui, pilot, "approve")
+        await pilot.press("ctrl+c")
+        await _finish(tui, pilot)
+    assert effect.written() == []
+
+
+async def test_a_window_too_small_for_the_proposal_says_so(tmp_path):
+    """Independent review (2026-11-27): at 80x24 the header, the question and the buttons
+    leave the proposal no rows. Approve stays disabled and the box says why."""
+    tui, effect = _skill_tui(tmp_path)
+    async with tui.app.run_test(size=(80, 24)) as pilot:
+        await _approval(tui, pilot)
+        await _enabled(tui, pilot, "reject")
+        await pilot.pause(0.3)
+        assert _box(tui).query_one(ProposalArea).size.height == 0
+        assert _button(tui, "approve").disabled
+        assert NO_ROOM in _text(tui, "approval-more")
+        await pilot.press("ctrl+c")
+        await _finish(tui, pilot)
+    assert effect.written() == []
 
 
 async def test_the_wheel_to_the_end_counts_as_shown(tmp_path):

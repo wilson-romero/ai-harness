@@ -564,6 +564,8 @@ NOT_ALL = "{left} more line(s) below: Approve is enabled once the end has been s
 CONFIRM_REJECT = "Reject this proposal? The run is cancelled and nothing is written."
 CONFIRM_YES = "Yes, reject"
 CONFIRM_BACK = "Back"
+NO_ROOM = ("The window is too small to show the proposal: enlarge it, or use "
+           "`chat --plain`. Approve stays disabled.")
 
 
 class ProposalArea(VerticalScroll):
@@ -672,15 +674,21 @@ class ApprovalScreen(ModalScreen[None]):
         """Mark the end as shown once it is on the screen (by keys, the wheel or the bar),
         say how much is left, and enable Approve once armed and shown."""
         area = self.query_one(ProposalArea)
+        approve = self.query_one("#approve", Button)
         if not area.size.height:
-            return  # not laid out yet: nothing has been shown
-        left = int(area.max_scroll_y - area.scroll_y)
+            # Not laid out yet, or no rows left for it (a small window): nothing is shown.
+            if area.is_mounted and self.armed:
+                self.query_one("#approval-more", Static).update(plain(NO_ROOM, "bold"))
+            approve.disabled = True
+            return
+        # What is drawn: Textual draws at the rounded position (`scroll_offset`), so a
+        # position 0.7 short of the end still hides the last row (review 2026-11-27).
+        left = area.max_scroll_y - area.scroll_offset.y
         if left <= 0:
             self.app.seen_proposals.add(self._key)  # type: ignore[attr-defined]
         seen = self.seen_end
         self.query_one("#approval-more", Static).update(
             plain(SHOWN_ALL if seen else NOT_ALL.format(left=left), "bold"))
-        approve = self.query_one("#approve", Button)
         approve.disabled = not (self.armed and seen) or self.pressed
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

@@ -45,6 +45,16 @@
 - [x] 2.3 Las pruebas de la entrada del código salen de `tests/unit/test_shell_tui.py` y `tests/unit/test_shell_tui_review.py`, y sus protecciones pasan a 2.1. Siguen las de Ctrl+C en la caja y la paleta sobre la caja, que ahora comprueba el foco en la propuesta. El texto plano y la CLI no cambian: `tests/unit/test_shell_skills.py`, `tests/unit/test_skill_approval.py` y `tests/integration/test_architecture_memory.py` pasan sin tocarlos.
   - Recibo (2026-11-27, macOS arm64): `uv run pytest -m "not copilot and not edge"` → 1609 passed, 155 deselected.
 
+- [x] 2.4 Revisión independiente (2026-11-27), dos hallazgos.
+  - **Grave:** «Approve» se habilitaba con la última fila todavía oculta. `_watch_scroll` calculaba `int(max_scroll_y - scroll_y)`, pero Textual dibuja en `round(scroll_y)` (`Widget.scroll_offset`, `textual/widget.py:2391`). Con la posición 0,7 antes del final, que es lo que manda arrastrar la barra con desplazamiento suave, el cálculo daba 0, mientras la pantalla dibujaba una fila antes del final. Ahora se decide con `max_scroll_y - scroll_offset.y`, lo dibujado, y la cuenta de «N more line(s) below» usa el mismo valor.
+  - **Menor, que ya fallaba cerrado:** a 80×24 el área de la propuesta queda con 0 filas y nada decía por qué «Approve» no se habilitaba. Ahora la caja lo dice (`NO_ROOM`: agrandar la ventana o usar `chat --plain`) y «Approve» sigue deshabilitado.
+  - Oráculo: `test_a_fractional_scroll_short_of_the_end_is_not_the_end` y `test_a_window_too_small_for_the_proposal_says_so`, en `tests/unit/test_shell_tui_buttons.py`.
+  - Controles negativos:
+    - Las dos pruebas se vieron fallar primero sobre el código revisado (`7fec353`): `2 failed`.
+    - Después, como mutantes: volver a `int(max_scroll_y - scroll_y)` y no decir nada sin sitio → `1 failed` cada uno.
+  - Recibo (2026-11-27, macOS arm64): 17 passed. Los 16 mutantes de la caja y del motor, que son los 14 de antes más estos 2, fallan; ninguno sobrevive.
+  - Sin hacer: dar al área unas filas mínimas compactando la cabecera en ventanas pequeñas (queda en el informe).
+
 ## 3. Comprobaciones del corte
 
 - [x] 3.1 Sin código por plataforma: `tests/unit/test_portability.py` pasa con los ficheros nuevos.
