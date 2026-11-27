@@ -102,7 +102,9 @@ STYLES: dict[str, str] = {
     MD_QUOTE: "italic #98c379",
     MD_RULE: "dim",
     MD_FENCE: "dim",
-    MD_CODE: "#e5c07b",
+    # A theme colour no harness status uses: inline code written by the model, such as
+    # `warning: ...`, must not look like the harness's own warning (approval-buttons D8).
+    MD_CODE: "$text-secondary",
     MD_STRONG: "bold",
     MD_EM: "italic",
     MD_LINK: "underline #56b6c2",
