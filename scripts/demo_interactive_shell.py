@@ -172,7 +172,8 @@ def demo() -> list[str]:
             pty_available = True
         result = None if not pty_available else subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "-rs", "-p", "no:cacheprovider",
-             "tests/integration/test_chat_terminal.py"],
+             "tests/integration/test_chat_terminal.py",
+             "tests/integration/test_chat_tui_terminal.py"],
             cwd=ROOT, env=base_env(), capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=600,
         )
