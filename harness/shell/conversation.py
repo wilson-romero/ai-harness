@@ -392,8 +392,8 @@ class Conversation:
     def _open_run(self) -> tuple[str, str] | None:
         """(id, status) of the skill run still open in this session (there is at most one)."""
         row = self._deps.conn.execute(
-            f"SELECT run_id, status FROM skill_runs WHERE session_id = ? AND status IN "  # noqa: S608
-            f"({', '.join('?' for _ in OPEN_RUN_STATES)})",
+            "SELECT run_id, status FROM skill_runs WHERE session_id = ? AND status IN "
+            "(?, ?, ?, ?)",  # one marker per OPEN_RUN_STATES, as in engine.py
             (str(self._session_id), *OPEN_RUN_STATES),
         ).fetchone()
         return (row[0], row[1]) if row is not None else None

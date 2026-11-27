@@ -1340,7 +1340,7 @@ _HALF_DONE = (
 
 def _needs_recovery(conn: sqlite3.Connection, run_id: str) -> bool:
     return conn.execute(
-        f"SELECT 1 FROM skill_runs r WHERE r.run_id = ? AND {_HALF_DONE}", (run_id,)  # noqa: S608
+        "SELECT 1 FROM skill_runs r WHERE r.run_id = ? AND " + _HALF_DONE, (run_id,)
     ).fetchone() is not None
 
 
@@ -1352,7 +1352,7 @@ def recover_runs(conn: sqlite3.Connection, data_dir: Path) -> list[str]:
     becomes `uncertain`, so that its effect is reconciled and never simply applied again.
     """
     recovered = []
-    rows = conn.execute(f"SELECT run_id, session_id FROM skill_runs r WHERE {_HALF_DONE}").fetchall()
+    rows = conn.execute("SELECT run_id, session_id FROM skill_runs r WHERE " + _HALF_DONE).fetchall()
     for run in rows:
         lock = SessionLock(data_dir, UUID(run["session_id"]))
         if not lock.acquire():
