@@ -39,7 +39,7 @@ from textual.content import Content
 from textual.events import Paste
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Input, OptionList, Static
+from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from harness.shell.completion import PATH, acceptable_path, complete
@@ -66,7 +66,7 @@ from harness.shell.render import (
     rows_of_plain_text,
 )
 from harness.shell.terminal import PanelState, ShellState, WaitInterrupted
-from harness.skills.approvals import REJECT_WORD
+from harness.skills.approvals import ButtonPress
 from harness.text.safe_text import terminal_safe
 
 APP_TITLE = "ai-harness"
@@ -77,7 +77,7 @@ CRASHED = ("ai-harness: the full screen stopped on an internal error; nothing of
 READY_HINT = "Type a question, or / for a command"
 BUSY_HINT = "working: ctrl+c interrupts"
 FOOTER = "ctrl+p commands  ctrl+c interrupts  ctrl+n new session  ctrl+q leaves"
-ARM_S = 0.5  # an approval answer submitted sooner than this after the box opened is refused
+ARM_S = 0.5  # the approval buttons stay disabled this long after the box opens
 HISTORY_MAX = 200  # lines typed at the conversation input, kept in memory only
 TICK_S = 1.0
 SIDE_COLUMNS = 34
@@ -176,7 +176,7 @@ class TuiTerminal:
     def __init__(self) -> None:
         self.app: HarnessApp | None = None
         self._lines: queue.SimpleQueue[tuple[str, str | None]] = queue.SimpleQueue()
-        self._answers: queue.SimpleQueue[tuple[str, str | None]] = queue.SimpleQueue()
+        self._answers: queue.SimpleQueue[tuple[str, object]] = queue.SimpleQueue()
         self._waiting: str | None = None  # "line" or "ask": what the core waits for now
         # Taking a line or an answer and closing the wait are one step (review 2026-11-26):
         # the screen handles every key of a fast paste before the core's thread runs again,
@@ -344,22 +344,32 @@ class TuiTerminal:
             choices = []
         self._post("open_session_picker", choices)
 
-    def ask(self, question: str) -> str | None:
-        """The approval prompt (D6): it blocks the core's thread, as in every terminal, and
-        never the screen. Ctrl+C or leaving answers None: undecided."""
-        self._drop_stale(self._answers, everything=True)  # no answer before its box
+    def ask(self, question: str) -> str | None:  # noqa: ARG002
+        """No typed answer on the full screen: the approval is asked with buttons
+        (`ask_buttons`, approval-buttons D4). Anything that still asks gets None: undecided."""
+        return None
+
+    def ask_buttons(self, question: str, approval_hash: str) -> ButtonPress | None:
+        """The approval box (shell-tui D6, approval-buttons D1). It blocks the core's thread,
+        as every approval prompt does, and never the screen. Only a press of this box, for
+        this hash, comes back; Ctrl+C or leaving answer None: undecided."""
+        self._drop_stale(self._answers, everything=True)  # no press before its box
         if self._closing:
             return None
         approval = self._approval
+        if approval is None or approval_hash not in approval[0]:
+            return None  # the box shows the engine's notice for this hash, or nothing opens
         self._arm("ask")
-        self._post("open_approval", approval[1] if approval else [],
-                   approval[2] if approval else [], question)
+        self._post("open_approval", approval[1], approval[2], approval_hash, question)
         try:
-            kind, text = self._answers.get()
+            kind, value = self._answers.get()
         finally:
             self._disarm("ask")
             self._post("close_approval")
-        return text if kind == "answer" else None
+        if kind == "press" and isinstance(value, ButtonPress) and \
+                value.approval_hash == approval_hash:
+            return value
+        return None
 
     # -- the screen's side (main thread) ----------------------------------------------------
 
@@ -389,11 +399,11 @@ class TuiTerminal:
         self._notify()
         return True
 
-    def answer(self, text: str) -> bool:
-        """One answer per question of the box (review 2026-11-26)."""
+    def press(self, press: ButtonPress) -> bool:
+        """One press per box (review 2026-11-26): the wait closes as the press is taken."""
         if not self._take("ask"):
             return False
-        self._answers.put(("answer", text))
+        self._answers.put(("press", press))  # type: ignore[arg-type]
         return True
 
     def interrupt_wait(self) -> bool:
@@ -547,60 +557,62 @@ def _path_candidates(word: str) -> list[str]:
     return found
 
 
-class CodeInput(Input):
-    """The approval answer (D6): its own input, never in the history, never pasted into."""
+APPROVE_LABEL = "Approve"
+REJECT_LABEL = "Reject"
+SHOWN_ALL = "The whole proposal has been shown."
+NOT_ALL = "{left} more line(s) below: Approve is enabled once the end has been shown."
+CONFIRM_REJECT = "Reject this proposal? The run is cancelled and nothing is written."
+CONFIRM_YES = "Yes, reject"
+CONFIRM_BACK = "Back"
+NO_ROOM = ("The window is too small to show the proposal: enlarge it, or use "
+           "`chat --plain`. Approve stays disabled.")
 
-    # Of the bindings Input has in Textual 8.2.8 (widgets/_input.py:76-140), these move text
-    # in or out of the box: ctrl+v pastes the app's clipboard, ctrl+x and ctrl+c copy to it
-    # (and to the terminal's, by OSC 52). The others move the cursor, select or delete
-    # inside the box, and stay (review 2026-11-26).
 
-    def _refuse(self) -> None:
-        self.app.notify(plain("Paste and copy are off here: type the answer"),  # type: ignore[arg-type]
-                        severity="warning", timeout=3)
+class ProposalArea(VerticalScroll):
+    """The proposal, inside the approval box: where the focus starts (approval-buttons D2).
+    It scrolls and does nothing else: Enter, Space or a click on it never decide."""
+
+    can_focus = True
+
+
+class ApprovalButton(Button):
+    """A button of the box (approval-buttons D2): it acts only on a press of its own, and only
+    once the box is armed. Pasted text goes nowhere."""
 
     def _on_paste(self, event: Paste) -> None:
         event.stop()
         event.prevent_default()
-        self._refuse()
-
-    def action_paste(self) -> None:
-        self._refuse()
-
-    def action_cut(self) -> None:
-        self._refuse()
-
-    def action_copy(self) -> None:
-        self._refuse()
-
-
-APPROVAL_RULE_SHOWN = "The code is taken only once the end of the proposal has been shown."
-NOT_SEEN = "Read the whole proposal first: page down or end shows the rest."
 
 
 class ApprovalScreen(ModalScreen[None]):
-    """The approval box: harness chrome (title, header from the engine, question) around the
-    proposal content in a foreign area. The content rows are the ones the core hashed and
-    showed, unchanged (they are never parsed). The keys that scroll the proposal act on the
-    box while the code input keeps the focus; the code is refused until the end of the
-    proposal has been on the screen (review 2026-11-26)."""
+    """The approval box: harness chrome (the engine's header, the state of the reading, the
+    buttons) around the proposal content in a foreign area (shell-tui D6, approval-buttons D2).
+
+    The focus starts on the proposal, never on a button. For ARM_S after the box opens both
+    buttons are disabled, so no key, paste or click of that time reaches them. Approve stays
+    disabled until the end of the proposal has been on the screen. Reject asks for a
+    confirmation inside the box. Escape does nothing; ctrl+c and ctrl+q leave the approval
+    pending."""
 
     BINDINGS: ClassVar = [
-        Binding("escape", "nothing", show=False),
+        Binding("escape", "escape", show=False),
         Binding("pagedown", "scroll_proposal('page_down')", show=False, priority=True),
         Binding("pageup", "scroll_proposal('page_up')", show=False, priority=True),
-        Binding("down", "scroll_proposal('down')", show=False, priority=True),
-        Binding("up", "scroll_proposal('up')", show=False, priority=True),
         Binding("end", "scroll_proposal('end')", show=False, priority=True),
         Binding("home", "scroll_proposal('home')", show=False, priority=True),
     ]
 
-    def __init__(self, header: list[str], content: list[str], question: str) -> None:
+    def __init__(self, header: list[str], content: list[str], approval_hash: str,
+                 question: str) -> None:
         super().__init__(id="approval")
         self._header = header
         self._content = content
         self._question = question
+        self.approval_hash = approval_hash
         self.opened = time.monotonic()
+        self.armed = False
+        self.pressed = False
+        self.confirm_opened = 0.0
 
     @property
     def _key(self) -> tuple[str, ...]:
@@ -610,64 +622,109 @@ class ApprovalScreen(ModalScreen[None]):
     def seen_end(self) -> bool:
         return self._key in self.app.seen_proposals  # type: ignore[attr-defined]
 
-    def action_scroll_proposal(self, how: str) -> None:
-        area = self.query_one("#approval-content", VerticalScroll)
-        getattr(area, f"scroll_{how}")(animate=False)
-
-    def _watch_scroll(self) -> None:
-        """Mark the end as shown once it is on the screen, and say how much is left."""
-        area = self.query_one("#approval-content", VerticalScroll)
-        if not area.size.height:
-            return  # not laid out yet: nothing has been shown
-        left = int(area.max_scroll_y - area.scroll_y)
-        if left <= 0:
-            self.app.seen_proposals.add(self._key)  # type: ignore[attr-defined]
-        text = (f"{left} more line(s) below. {APPROVAL_RULE_SHOWN}" if left > 0 and not
-                self.seen_end else f"End of the proposal shown. {APPROVAL_RULE_SHOWN}")
-        self.query_one("#approval-more", Static).update(plain(text, "bold"))
-
     def compose(self) -> ComposeResult:
         with Vertical(id="approval-box") as box:
             box.border_title = plain(APPROVAL_TITLE)
             yield Static(rows_content(harness_rows(self._header, None)), markup=False,
                          id="approval-header")
-            with VerticalScroll(id="approval-content") as area:
+            with ProposalArea(id="approval-content") as area:
                 area.border_title = plain("proposed content (from outside the harness)")
-                area.can_focus = False
                 yield Static(rows_content(rows_of_plain_text("\n".join(self._content)),
                                           strip_gutter=True), markup=False)
-            yield Static(plain(APPROVAL_RULE_SHOWN, "bold"), markup=False, id="approval-more")
+            yield Static(plain(""), markup=False, id="approval-more")
             yield Static(plain(self._question, "bold"), markup=False, id="approval-question")
-            yield Static(Content(""), markup=False, id="approval-message")
-            yield CodeInput(id="approval-input")
+            with Horizontal(id="approval-buttons"):
+                yield ApprovalButton(plain(APPROVE_LABEL), id="approve", variant="success",
+                                     disabled=True)
+                yield ApprovalButton(plain(REJECT_LABEL), id="reject", variant="error",
+                                     disabled=True)
+            with Horizontal(id="approval-confirm"):
+                yield Static(plain(CONFIRM_REJECT, "bold"), markup=False,
+                             id="approval-confirm-text")
+                yield ApprovalButton(plain(CONFIRM_BACK), id="reject-back", disabled=True)
+                yield ApprovalButton(plain(CONFIRM_YES), id="reject-yes", variant="error",
+                                     disabled=True)
 
     def on_mount(self) -> None:
-        self.query_one(CodeInput).focus()
+        self.query_one("#approval-confirm").display = False
+        self.query_one(ProposalArea).focus()
+        arm_s = self.app.arm_s  # type: ignore[attr-defined]
+        if arm_s > 0:
+            self.set_timer(arm_s, self._arm)
+        else:
+            self.call_after_refresh(self._arm)
         self.set_interval(0.1, self._watch_scroll)
         self.call_after_refresh(self._watch_scroll)
 
-    def action_nothing(self) -> None:
-        return
+    def _arm(self) -> None:
+        self.armed = True
+        self.query_one("#reject", Button).disabled = False
+        self._watch_scroll()
 
-    def _say(self, text: str) -> None:
-        self.query_one("#approval-message", Static).update(plain(text, STYLES[HARNESS_WARNING]))
+    def action_escape(self) -> None:
+        """Escape never decides: in the confirmation it is Back, otherwise nothing."""
+        if self.query_one("#approval-confirm").display:
+            self._confirming(False)
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        event.stop()
-        if time.monotonic() - self.opened < self.app.arm_s:  # type: ignore[attr-defined]
-            event.input.value = ""
-            self._say("Too soon: read the proposal, then type the answer")
+    def action_scroll_proposal(self, how: str) -> None:
+        area = self.query_one(ProposalArea)
+        getattr(area, f"scroll_{how}")(animate=False)
+
+    def _watch_scroll(self) -> None:
+        """Mark the end as shown once it is on the screen (by keys, the wheel or the bar),
+        say how much is left, and enable Approve once armed and shown."""
+        area = self.query_one(ProposalArea)
+        approve = self.query_one("#approve", Button)
+        if not area.size.height:
+            # Not laid out yet, or no rows left for it (a small window): nothing is shown.
+            if area.is_mounted and self.armed:
+                self.query_one("#approval-more", Static).update(plain(NO_ROOM, "bold"))
+            approve.disabled = True
             return
-        value = event.value
-        # Rejecting needs no reading; anything that could be the code does.
-        if value.strip().lower() not in ("n", REJECT_WORD):
-            self._watch_scroll()
-            if not self.seen_end:
-                event.input.value = ""
-                self._say(NOT_SEEN)
-                return
-        event.input.value = ""
-        self.app.terminal.answer(value)  # type: ignore[attr-defined]
+        # What is drawn: Textual draws at the rounded position (`scroll_offset`), so a
+        # position 0.7 short of the end still hides the last row (review 2026-11-27).
+        left = area.max_scroll_y - area.scroll_offset.y
+        if left <= 0:
+            self.app.seen_proposals.add(self._key)  # type: ignore[attr-defined]
+        seen = self.seen_end
+        self.query_one("#approval-more", Static).update(
+            plain(SHOWN_ALL if seen else NOT_ALL.format(left=left), "bold"))
+        approve.disabled = not (self.armed and seen) or self.pressed
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        which = event.button.id
+        if not self.armed or self.pressed or time.monotonic() - self.opened < self.app.arm_s:  # type: ignore[attr-defined]
+            return
+        if which == "approve" and self.seen_end:
+            self._send("approve")
+        elif which == "reject":
+            self._confirming(True)
+        elif which == "reject-back":
+            self._confirming(False)
+        elif which == "reject-yes":
+            # Not a second click or a held key of the Reject that opened the question.
+            if time.monotonic() - self.confirm_opened >= self.app.arm_s:  # type: ignore[attr-defined]
+                self._send("reject")
+
+    def _confirming(self, on: bool) -> None:
+        """Reject asks once more, inside the box; the focus goes to Back (approval-buttons D3)."""
+        self.query_one("#approval-buttons").display = not on
+        self.query_one("#approval-confirm").display = on
+        for name in ("#reject-back", "#reject-yes"):
+            self.query_one(name, Button).disabled = not on
+        if on:
+            self.confirm_opened = time.monotonic()
+            self.query_one("#reject-back", Button).focus()
+        else:
+            self.query_one(ProposalArea).focus()
+
+    def _send(self, choice: str) -> None:
+        self.pressed = True
+        for button in self.query(Button):
+            button.disabled = True
+        self.app.terminal.press(  # type: ignore[attr-defined]
+            ButtonPress(choice, self.approval_hash))  # type: ignore[arg-type]
 
 
 class PickerScreen(ModalScreen[str | None]):
@@ -788,6 +845,10 @@ class HarnessApp(App[int]):
     #approval-question { height: auto; margin: 1 0 0 0; }
     #approval-message { height: auto; }
     #approval-more { height: auto; }
+    #approval-buttons, #approval-confirm { dock: bottom; height: 3; align: center middle;
+                                           background: $warning-muted; }
+    #approval-buttons Button, #approval-confirm Button { margin: 0 4; }
+    #approval-confirm-text { width: auto; height: 3; content-align: center middle; }
     .picker { align: center middle; }
     #picker-box { width: 80%%; height: 70%%; border: round $accent; background: $surface; }
     """ % SIDE_COLUMNS
@@ -960,8 +1021,9 @@ class HarnessApp(App[int]):
         working.update(plain(f"{self._working}: thinking ({seconds} s), ctrl+c interrupts"))
         working.display = True
 
-    def open_approval(self, header: list[str], content: list[str], question: str) -> None:
-        screen = ApprovalScreen(header, content, question)
+    def open_approval(self, header: list[str], content: list[str], approval_hash: str,
+                      question: str) -> None:
+        screen = ApprovalScreen(header, content, approval_hash, question)
         self._approval = screen
         self.push_screen(screen)
 

@@ -10,30 +10,21 @@ import time
 import webbrowser
 
 import pytest
-from textual.widgets import Input, Static
 
 from harness.shell import tui as tui_module
 from harness.shell.app import FULL_SCREEN_FAILED, run_chat
 from harness.shell.tui import (
     CRASHED,
-    NOT_SEEN,
-    ApprovalScreen,
-    CodeInput,
     FullScreenUnavailable,
     HarnessApp,
     TuiTerminal,
     run_full_screen,
 )
 from tests.conftest import REPO_ROOT
-from tests.skill_support import ScriptedProvider
 from tests.tui_support import SIZE, Tui
-from tests.unit.test_shell_tui import _approval, _code, _query, _skill_tui, _type_answer
+from tests.unit.test_shell_tui import _query
 
-LONG_ECHO = ("## Resumen\n" + "\n".join(f"Línea {n} del resumen sintético." for n in range(120))
-             + "\n\n## Preguntas pendientes\n- Ninguna.")
-
-
-# -- 1 and 5: one line per wait, one answer per question ---------------------------------------
+# -- 1: one line per wait (5, one press per box, is in test_shell_tui_buttons.py) ------------
 
 
 async def test_lines_typed_in_one_go_send_one_question(tmp_path):
@@ -53,96 +44,6 @@ async def test_lines_typed_in_one_go_send_one_question(tmp_path):
         await tui.send(pilot, "/exit")
     assert tui.provider.calls == 1
     assert len(_query(tmp_path, "SELECT session_id FROM sessions")) == 1  # no /new ran
-
-
-def test_one_answer_per_question_and_stale_answers_are_dropped():
-    terminal = TuiTerminal()
-    terminal._arm("ask")
-    assert terminal.answer("n") is True
-    assert terminal.answer("reject") is False  # the confirmation has not been asked yet
-    terminal._answers.put(("answer", "antigua"))  # queued before the next box
-    result: list = []
-    thread = threading.Thread(target=lambda: result.append(terminal.ask("¿código?")))
-    thread.start()
-    deadline = time.monotonic() + 5
-    while terminal._waiting != "ask" and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert terminal.answer("nueva")
-    thread.join(5)
-    assert result == ["nueva"]
-
-
-# -- 2: the whole proposal is shown before the code is taken -----------------------------------
-
-
-async def test_the_code_waits_until_the_end_of_a_long_proposal_is_shown(tmp_path):
-    provider = ScriptedProvider({"tarea: demo-echo/draft": LONG_ECHO})
-    tui, effect = _skill_tui(tmp_path, provider)
-    async with tui.app.run_test(size=SIZE) as pilot:
-        await _approval(tui, pilot)
-        area = tui.app.screen.query_one("#approval-content")
-        await tui.until(pilot, lambda: area.max_scroll_y > 50)
-        assert "more line(s) below" in str(tui.app.screen.query_one("#approval-more").render())
-        code = _code(tui)
-        await _type_answer(tui, pilot, code)
-        await tui.until(pilot, lambda: NOT_SEEN in str(
-            tui.app.screen.query_one("#approval-message", Static).render()))
-        assert isinstance(tui.app.screen, ApprovalScreen) and effect.written() == []
-        assert isinstance(tui.app.focused, CodeInput)
-        await pilot.press("pagedown")  # scrolls the proposal; the input keeps the focus
-        await pilot.pause(0.1)
-        assert area.scroll_y > 0 and isinstance(tui.app.focused, CodeInput)
-        await pilot.press("end")
-        await tui.until(pilot, lambda: "End of the proposal shown" in str(
-            tui.app.screen.query_one("#approval-more").render()))
-        await _type_answer(tui, pilot, code)
-        await tui.until(pilot, lambda: any("is completed" in t for t in tui.blocks("harness")))
-        await tui.ready(pilot)
-        await tui.send(pilot, "/exit")
-    assert len(effect.written()) == 1
-
-
-async def test_n_rejects_without_reading_to_the_end(tmp_path):
-    provider = ScriptedProvider({"tarea: demo-echo/draft": LONG_ECHO})
-    tui, effect = _skill_tui(tmp_path, provider)
-    async with tui.app.run_test(size=SIZE) as pilot:
-        await _approval(tui, pilot)
-        await _type_answer(tui, pilot, "n")
-        await pilot.pause(0.1)
-        await _type_answer(tui, pilot, "reject")
-        await tui.until(pilot, lambda: any("is cancelled" in t for t in tui.blocks("harness")))
-        await tui.ready(pilot)
-        await tui.send(pilot, "/exit")
-    assert _query(tui.data_dir, "SELECT status FROM approvals") == ["rejected"]
-
-
-# -- 3: nothing moves text in or out of the approval input -------------------------------------
-
-
-async def test_ctrl_v_cannot_paste_the_code(tmp_path):
-    tui, effect = _skill_tui(tmp_path)
-    async with tui.app.run_test(size=SIZE) as pilot:
-        await _approval(tui, pilot)
-        code = _code(tui)
-        tui.app.copy_to_clipboard(code)
-        box_input = tui.app.screen.query_one(CodeInput)
-        await tui.until(pilot, lambda: tui.app.focused is box_input)
-        await pilot.press("ctrl+v")
-        assert box_input.value == ""
-        await pilot.press("enter")
-        await pilot.pause(0.1)
-        assert isinstance(tui.app.screen, ApprovalScreen) and effect.written() == []
-        box_input.value = "abc"
-        box_input.action_select_all()
-        await pilot.press("ctrl+x")
-        assert box_input.value == "abc" and tui.app.clipboard == code  # nothing left the box
-        await pilot.press("ctrl+c")
-        await tui.ready(pilot)
-        prompt = tui.app.query_one("#prompt", Input)
-        await pilot.press("ctrl+v")  # negative control: the ordinary input pastes
-        assert prompt.value == code
-        prompt.value = ""
-        await tui.send(pilot, "/exit")
 
 
 # -- 4: nothing writes a file, opens a link or reaches the terminal's clipboard ----------------
@@ -268,4 +169,4 @@ async def test_ctrl_q_ends_a_running_question_at_once(tmp_path):
 
 def test_the_module_names_one_lock_for_the_waits():
     assert isinstance(TuiTerminal()._state_lock, type(threading.Lock()))
-    assert tui_module.APPROVAL_RULE_SHOWN.startswith("The code is taken only")
+    assert tui_module.SHOWN_ALL == "The whole proposal has been shown."
