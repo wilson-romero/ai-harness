@@ -34,6 +34,7 @@ from harness.shell.tui import (
     NoticeBlock,
     PromptInput,
     Turn,
+    TuiTerminal,
     chrome_line,
 )
 from tests.tui_support import SIZE, Tui
@@ -114,6 +115,7 @@ async def test_the_footer_always_says_what_is_hidden_after_line_n(tmp_path):
         hidden = len(lines) - block.shown_rows()
         assert hidden == block.hidden_rows() > 0
         assert str(block.border_subtitle) == hidden_footer(hidden)
+        assert str(block.border_subtitle).startswith(f"… {hidden} more lines ·")
         footers = [row for row in _chrome_cells(tui) if "more line" in row]
         assert footers == [f" {hidden_footer(hidden)} "]  # the only one on chrome
         block.toggle()  # opened: everything, and nothing hidden any more
@@ -331,6 +333,27 @@ async def test_the_block_being_read_does_not_jump(tmp_path):
         await pilot.pause(0.2)
         assert row(turn) != before
         await pilot.press("escape")
+        await tui.send(pilot, "/exit")
+
+
+async def test_opening_the_newest_reply_at_the_end_keeps_its_header(tmp_path):
+    """At the end of the pane, the pane follows its bottom: opening the newest reply would
+    push its header up and out of view. Its header stays on its row."""
+    tui = Tui(tmp_path)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        await _ask(tui, pilot, long_reply(30), "primera")
+        await _ask(tui, pilot, long_reply(80), "segunda")
+        block = _replies(tui)[-1]
+        log = tui.app._log()
+        before = block.region.y - log.region.y
+        assert 0 <= before < log.size.height and block.fold is Fold.PREVIEW
+        await pilot.press("ctrl+o")
+        await pilot.pause(0.2)
+        assert block.fold is Fold.EXPANDED and block.region.y - log.region.y == before
+        await pilot.press("ctrl+o")  # closed: one line, on the same row
+        await pilot.pause(0.2)
+        assert block.fold is Fold.COLLAPSED
+        assert block.region.y - log.region.y == before or log.scroll_y == log.max_scroll_y
         await tui.send(pilot, "/exit")
 
 
@@ -574,4 +597,19 @@ async def test_a_folded_reply_of_wrapped_lines_fits_the_pane_as_it_arrives(tmp_p
         screen = tui.screen()
         assert "## Resumen" in screen and "more lines · enter/click to expand" in screen
         assert rows_in_preview(block.rows, block.preview) > block.shown_rows()
+        assert len(str(block.render()).split("\n")) == block.shown_rows()
+        assert str(block.border_subtitle) == hidden_footer(block.total - block.shown_rows())
         await tui.send(pilot, "/exit")
+
+
+def test_a_warning_before_the_reply_does_not_take_its_title():
+    """The provider's name titles the foreign rows after its answer, even when a harness
+    line (a warning of the request) comes first; the next wait forgets it."""
+    terminal = TuiTerminal()
+    posted: list = []
+    terminal._post = lambda method, *args: posted.append((method, args))
+    terminal._label = "mock"
+    terminal.show_rows(harness_rows(["warning: synthetic"], None))
+    terminal.show_rows(foreign_rows("respuesta", UNCUT)[0])
+    terminal.show_rows(foreign_rows("otra", UNCUT)[0])
+    assert [args[1] for _, args in posted] == ["mock", "mock", None]
