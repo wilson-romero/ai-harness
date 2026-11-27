@@ -43,6 +43,13 @@ Un bloque del harness con los pasos de una Skill SHALL verse plegado a una líne
 - **WHEN** la persona escribe `/context` y el contexto es más largo que el panel
 - **THEN** se ve entero, sin vista previa
 
+### Requirement: El final de una Skill a la vista
+La línea que dice cómo terminó una ejecución de Skill (`skill: run … is …`) y las líneas de lo que aplicó (`applied:`) SHALL verse siempre enteras, fuera de la línea plegada de los pasos.
+
+#### Scenario: Una Skill aprobada
+- **WHEN** la persona aprueba la propuesta de una Skill y la ejecución termina
+- **THEN** la pantalla muestra entera la línea `skill: run … is completed`, aunque los pasos sigan plegados en una línea
+
 ### Requirement: El pie dice siempre lo que falta
 Mientras un bloque no se vea entero, el harness SHALL decir cuántas de sus líneas faltan, contadas sobre las líneas del bloque y no sobre lo que el texto diga de sí mismo. Una línea plegada SHALL decir cuántas líneas tiene el bloque.
 
