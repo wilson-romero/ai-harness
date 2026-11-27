@@ -36,6 +36,10 @@ Al abrirse la caja, el foco SHALL estar en la propuesta y no en un botón. Los b
 - **WHEN** Tab y Enter, o un clic en aprobar, se leen antes de que los botones se habiliten y se procesan después
 - **THEN** no deciden y la aprobación sigue pendiente
 
+#### Scenario: Bucle detenido mientras se escribe
+- **WHEN** llegan teclas cada 100 ms desde la apertura, el bucle se detiene hasta 0,7 s o 2 s, el armado corre antes que esas teclas y la escritura sigue con Tab y Enter, o con un clic en aprobar
+- **THEN** la caja se desarma, no se habilita hasta medio segundo después de la última entrada leída y la aprobación sigue pendiente
+
 #### Scenario: Tras el silencio
 - **WHEN** no llega ninguna entrada durante el intervalo mínimo desde que la caja se muestra, y después llegan Tab y Enter o un clic en aprobar
 - **THEN** la aprobación se concede una vez
@@ -64,6 +68,10 @@ El botón de rechazar SHALL abrir dentro de la caja una pregunta de confirmació
 
 #### Scenario: Doble clic en rechazar
 - **WHEN** el segundo clic de un doble clic sobre rechazar cae en la confirmación
+- **THEN** no se rechaza y la aprobación sigue pendiente
+
+#### Scenario: Confirmación leída justo después de aparecer
+- **WHEN** Tab y Enter se leen 10 ms después de aparecer la confirmación y se procesan 0,6 s después
 - **THEN** no se rechaza y la aprobación sigue pendiente
 
 ### Requirement: Salir de la caja sin decidir

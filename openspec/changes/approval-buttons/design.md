@@ -116,6 +116,7 @@ Lo que existe, medido en `develop` (`5af28ed`) el 2026-11-27:
   - Sin confirmación: un clic de más cancela la ejecución.
   - Confirmar escribiendo `reject`: vuelve a meter una entrada de texto en la caja, que es lo que se quería quitar.
 - **Impacto:** spec `interactive-shell` (rechazo con su pregunta); `tui.py` (`_confirming`, `confirm_opened`).
+- **Revisado el 2026-11-27 (D9, revisión independiente):** la pregunta se arma con la misma regla que la caja: al aparecer desarma, y «Yes, reject» solo cuenta tras `ARM_S` sin entrada desde que se pinta. Desaparece `confirm_opened`, que medía la hora de proceso. «Back» funciona siempre: no decide.
 
 ### D4 · El código ya no se escribe en la pantalla completa
 
@@ -214,6 +215,18 @@ Lo que existe, medido en `develop` (`5af28ed`) el 2026-11-27:
   1. **Silencio antes de armar.** Los botones se habilitan cuando la caja se ha pintado (`call_after_refresh` tras montarla, `shown`) y después ha pasado `ARM_S` sin ninguna tecla, pegado o botón del ratón. Cada entrada recibida sin armar reinicia la cuenta (`_quiet_from`); un único temporizador vuelve a mirar cuando el silencio se cumpliría (`_arm_if_quiet`).
   2. **Corte por la hora de lectura.** Cada evento de entrada trae la hora a la que el driver de Textual lo leyó del terminal (`Message.time`). Una entrada leída antes del momento del armado (`armed_at`) nunca actúa, por tarde que la procese el bucle. Se descarta donde se entrega (`check_message_enabled` de la propuesta, de los botones y de la caja), así que no llega a ningún binding ni burbujea. Textual rehace cada evento del ratón con una hora nueva antes de dárselo al widget, así que el ratón se juzga en la caja, sobre el evento que hizo el driver (`_forward_event`). Y como la aplicación fabrica el Click al procesar el MouseUp, un clic cuenta solo si su MouseDown pasó el filtro sobre ese mismo botón.
 
+  - **Revisado el 2026-11-27 (revisión independiente, `approval-buttons` 7.5).** Con el bucle detenido, el temporizador corría primero y armaba con el silencio contado desde el pintado. Las teclas leídas durante la parada se descartaban, pero no reiniciaban nada, y las siguientes de la ráfaga aprobaban. Ahora:
+    - (a) una entrada leída antes del armado, además de no actuar, **desarma** la caja: botones deshabilitados y la cuenta reiniciada;
+    - (b) el silencio se cuenta desde la **hora de lectura** de la última entrada (`Message.time`), no desde que se procesa, así que el armado llega «última entrada leída + `ARM_S`» en cualquier orden de proceso;
+    - (c) cada cambio de vista (la pregunta de Reject y la vuelta con Back) desarma, y la caja se arma otra vez cuando la vista nueva está pintada.
+
+    La siguiente mirada tras desarmar va siempre por temporizador, o por `call_later` si ya toca: un temporizador de Textual no admite intervalo 0. Así la entrada ya en cola se procesa antes, sin armar.
+  - **Lo que dice el código de Textual 8.2.8:**
+    - **ESC.** Ante un ESC, el analizador del terminal (`_xterm_parser.py`) espera hasta `ESCAPE_DELAY`, 100 ms por defecto (`ESCDELAY`), al siguiente carácter. Si no llega, el `tick()` del driver emite `Key("escape")`. El driver llama a `tick()` en cada vuelta de `select(0.1)` en POSIX, y tras `wait_for_handles(…, 100)` en Windows. Así que una tecla Escape suelta, o un ESC que no forma secuencia, llega hasta unos 200 ms tarde.
+    - **Qué hora lleva una tecla.** `Message.time` es la hora en que se crea el `Key`, es decir, cuando el analizador lo emite, no cuando llegaron los bytes. Tab, Enter y Espacio no empiezan por ESC y se emiten al leerse. Las secuencias completas (flechas, `pagedown`, ratón SGR) se emiten al completarse. La hora de una tecla puede ser más tardía que su lectura, nunca anterior. Para esta regla eso solo puede hacer parecer más nueva una tecla que empieza por ESC; ninguna de ellas pulsa un botón.
+    - **Cuándo corre `_shown`.** `call_after_refresh` corre cuando la pantalla queda ociosa tras su refresco del compositor. `_compositor_refresh` llama a `app._display`, que entrega el fotograma al hilo escritor del driver (`WriterThread`, una cola). Así que `_shown` corre cuando el fotograma está en esa cola, no cuando los bytes se han escrito en el terminal ni cuando este los ha dibujado.
+    - **Consecuencia:** «contado desde que se pinta» es «desde que Textual entregó el primer fotograma para escribirlo». Si la salida va lenta (una consola cargada, una sesión remota), parte del medio segundo transcurre antes de que la persona vea la caja. Las teclas que escriba sin verla siguen reiniciando la cuenta, porque se cuentan por su hora de lectura.
+
   La caja usa un solo reloj, el de los eventos (`ApprovalScreen.clock`), para el armado, la comprobación de `on_button_pressed` y la confirmación de Reject. ctrl+c, ctrl+q y ctrl+n son bindings prioritarios de la aplicación y siguen funcionando sin armar. Las teclas de desplazamiento con binding propio (`pagedown`, `end`…) tampoco deciden y también reinician el silencio.
 - **Por qué:** lo que se promete es que lo escrito antes de que la caja aparezca no aprueba. La primera regla cubre a quien sigue escribiendo cuando aparece la caja: mientras escribe, la caja no se arma. La segunda cubre el bucle ocupado: las teclas ya leídas que el bucle procesa tarde. Ninguna depende de cuánto tarde la máquina.
 - **Alternativas rechazadas:**
@@ -221,12 +234,13 @@ Lo que existe, medido en `develop` (`5af28ed`) el 2026-11-27:
   - Solo armar en el primer momento ocioso tras montar la caja: las colas de la aplicación y de la pantalla son distintas, así que «ocioso» no garantiza que lo ya leído se haya procesado.
   - Subir `ARM_S`: sigue dependiendo de la velocidad de la máquina y hace esperar a todos.
   - Descartar toda entrada sin armar: impediría desplazarse por la propuesta con el teclado en el primer medio segundo, sin cerrar nada que el silencio no cierre ya.
-- **Residual (escrito, no se arregla):** unas teclas que el terminal, el sistema o una sesión remota retengan y entreguen después de `ARM_S` de silencio llegan con hora nueva, y ninguna aplicación las distingue de unas teclas nuevas. La regla depende del reloj con el que Textual sella los eventos (`textual._time.get_time`, privado; Textual está fijado exacto y un test compara los dos relojes).
+- **Residual (escrito, no se arregla):** unas teclas que el terminal, el sistema o una sesión remota retengan y entreguen después de `ARM_S` de silencio llegan con hora nueva, y ninguna aplicación las distingue de unas teclas nuevas. Un fotograma que tarde en llegar a la pantalla consume parte del silencio (ver arriba). Una entrada leída pronto puede desarmar una caja ya armada; la persona solo tiene que esperar medio segundo. La regla depende del reloj con el que Textual sella los eventos (`textual._time.get_time`, privado; Textual está fijado exacto y un test compara los dos relojes).
 - **Impacto:**
   - spec `interactive-shell`: el texto del requisito «Nada aprueba al abrirse la caja» y tres escenarios nuevos;
   - `tui.py`: `ProposalArea`, `ApprovalButton` y `ApprovalScreen`;
   - pruebas en `tests/unit/test_shell_tui_arming.py`;
-  - `tests/tui_support.py` (`approval_box`, que espera a `shown`; ver 8.2).
+  - `tests/tui_support.py` (`approval_box`, que espera a `shown`; ver 7.2);
+  - D3: la pregunta de Reject se arma con esta misma regla.
 
 ## Risks / Trade-offs
 

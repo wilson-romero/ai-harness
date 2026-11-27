@@ -152,8 +152,35 @@ Wilson ejecutó `develop` en Windows 11. Dos hallazgos son de esta caja: `test_k
   - `-m edge`: 156 passed en 1185,13 s, código 0, ninguno repetido;
   - después, `openspec validate --all --strict` → 25 passed, 0 failed; `scripts/check_sec_matrix.py` → `sec-matrix: PASS (15 rows, 137 tests)`; `public-safety: PASS (452 file(s))`.
   - Estas cifras valen también para `hardening` 8.1 y `copilot-web-provider` 9.1.
+- [x] 7.5 Revisión independiente de la rama (2026-11-27, sobre `65781e3` = `b4ee1ac` + `develop` `893694a`). H1, H3 y H4 se sostienen. Hallazgos en D9, corregidos con un test visto en rojo antes de cada arreglo, con el mismo reloj de prueba:
+  - (1) MEDIO. Con el bucle detenido, la caja se armaba mientras la persona seguía escribiendo. El temporizador corría primero con el silencio contado desde el pintado; las teclas leídas durante la parada se descartaban sin reiniciar la cuenta, y Tab y Enter leídos después aprobaban. Arreglo: una entrada leída antes del armado desarma la caja, y el silencio se cuenta desde la hora de lectura de la última entrada.
+    - Oráculo: `test_a_stall_then_a_burst_across_the_arming_approves_nothing` (8 casos: parada de 0,7 s y de 2 s, ráfaga que acaba antes o sigue después, teclas o ratón). Tras procesar las teclas la caja está desarmada, no se arma a «última lectura + 0,49 s» y sí a «+ 0,5 s», y la aprobación sigue pendiente.
+    - También `test_a_click_pressed_before_a_late_arming_never_presses_even_if_it_rearms`: el botón baja antes de la parada y sube después de rearmarse.
+  - (2) BAJO. La confirmación de Reject solo miraba la hora de proceso. Arreglo: la pregunta desarma y se arma con la misma regla; desaparece `confirm_opened`.
+    - Oráculo: `test_the_confirmation_ignores_input_read_just_after_it_appeared` (Tab y Enter leídos a +10 ms y procesados a +0,6 s: pendiente) y el control positivo `test_the_confirmation_accepts_input_after_its_silence`.
+  - (3) BAJO. Huecos de los tests:
+    - `test_a_paste_restarts_the_silence`;
+    - `test_each_widget_of_the_box_filters_input_read_before_the_arming`, para `#approve`, `#reject` y la propuesta: cada filtro, directamente;
+    - el reloj de prueba sella ahora todo mensaje de Textual (`textual.message._time`), así que el Click que fabrica la aplicación lleva hora de prueba, sea cual sea el tiempo de encendido de la máquina.
+  - (4) BAJO, del lanzador de Edge: ver `copilot-web-provider` 9.3.
+  - Recibo (2026-11-27, macOS arm64, Python 3.14.8):
+    - antes de los arreglos, 12 failed: los 8 casos de la parada, la confirmación y los 3 filtros por widget;
+    - después, `test_shell_tui_arming.py` + `test_shell_tui_buttons.py` + `test_shell_tui_grid.py` → 71 passed;
+    - todos los `tests/unit/test_shell_tui*.py`, `test_portability.py` y `test_edge_launch_errors.py` → 240 passed;
+    - de paso, un temporizador de Textual con intervalo 0 lanza `ZeroDivisionError` (`timer.py:120`): con espera 0 se usa `call_later`.
+  - Mutantes sobre `test_shell_tui_arming.py` (38 tests en ese momento):
+    - M1, sin corte por hora de lectura: 21 failed;
+    - M2, sin reiniciar el silencio: 15 failed;
+    - M4, el ratón sin juzgar en la caja: 4 failed;
+    - M5, descartar sin desarmar: 11 failed;
+    - M6, silencio desde la hora de proceso: 4 failed;
+    - M7, la pregunta sin desarmar: 1 failed;
+    - M8, Paste fuera de `_deciding`: 1 failed;
+    - M9, sin filtro en la propuesta: 1 failed;
+    - M10, sin filtro en los botones: 2 failed.
+    - M3, un Click sin exigir su MouseDown, sobrevivía: con el desarmado, un MouseUp leído antes también desarma y el Click encuentra el botón deshabilitado. Se añadió el caso en que el botón sube después de rearmarse: con M3, 1 failed; sin M3, pasa.
 - [ ] 7.3 Confirmación en Windows (no es puerta). En PowerShell, en la rama:
-  - `uv run pytest tests/unit/test_shell_tui_arming.py tests/unit/test_shell_tui_buttons.py -v` → todo pasa;
+  - `uv run pytest tests/unit/test_shell_tui_arming.py tests/unit/test_shell_tui_buttons.py -v` → todo pasa, también con la máquina cargada;
   - `uv run pytest tests/unit/test_shell_tui_grid.py tests/unit/test_shell_tui_blocks.py tests/unit/test_shell_tui.py -v`, tres veces, y la batería completa `uv run pytest -m "not edge and not copilot"` → ningún `NoMatches`;
   - Estado: **NOT RUN**.
 

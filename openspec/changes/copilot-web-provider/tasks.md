@@ -258,6 +258,10 @@ Wilson ejecutó `develop` en Windows 11 con Edge. En la batería `-m edge` fall�
     - con el cambio, 11 passed. Con Edge, `test_profile_open_in_another_edge_is_reported_as_in_use` y `test_a_held_profile_carries_a_lock_artefact` pasan (`lock artefacts while open: ['SingletonLock']`).
     - Control por mutación: sin `lockfile` en la lista, 2 failed, los casos `lockfile`; restaurado, pasa.
   - Premisa sin medir en Windows: que Edge tiene `lockfile` en el perfil mientras lo usa y lo borra al cerrarse. La comprueba el test con Edge de arriba.
+- [x] 9.3 Revisión independiente (2026-11-27). Un `SingletonLock` que dejó un Edge que se colgó, junto con un cierre al arrancar que no tiene nada que ver, también se informa como «perfil en uso», y se perdía el mensaje de Playwright; además no se comprueba que el cierre fuera inmediato.
+  - Se mantiene la clasificación. El mensaje conserva siempre la primera línea de Edge, con `<profile>` en lugar de la ruta. En el caso del cierre con artefacto dice además que la causa puede ser un bloqueo de un Edge que se colgó.
+  - Oráculo: `test_in_use_by_an_immediate_close_keeps_edges_message_and_names_a_stale_lock` (`lockfile` y `SingletonLock`) y `test_in_use_by_a_named_singleton_keeps_edges_message`.
+  - Recibo (2026-11-27, macOS): antes, 3 failed; después, `test_edge_launch_errors.py` → 14 passed.
 - [ ] 9.2 Confirmación en Windows (no es puerta), en PowerShell, sobre la rama: `uv run pytest -m edge tests/browser/test_edge_launcher.py -v -s`.
   - Tienen que pasar `test_profile_open_in_another_edge_is_reported_as_in_use` y `test_a_held_profile_carries_a_lock_artefact`.
   - Hay que pegar la línea `lock artefacts while open: [...]`; se espera `lockfile`.
