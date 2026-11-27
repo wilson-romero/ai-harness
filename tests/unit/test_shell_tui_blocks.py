@@ -775,19 +775,24 @@ async def test_sending_while_browsing_goes_to_the_end(tmp_path):
 
 async def test_output_does_not_move_the_pane_while_browsing_at_the_end(tmp_path):
     """Browsing at the end of the pane, new output does not scroll it (review finding 7: the
-    browse check of `_follow`)."""
+    browse check of `_follow`): neither to the end nor to the start of a new long reply
+    (reply-rendering D6).
+
+    The pane is filled with replies that fit, so it is at its end: a long reply is shown
+    from its start when it arrives, and filling with those left the pane on the newest
+    one's start (review 2026-11-27: `63 == 77`)."""
     tui = Tui(tmp_path)
     async with tui.app.run_test(size=SIZE) as pilot:
         await tui.ready(pilot)
-        _fill(tui, 10, long_reply(40))
-        await pilot.pause(0.2)
+        _fill(tui, 10, long_reply(12))
+        await pilot.pause(0.3)
         await pilot.press("escape")  # the newest block, at the end
         await pilot.pause(0.1)
         log = tui.app._log()
         before = log.scroll_y
         assert before == log.max_scroll_y
         tui.app.show_rows(foreign_rows(long_reply(40), UNCUT, markdown=True)[0], "mock")
-        await pilot.pause(0.2)
+        await pilot.pause(0.3)
         assert log.scroll_y == before < log.max_scroll_y
         await pilot.press("escape")
         await tui.send(pilot, "/exit")
