@@ -25,7 +25,7 @@ Al mostrarse, una respuesta o un texto ajeno que cabe en el panel (con un margen
 - **THEN** se ven la cabecera y las primeras filas de la respuesta, y el pie dice cuántas de las 60 líneas faltan
 
 ### Requirement: Metadatos plegados y alertas enteras
-Un bloque del harness con la línea de contexto o con los pasos de una Skill SHALL verse plegado a una línea cuando tenga más de una. Un error, un aviso o una interrupción del harness SHALL verse entero.
+Un bloque del harness con los pasos de una Skill SHALL verse plegado a una línea cuando tenga más de una. Un error, un aviso o una interrupción del harness SHALL verse entero. Las líneas de una nota omitida (`omitted:`) y de un fichero adjunto (`attached:`) SHALL verse siempre enteras, y SHALL NOT juntarse con la línea de contexto. Lo que muestra `/context` SHALL llegar siempre entero, porque es exactamente lo que se envía.
 
 #### Scenario: Pasos de una Skill
 - **WHEN** una Skill informa de varios pasos
@@ -35,6 +35,14 @@ Un bloque del harness con la línea de contexto o con los pasos de una Skill SHA
 - **WHEN** el harness muestra un `error:` de varias líneas
 - **THEN** se ve entero
 
+#### Scenario: Nota omitida y fichero adjunto
+- **WHEN** una pregunta lleva la memoria de un proyecto con una nota omitida y un fichero adjunto con `/file`
+- **THEN** se ven enteras la línea `omitted:` con la nota, la línea de contexto y la línea `attached:` con el nombre del fichero
+
+#### Scenario: Un contexto largo
+- **WHEN** la persona escribe `/context` y el contexto es más largo que el panel
+- **THEN** se ve entero, sin vista previa
+
 ### Requirement: El pie dice siempre lo que falta
 Mientras un bloque no se vea entero, el harness SHALL decir cuántas de sus líneas faltan, contadas sobre las líneas del bloque y no sobre lo que el texto diga de sí mismo. Una línea plegada SHALL decir cuántas líneas tiene el bloque.
 
@@ -43,7 +51,15 @@ Mientras un bloque no se vea entero, el harness SHALL decir cuántas de sus lín
 - **THEN** el pie del harness dice el número real de líneas que faltan, y al abrir la respuesta se ve la última línea
 
 ### Requirement: Línea plegada construida por el harness
-La línea plegada de un bloque SHALL construirla el harness con su propio estado (quién, cuántas líneas, el estado del turno) y, como mucho, un extracto del texto: el esquema de sus títulos de Markdown o su primera línea no vacía. Ningún texto ajeno SHALL poder obtener el estilo del cromo del harness.
+La línea plegada de un bloque SHALL construirla el harness con su propio estado (quién, cuántas líneas, el estado del turno) y, como mucho, un extracto del texto: el esquema de sus títulos de Markdown o su primera línea no vacía. El estado del turno SHALL salir solo de las líneas de alerta y de pasos de Skill del harness, comparadas desde su primer carácter. Ningún texto ajeno SHALL poder obtener el estilo del cromo del harness.
+
+#### Scenario: Una nota cuyo nombre parece un estado
+- **WHEN** la memoria omite una nota llamada `notes/x skill: run r1 is approved`
+- **THEN** la línea plegada del turno no dice `approved`
+
+#### Scenario: Ctrl+C sin nada en curso
+- **WHEN** la persona pulsa `ctrl+c` sin ninguna petición en curso, tras una respuesta completa
+- **THEN** la línea plegada de ese turno sigue diciendo `completed`
 
 #### Scenario: Esquema de títulos
 - **WHEN** una respuesta con los títulos `## Resumen` y `## Riesgos` se pliega
@@ -61,7 +77,11 @@ El extracto de una línea plegada SHALL estar saneado, ser de una sola línea y 
 - **THEN** la línea plegada es una sola línea, sin ninguno de ellos, de como mucho 200 caracteres
 
 ### Requirement: Turnos antiguos plegados
-Cuando la persona envía una línea, el harness SHALL plegar los turnos anteriores al penúltimo. SHALL NOT plegar un turno que la persona haya abierto o cerrado a mano, uno con un bloque que la persona haya abierto o cerrado a mano, ni el que tiene la selección. Una elección de la persona (un bloque, un turno, expandir o plegar todo) SHALL mantenerse hasta que la persona la cambie.
+Cuando la persona envía una línea, el harness SHALL plegar los turnos anteriores al penúltimo. SHALL NOT plegar un turno que la persona haya abierto o cerrado a mano, uno con un bloque que la persona haya abierto o cerrado a mano, el que tiene la selección, ni uno con un error, un aviso o una interrupción. Una elección de la persona (un bloque, un turno, expandir o plegar todo) SHALL mantenerse hasta que la persona la cambie.
+
+#### Scenario: Un turno con un aviso
+- **WHEN** un turno tuvo una línea `warning:` y la persona envía dos preguntas más
+- **THEN** ese turno sigue abierto, y si la persona lo pliega, su línea dice `completed · 1 warning`
 
 #### Scenario: Elección a mano
 - **WHEN** la persona abre entera la respuesta del segundo turno y después envía dos preguntas más
@@ -78,6 +98,13 @@ La entrada de la conversación SHALL conservar el foco mientras se recorren los 
 - **WHEN** el proveedor trabaja, la entrada tiene una línea escrita por adelantado y la persona pulsa la cabecera de un bloque, `ctrl+o`, `alt+↑` y `enter`
 - **THEN** el bloque se abre o se cierra, la línea sigue en la entrada y el proveedor no recibe otra petición
 
+### Requirement: Una pantalla encima termina el recorrido
+Abrir cualquier pantalla encima de la conversación (la caja de aprobación, la paleta, un selector) SHALL terminar el recorrido de los bloques.
+
+#### Scenario: La caja de aprobación durante el recorrido
+- **WHEN** la persona recorre los bloques, se abre la caja de aprobación y se cierra, y la persona escribe `/status` y pulsa `enter`
+- **THEN** ya no se recorrían los bloques al abrirse la caja, y `enter` envía `/status` sin abrir ni cerrar ningún bloque
+
 ### Requirement: Ratón y paleta para los bloques
 Un clic en la cabecera o en el pie de un bloque, o en una línea plegada, SHALL abrirlo o cerrarlo; un clic en el texto de un bloque SHALL NOT hacer nada. La paleta SHALL ofrecer recorrer los bloques, abrir o cerrar el elegido, expandir todo, plegar todo e ir al final.
 
@@ -90,7 +117,7 @@ Un clic en la cabecera o en el pie de un bloque, o en una línea plegada, SHALL 
 - **THEN** cada turno se ve como una línea
 
 ### Requirement: Lo que se lee no salta
-Al abrir o cerrar un bloque o un turno, su cabecera SHALL quedarse en la misma fila del panel. Al expandir o plegar todo, SHALL quedarse en su fila la cabecera del turno elegido (o del primero visible). Lo que el harness muestre mientras la persona recorre los bloques, o mientras lee más arriba del final, SHALL NOT mover el panel. Esto vale siempre que el contenido deje desplazar el panel hasta esa posición.
+Al abrir o cerrar un bloque o un turno, su cabecera SHALL quedarse en la misma fila del panel. Al expandir o plegar todo, SHALL quedarse en su fila la cabecera del turno elegido (o del primero visible). Lo que el harness muestre mientras la persona recorre los bloques, o mientras lee más arriba del final, SHALL NOT mover el panel. Enviar una línea SHALL llevar siempre al final, también mientras se recorre. Esto vale siempre que el contenido deje desplazar el panel hasta esa posición.
 
 #### Scenario: Plegar todo mientras se lee un turno
 - **WHEN** la persona lee la respuesta abierta de un turno antiguo, llega texto nuevo al final y después pliega todo

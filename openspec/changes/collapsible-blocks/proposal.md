@@ -48,7 +48,7 @@ Pertenece al **Corte 9 · Interfaz conversacional**, cuarta entrega (tras `inter
 
 ### Modified Capabilities
 
-- `interactive-shell`, sin archivar, como en `shell-tui`: se **añaden** los requisitos de bloques plegables. Este change **amplía** un requisito de `shell-tui`, «Texto ajeno contenido e inerte en la pantalla completa», que decía que el texto ajeno se muestra *solo* dentro de un bloque con borde. Ahora una línea plegada puede llevar un extracto acotado, de una línea, tras la marca `| ` y con un estilo que el texto ajeno no puede producir. Como `shell-tui` no está archivado, el delta va como requisito añadido («Extracto ajeno en una línea plegada»). Al archivar, después de `shell-tui`, pasa a MODIFIED de aquel requisito (tarea 6.2).
+- `interactive-shell`, sin archivar, como en `shell-tui`: se **añaden** los requisitos de bloques plegables. Este change **amplía** un requisito de `shell-tui`, «Texto ajeno contenido e inerte en la pantalla completa», que decía que el texto ajeno se muestra *solo* dentro de un bloque con borde. Ahora una línea plegada puede llevar un extracto acotado, de una línea, tras la marca `| ` y con un estilo que el texto ajeno no puede producir. Como `shell-tui` no está archivado, el delta va como requisito añadido («Extracto ajeno en una línea plegada»). Al archivar, después de `shell-tui`, pasa a MODIFIED de aquel requisito (tarea 7.2).
 - Comprobado con `grep -rn "pantalla completa\|interactive-shell\|bloque" openspec/specs/` (2026-11-27): nada sobre la pantalla. Las coincidencias de «bloque» son el bloque de contexto de la memoria (`project-context`, `secret-redaction`), que este change no toca. Ninguna capacidad de `openspec/specs/` cambia.
 
 ## Impact
