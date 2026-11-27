@@ -36,12 +36,40 @@ from textual.binding import Binding
 from textual.command import DiscoveryHit, Hit, Hits, Provider
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
-from textual.events import Paste
+from textual.events import Blur, Click, Key, Paste
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
+from harness.shell.blocks import (
+    ALERT,
+    HeightOf,
+    body_text,
+    CONTEXT,
+    KEEP_OPEN_TURNS,
+    NOTICE,
+    REPLY,
+    RESULT,
+    SKILL,
+    Fold,
+    category,
+    default_fold,
+    expanded_footer,
+    first_line,
+    folds_by_default,
+    hidden_footer,
+    is_not_shown_notice,
+    one_line,
+    outline,
+    plural,
+    preview_lines,
+    rows_in_preview,
+    turn_has_alert,
+    turn_state,
+    turn_who,
+)
+from harness.shell.blocks import FOREIGN as FOREIGN_KIND
 from harness.shell.completion import PATH, acceptable_path, complete
 from harness.shell.render import (
     CONTINUATION_PREFIX,
@@ -60,9 +88,11 @@ from harness.shell.render import (
     MD_QUOTE,
     MD_RULE,
     MD_STRONG,
+    MIN_COLUMNS,
     STATUS,
     Row,
     harness_rows,
+    row_text,
     rows_of_plain_text,
 )
 from harness.shell.terminal import PanelState, ShellState, WaitInterrupted
@@ -76,7 +106,11 @@ CRASHED = ("ai-harness: the full screen stopped on an internal error; nothing of
            "without the full screen.")
 READY_HINT = "Type a question, or / for a command"
 BUSY_HINT = "working: ctrl+c interrupts"
-FOOTER = "ctrl+p commands  ctrl+c interrupts  ctrl+n new session  ctrl+q leaves"
+BROWSE_HINT = "browsing the blocks: esc or any letter goes back to typing"
+# The keys that matter most first: a narrow terminal cuts the end of the line.
+FOOTER = ("ctrl+p commands  ctrl+c interrupts  ctrl+q leaves  ctrl+n new  esc blocks  "
+          "ctrl+o open/close")
+BROWSE_FOOTER = "up/down move  enter open/close  +/- all  end latest  esc back to typing"
 ARM_S = 0.5  # the approval buttons stay disabled this long after the box opens
 HISTORY_MAX = 200  # lines typed at the conversation input, kept in memory only
 TICK_S = 1.0
@@ -106,6 +140,14 @@ STYLES: dict[str, str] = {
     MD_EM: "italic",
     MD_LINK: "underline #56b6c2",
 }
+
+# The chrome of a folded block (its collapsed line and the footer of a harness block): the one
+# style with a background. No style of STYLES has one, and foreign text only ever gets a style
+# of STYLES, so no foreign text can look like it (collapsible-blocks D4).
+CHROME = "bold #e6e6e6 on #3a3f4b"
+EXCERPT_STYLE = "italic"
+TYPED_MARK = "› "  # before an excerpt of what the person typed
+CLOSED = "▸"
 
 _INTERRUPT = ("interrupt", None)
 _EOF = ("eof", None)
@@ -240,7 +282,11 @@ class TuiTerminal:
         self.show_rows(rows_of_plain_text(text))
 
     def show_rows(self, rows: list[Row]) -> None:
-        label, self._label = self._label, None
+        # The provider's name titles the foreign text that follows its answer; a harness
+        # line in between (a warning of the request) does not use it up (collapsible-blocks).
+        label = self._label
+        if any(_is_foreign(row) for row in rows):
+            self._label = None
         self._post("show_rows", rows, label)
 
     def bind(self, state: ShellState) -> None:
@@ -307,6 +353,7 @@ class TuiTerminal:
         self._loop = asyncio.get_running_loop()
         self._wake = asyncio.Event()
         self._approval = None
+        self._label = None  # a reply's title never outlives its action
         self._drop_stale(self._lines)
         if self._closing:
             return None
@@ -443,12 +490,267 @@ class Block(Static):
         super().__init__(content, markup=False, classes=classes)
 
 
-class ForeignBlock(Block):
-    """Text from outside the harness, inside its border (D3); the title is the harness's."""
+def chrome_line(glyph: str, words: str, excerpt: str, *, foreign: bool,
+                typed: bool = False) -> Content:
+    """A collapsed line (collapsible-blocks D4): the harness's words in CHROME, a style no
+    foreign text can get, then a bounded single-line excerpt behind its mark (`| ` for text
+    from outside, `› ` for what the person typed), never in CHROME."""
+    parts: list[tuple[str, str]] = [(terminal_safe(f"{glyph} {words} "), CHROME)]
+    if excerpt:
+        mark = FOREIGN_PREFIX if foreign else TYPED_MARK if typed else ""
+        parts.append((" ", ""))
+        if mark:
+            parts.append((mark, STYLES[GUTTER]))
+        parts.append((one_line(excerpt), EXCERPT_STYLE))
+    return Content.assemble(*parts)
 
-    def __init__(self, rows: list[Row], title: str) -> None:
-        super().__init__(rows_content(rows, strip_gutter=True), classes="foreign")
+
+class FoldBlock(Block):
+    """A block of a turn that folds (collapsible-blocks D1-D3): its rows (already cleaned,
+    redacted and styled by the core), how they are shown now and whether the person chose
+    that. Only the shown part is turned into Content: a collapsed block costs one line."""
+
+    foreign = False
+
+    def __init__(self, rows: list[Row], *, kind: str, who: str, preview: int,
+                 classes: str, height_of: HeightOf | None = None) -> None:
+        self.rows = rows
+        self.kind = kind
+        self.who = who
+        self.preview = preview
+        self.height_of: HeightOf = height_of or (lambda row: 1)
+        self.manual = False
+        self.truncated = False
+        self.renders = 0  # how many times its content was built (the tests count them)
+        self.long = folds_by_default(rows, preview, self.height_of)
+        self.fold = default_fold(kind, rows, preview, self.height_of)
+        super().__init__(Content(""), classes=f"{classes} block")
+        self._show()
+
+    @property
+    def total(self) -> int:
+        return len(self.rows)
+
+    @property
+    def toggleable(self) -> bool:
+        return self.foreign or self.total > 1
+
+    @property
+    def widget(self) -> FoldBlock:
+        return self
+
+    def shown_rows(self) -> int:
+        if self.fold is Fold.EXPANDED:
+            return self.total
+        if self.fold is Fold.PREVIEW:
+            return rows_in_preview(self.rows, self.preview, self.height_of)
+        return 0
+
+    def hidden_rows(self) -> int:
+        """How many rows are not on the screen now: what the footer or the line says."""
+        return self.total - self.shown_rows()
+
+    def set_fold(self, fold: Fold, *, manual: bool) -> None:
+        if manual:
+            self.manual = True
+        if fold is not self.fold:
+            self.fold = fold
+            self._show()
+
+    def toggle(self) -> None:
+        """Open shows every row; closed is one line. A folded block opens."""
+        self.set_fold(Fold.COLLAPSED if self.fold is Fold.EXPANDED else Fold.EXPANDED,
+                      manual=True)
+
+    def add_rows(self, rows: list[Row]) -> None:
+        self.rows = self.rows + rows
+        self.long = folds_by_default(self.rows, self.preview, self.height_of)
+        if not self.manual:
+            self.fold = default_fold(self.kind, self.rows, self.preview, self.height_of)
+        self._show()
+
+    def mark_truncated(self) -> None:
+        self.truncated = True
+        self._show()
+
+    def _words(self) -> str:
+        words = f"{self.who} · {plural(self.total, 'line')}"
+        return words + (" · truncated" if self.truncated else "")
+
+    def summary(self) -> Content:
+        raise NotImplementedError
+
+    def body(self, count: int) -> Content:
+        raise NotImplementedError
+
+    def _show(self) -> None:
+        self.renders += 1
+        collapsed = self.fold is Fold.COLLAPSED
+        self.set_class(collapsed, "-collapsed")
+        self.update(self.summary() if collapsed else self.body(self.shown_rows()))
+
+    def on_click(self, event: Click) -> None:
+        """A click on the block's header (its first row) or its footer (its last row)
+        toggles it; anywhere else, nothing. It never takes the focus or sends anything."""
+        event.stop()
+        last = self.outer_size.height - 1
+        if self.fold is Fold.COLLAPSED or event.y in (0, last) or not self.foreign:
+            self.app.toggle_item(self)  # type: ignore[attr-defined]
+
+
+class ForeignBlock(FoldBlock):
+    """Text from outside the harness, inside its border (D3); the title is the harness's,
+    and so is the footer in the bottom border that says how many rows are hidden
+    (collapsible-blocks D4): neither border can hold foreign text."""
+
+    foreign = True
+
+    def __init__(self, rows: list[Row], title: str, *, kind: str = FOREIGN_KIND,
+                 preview: int = UNCUT, height_of: HeightOf | None = None) -> None:
+        super().__init__(rows, kind=kind, who=title, preview=preview, classes="foreign",
+                         height_of=height_of)
+
+    def summary(self) -> Content:
+        return chrome_line(CLOSED, self._words(), outline(self.rows), foreign=True)
+
+    def body(self, count: int) -> Content:
+        return rows_content(self.rows[:count], strip_gutter=True)
+
+    def _show(self) -> None:
+        super()._show()
+        if self.fold is Fold.COLLAPSED:
+            self.border_title = self.border_subtitle = None
+            return
+        foldable = self.long
+        title = self._words() if foldable or self.truncated else self.who
         self.border_title = plain(title)
+        hidden = self.hidden_rows()
+        footer = (hidden_footer(hidden) if hidden else
+                  expanded_footer(self.total) if foldable else None)
+        self.border_subtitle = plain(footer) if footer else None
+
+
+NOTICE_WHO = {CONTEXT: "context", SKILL: "skill steps"}
+
+
+class NoticeBlock(FoldBlock):
+    """Rows of the harness. Folded, its footer is a line of chrome after the rows."""
+
+    def __init__(self, rows: list[Row], *, kind: str, preview: int,
+                 height_of: HeightOf | None = None) -> None:
+        super().__init__(rows, kind=kind, who=NOTICE_WHO.get(kind, "harness"),
+                         preview=preview, classes="harness", height_of=height_of)
+
+    def summary(self) -> Content:
+        rows = self.rows
+        if self.kind == CONTEXT:  # its own summary line says the most
+            rows = [r for r in rows if row_text(r).startswith("context:")] or rows
+        elif self.kind == SKILL:  # the newest step says where the run is
+            rows = rows[::-1]
+        return chrome_line(CLOSED, self._words(), first_line(rows), foreign=False)
+
+    def body(self, count: int) -> Content:
+        content = rows_content(self.rows[:count])
+        hidden = self.total - count
+        if not hidden:
+            return content
+        return Content.assemble(content, "\n", (hidden_footer(hidden), CHROME))
+
+
+class Turn(Vertical):
+    """A turn of the conversation (collapsible-blocks D2): the line the person sent (none for
+    what was shown before the first one) and the blocks shown after it. Closed, the turn is
+    its one-line summary."""
+
+    can_focus = False
+
+    def __init__(self, line: str | None) -> None:
+        super().__init__(classes="turn")
+        self.line = line
+        self.closed = False
+        self.manual = False
+        self.summary_line = Block(Content(""), classes="turn-summary")
+        self.you = Block(plain(line), classes="you") if line is not None else None
+        self.items: list[FoldBlock] = []
+
+    def mount_header(self) -> None:
+        """Mounted right after the turn, before any block: mounts keep their call order,
+        whereas `compose` would run later than a block mounted at once."""
+        self.mount(self.summary_line, *([self.you] if self.you is not None else []))
+
+    @property
+    def toggleable(self) -> bool:
+        return self.you is not None or self.closed
+
+    @property
+    def widget(self) -> Static:
+        return self.summary_line if self.closed or self.you is None else self.you
+
+    def add(self, block: FoldBlock) -> None:
+        self.items.append(block)
+        self.mount(block)
+        if self.closed:
+            self.refresh_summary()
+
+    def last(self) -> FoldBlock | None:
+        return self.items[-1] if self.items else None
+
+    def total(self) -> int:
+        return sum(block.total for block in self.items) + (1 if self.you is not None else 0)
+
+    def _state_lines(self) -> list[str]:
+        """The lines a turn's state is read from: the harness's own alerts and skill steps,
+        never a block that can carry a vault path or a listing (review 2026-11-27)."""
+        return [row_text(row) for block in self.items
+                if not block.foreign and block.kind in (ALERT, SKILL, RESULT)
+                for row in block.rows]
+
+    @property
+    def has_alert(self) -> bool:
+        return turn_has_alert(self._state_lines())
+
+    def refresh_summary(self) -> None:
+        harness = self._state_lines()
+        replies = [block for block in self.items if block.kind == REPLY]
+        state = turn_state(harness, bool(replies), any(b.truncated for b in self.items))
+        who = turn_who(self.line, replies[-1].who if replies else None)
+        words = f"{who} · {plural(self.total(), 'line')} · {state}"
+        if self.line is not None:
+            excerpt, foreign = self.line, False
+        else:
+            excerpt = first_line([row for block in self.items for row in block.rows[:1]])
+            foreign = bool(self.items) and self.items[0].foreign
+        self.summary_line.update(chrome_line(CLOSED, words, excerpt, foreign=foreign,
+                                             typed=self.line is not None))
+
+    def set_closed(self, closed: bool, *, manual: bool) -> None:
+        if manual:
+            self.manual = True
+        if closed and not self.items and self.you is None:
+            return  # nothing to close
+        if closed:
+            self.refresh_summary()
+        self.closed = closed
+        self.set_class(closed, "-closed")
+
+    def toggle(self) -> None:
+        self.set_closed(not self.closed, manual=True)
+
+    def on_click(self, event: Click) -> None:
+        """A click on the turn's line or its summary opens or closes the turn."""
+        if event.widget in (self.summary_line, self.you):
+            event.stop()
+            self.app.toggle_item(self)  # type: ignore[attr-defined]
+
+
+class SessionLog(Vertical):
+    """The turns of one session, in memory only (collapsible-blocks D5)."""
+
+    can_focus = False
+
+    def __init__(self) -> None:
+        super().__init__(classes="session-log")
+        self.turns: list[Turn] = []
 
 
 class SidePanel(Static):
@@ -492,13 +794,69 @@ class PromptInput(Input):
         Binding("down", "history(1)", show=False),
         Binding("tab", "complete", show=False, priority=True),
         Binding("ctrl+d", "end_of_input", show=False),
+        # The blocks, from the input (collapsible-blocks D3): the focus never leaves it.
+        Binding("alt+up,ctrl+up", "blocks('select', -1)", show=False),
+        Binding("alt+down,ctrl+down", "blocks('select', 1)", show=False),
+        Binding("ctrl+o", "blocks('toggle')", show=False),
     ]
+
+    # Browsing (Escape): these keys act on the blocks; any other key ends browsing and does
+    # what it does at the input, so typing is never lost (collapsible-blocks D3).
+    BROWSE_KEYS: ClassVar[dict[str, tuple[str, ...]]] = {
+        "up": ("select", -1), "down": ("select", 1),
+        "alt+up": ("select", -1), "alt+down": ("select", 1),
+        "ctrl+up": ("select", -1), "ctrl+down": ("select", 1),
+        "home": ("edge", 0), "end": ("edge", 1),
+        "pageup": ("page", -1), "pagedown": ("page", 1),
+        "enter": ("toggle",), "space": ("toggle",), "ctrl+o": ("toggle",),
+        "plus": ("all", 1), "minus": ("all", 0),
+    }
 
     def __init__(self) -> None:
         super().__init__(placeholder=BUSY_HINT, id="prompt")
         self.history: list[str] = []
         self._position = 0
         self.state: ShellState | None = None
+        self.browsing = False
+        self._hint = BUSY_HINT
+
+    def set_hint(self, hint: str) -> None:
+        self._hint = hint
+        if not self.browsing:
+            self.placeholder = hint
+
+    def set_browsing(self, browsing: bool) -> None:
+        if browsing == self.browsing:
+            return
+        self.browsing = browsing
+        self.set_class(browsing, "-browsing")
+        self.placeholder = BROWSE_HINT if browsing else self._hint
+        self.app.browsing_changed(browsing)  # type: ignore[attr-defined]
+
+    def action_blocks(self, what: str, *args: int) -> None:
+        self.app.blocks_action(what, *args)  # type: ignore[attr-defined]
+
+    async def _on_key(self, event: Key) -> None:
+        if not self.browsing:
+            if event.key == "escape":
+                event.stop()
+                event.prevent_default()
+                self.set_browsing(True)
+                self.app.blocks_action("start")  # type: ignore[attr-defined]
+            return
+        action = self.BROWSE_KEYS.get(event.key)
+        if event.key == "escape" or action is not None:
+            event.stop()
+            event.prevent_default()
+            if event.key == "escape":
+                self.set_browsing(False)
+            else:
+                self.app.blocks_action(*action)  # type: ignore[attr-defined]
+            return
+        self.set_browsing(False)  # any other key: back to typing, and the key types
+
+    def _on_blur(self, event: Blur) -> None:
+        self.set_browsing(False)  # the focus moved to another widget of the screen
 
     def remember(self, line: str) -> None:
         if line and (not self.history or self.history[-1] != line):
@@ -787,9 +1145,22 @@ COMMAND_ENTRIES: tuple[tuple[str, str, str], ...] = (
     ("Choose a skill...", "pick a skill to run", "pick_skill"),
     ("Attach a file...", "pick a text file for the next question (/file)", "pick_file"),
     ("Search memory", "search the vault (/memory TERMS)", "insert:/memory "),
+    ("Browse blocks", "move between the blocks with the arrows (esc)", "browse"),
+    ("Open or close the block", "the selected block, or the newest reply (ctrl+o)", "toggle"),
+    ("Expand all blocks", "every turn and block of this session open (+ when browsing)",
+     "expand_all"),
+    ("Collapse all blocks", "every turn of this session as one line (- when browsing)",
+     "collapse_all"),
+    ("Jump to latest", "the end of the conversation (end when browsing)", "latest"),
     ("Interrupt", "stop the question in progress (ctrl+c)", "interrupt"),
     ("Leave", "close the provider and leave (ctrl+q)", "quit"),
 )
+
+
+BLOCK_ENTRIES: dict[str, tuple[str, ...]] = {
+    "toggle": ("toggle",), "expand_all": ("all", 1), "collapse_all": ("all", 0),
+    "latest": ("latest",),
+}
 
 
 class HarnessCommands(Provider):
@@ -832,10 +1203,24 @@ class HarnessApp(App[int]):
     #prompt { dock: bottom; margin: 0 0 1 0; }
     #footer { dock: bottom; height: 1; background: $panel; color: $text-muted; padding: 0 1; }
     #working { height: auto; color: $text-muted; display: none; }
+    #conversation { height: auto; min-height: 100%%; }
     .you { margin: 1 0 0 0; padding: 0 1; border-left: thick $accent; }
     .harness { color: $text-muted; }
     .foreign { margin: 1 0 0 0; padding: 0 1; border: round $secondary;
-               border-title-color: $secondary; border-title-style: bold; }
+               border-title-color: $secondary; border-title-style: bold;
+               border-subtitle-color: #e6e6e6; border-subtitle-background: #3a3f4b;
+               border-subtitle-style: bold; }
+    .session-log { height: auto; }
+    .turn { height: auto; }
+    .turn-summary { display: none; margin: 1 0 0 0; }
+    .turn.-closed > .turn-summary { display: block; }
+    .turn.-closed > .you, .turn.-closed > .block { display: none; }
+    .turn-summary, .block.-collapsed { height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
+    .-selected { background: $accent 25%%; }
+    .foreign.-selected { border: round $accent; }
+    .foreign.-collapsed, .foreign.-collapsed.-selected { border: none; margin: 1 0 0 0;
+                                                         padding: 0 1; }
+    #prompt.-browsing { border: tall $warning; }
     #approval { align: center middle; }
     #approval-box { width: 90%%; height: 90%%; border: heavy $warning; padding: 0 1;
                     border-title-color: $warning; border-title-style: bold;
@@ -872,6 +1257,11 @@ class HarnessApp(App[int]):
         self._leaving = False
         self._approval: ApprovalScreen | None = None
         self.seen_proposals: set[tuple[str, ...]] = set()  # whose end has been shown
+        # The blocks (collapsible-blocks D5): one log per session, in memory only.
+        self.session_logs: dict[str, SessionLog] = {}
+        self._session_key: str | None = None
+        self._session_log: SessionLog | None = None
+        self.selected: Turn | FoldBlock | None = None
         terminal.app = self
 
     # -- layout -----------------------------------------------------------------------------
@@ -938,7 +1328,14 @@ class HarnessApp(App[int]):
     def on_mount(self) -> None:
         self.ui_loop = asyncio.get_running_loop()
         log = self.query_one("#log", VerticalScroll)
-        log.mount(Static(plain(""), markup=False, id="working"))
+        # At least as tall as the pane: the anchored pane then never scrolls above its top
+        # (Textual sets a negative scroll when the content is shorter than the pane).
+        conversation = Vertical(id="conversation")
+        log.mount(conversation)
+        self._session_log = SessionLog()
+        conversation.mount(self._session_log)
+        conversation.mount(Static(plain(""), markup=False, id="working"))
+        log.anchor()  # the end stays in view as blocks arrive (collapsible-blocks D3)
         self.query_one(PromptInput).focus()
         self.set_interval(TICK_S, self._tick)
         self.core = threading.Thread(target=self._run_core, name="conversation", daemon=True)
@@ -969,14 +1366,90 @@ class HarnessApp(App[int]):
     def _log(self) -> VerticalScroll:
         return self.query_one("#log", VerticalScroll)
 
-    def _append(self, widget: Static) -> None:
+    def _follow(self, *, force: bool = False) -> None:
+        """New output keeps the end of the pane in view (the pane is anchored to its bottom
+        while the blocks are laid out), unless the person is browsing the blocks or scrolled
+        up to read; sending a line or switching session always goes to the end."""
         log = self._log()
-        log.mount(widget, before=log.query_one("#working"))
-        log.scroll_end(animate=False)
+        if force:  # checked first: a line sent while browsing goes to the end too
+            log.anchor()
+            return
+        if self.query_one(PromptInput).browsing:
+            return
+        if log.scroll_y >= log.max_scroll_y - 1:
+            log.anchor()
+
+    @property
+    def session_log(self) -> SessionLog:
+        assert self._session_log is not None
+        return self._session_log
+
+    def _turn(self) -> Turn:
+        """The turn output goes to: the newest of the session shown (one without a line, for
+        what comes before the first line)."""
+        log = self.session_log
+        if not log.turns:
+            self._mount_turn(Turn(None))
+        return log.turns[-1]
+
+    def _mount_turn(self, turn: Turn) -> None:
+        log = self.session_log
+        log.turns.append(turn)
+        log.mount(turn)
+        turn.mount_header()
+
+    def _preview(self) -> int:
+        return preview_lines(self._log().size.height or self.size.height or 24)
+
+    def _height_of(self, foreign: bool) -> HeightOf:
+        """The screen rows a row takes in a block of the pane as wide as it is now (a foreign
+        block loses its border and padding): Textual's own wrapping of the row's text."""
+        width = max(MIN_COLUMNS, (self._log().scrollable_content_region.width
+                                  or self.size.width or 80) - (4 if foreign else 0))
+
+        def height_of(row: Row) -> int:
+            return max(1, len(Content(body_text(row)).wrap(width)))
+
+        return height_of
+
+    def start_turn(self, line: str) -> None:
+        """The person sent `line`: a new turn. Older turns fold to their summary line by
+        themselves (D2), except the one before it, one the person opened or closed, the one
+        holding the selection and one with an error, a warning or an interruption."""
+        turns = self.session_log.turns
+        selected_turn = self._turn_of(self.selected)
+        for turn in turns[: max(0, len(turns) - (KEEP_OPEN_TURNS - 1))]:
+            if not turn.manual and not turn.closed and turn is not selected_turn and \
+                    not any(block.manual for block in turn.items) and not turn.has_alert:
+                turn.set_closed(True, manual=False)
+        self._mount_turn(Turn(line))
+        self._follow(force=True)
+
+    def _add_rows(self, rows: list[Row], foreign: bool, label: str | None) -> None:
+        turn = self._turn()
+        last = turn.last()
+        if foreign:
+            command = turn.line.split()[0] if turn.line and turn.line.split() else None
+            kind = category("", foreign=True, label=label, command=command)
+            turn.add(ForeignBlock(rows, label or FOREIGN_TITLE, kind=kind,
+                                  preview=self._preview(), height_of=self._height_of(True)))
+        else:
+            first = row_text(rows[0]) if rows else ""
+            kind = category(first, foreign=False, label=None)
+            if is_not_shown_notice(first) and isinstance(last, ForeignBlock):
+                last.mark_truncated()
+            if isinstance(last, NoticeBlock) and last.kind == kind and kind != ALERT:
+                last.add_rows(rows)  # one block for a run of lines of one kind
+                if turn.closed:
+                    turn.refresh_summary()
+            else:
+                turn.add(NoticeBlock(rows, kind=kind, preview=self._preview(),
+                                     height_of=self._height_of(False)))
+        self._follow()
 
     def show_rows(self, rows: list[Row], label: str | None) -> None:
         """Consecutive rows of one kind make one block: harness rows a plain block, foreign
-        rows a bordered one (D3)."""
+        rows a bordered one (D3). Each block folds as collapsible-blocks D1 says."""
         group: list[Row] = []
         foreign = False
         for row in [*rows, None]:
@@ -985,24 +1458,205 @@ class HarnessApp(App[int]):
                 group.append(row)
                 continue
             if group:
-                if foreign:
-                    self._append(ForeignBlock(group, label or FOREIGN_TITLE))
-                else:
-                    self._append(Block(rows_content(group), classes="harness"))
+                self._add_rows(group, foreign, label)
             if row is not None:
                 group, foreign = [row], _is_foreign(row)
 
     def show_approval_header(self, header: list[str]) -> None:
-        self._append(Block(rows_content(harness_rows(header, None)), classes="harness"))
+        self._add_rows(harness_rows(header, None), False, None)
 
     def show_panel(self, panel: PanelState) -> None:
         side = self.query_one(SidePanel)
         side.panel = panel
         side.show()
+        self._follow_session(panel)
+
+    def _follow_session(self, panel: PanelState) -> None:
+        """Show the blocks of the session held now (D5): the first panel names the session
+        of what was shown so far; another session gets its own log, kept in memory."""
+        key = panel.session_id
+        if self._session_key is None:
+            self._session_key = key
+            self.session_logs[key] = self.session_log
+            return
+        if key == self._session_key:
+            return
+        self.session_log.display = False
+        self._select(None)
+        self.query_one(PromptInput).set_browsing(False)
+        log = self.session_logs.get(key)
+        self._session_key = key
+        if log is None:
+            log = SessionLog()
+            self.session_logs[key] = log
+            self._session_log = log
+            conversation = self.query_one("#conversation", Vertical)
+            conversation.mount(log, before=conversation.query_one("#working"))
+            self._add_rows(harness_rows([
+                f"session {panel.session_name} ({panel.session_id[:8]}): this pane shows "
+                "what happened in it since the conversation opened; /history lists its "
+                "stored messages"], None), False, None)
+        else:
+            self._session_log = log
+            log.display = True
+        self._follow(force=True)
+
+    # -- the blocks: selection, browsing, folding (collapsible-blocks D3) -----------------------
+
+    def _turn_of(self, item: Turn | FoldBlock | None) -> Turn | None:
+        if item is None or isinstance(item, Turn):
+            return item
+        parent = item.parent
+        return parent if isinstance(parent, Turn) else None
+
+    def items(self) -> list[Turn | FoldBlock]:
+        """What the selection moves over, in order: the turns and, inside an open turn, its
+        blocks that can fold."""
+        found: list[Turn | FoldBlock] = []
+        for turn in self.session_log.turns:
+            if turn.toggleable:
+                found.append(turn)
+            if not turn.closed:
+                found.extend(block for block in turn.items if block.toggleable)
+        return found
+
+    @staticmethod
+    def _widgets_of(item: Turn | FoldBlock) -> list[Static]:
+        if isinstance(item, Turn):
+            return [item.summary_line, *([item.you] if item.you is not None else [])]
+        return [item]
+
+    def _mark(self) -> None:
+        """The highlight on the selection's header, wherever the header is now."""
+        item = self.selected
+        if item is not None:
+            for widget in self._widgets_of(item):
+                widget.set_class(widget is item.widget, "-selected")
+
+    def _select(self, item: Turn | FoldBlock | None, *, scroll: bool = True) -> None:
+        previous, self.selected = self.selected, item
+        if previous is not None:
+            for widget in self._widgets_of(previous):
+                widget.remove_class("-selected")
+        if item is not None:
+            self._mark()
+            if scroll:
+                item.widget.scroll_visible(animate=False)
+
+    def _latest_block(self) -> FoldBlock | None:
+        for turn in reversed(self.session_log.turns):
+            for block in reversed(turn.items):
+                if block.foreign:
+                    return block
+        return None
+
+    def toggle_item(self, item: Turn | FoldBlock) -> None:
+        """Open or close one turn or block: a pure change of the screen. The item's header
+        stays where it was on the screen (D3)."""
+        if not item.toggleable:
+            return
+        self._select(item, scroll=False)
+        self._keep_in_place(item, item.toggle)
+        self._mark()
+
+    def _keep_in_place(self, item: Turn | FoldBlock, change: Callable[[], None]) -> None:
+        """Run `change` and scroll so that `item`'s header is where it was in the pane (at
+        its top when it was above it)."""
+        log = self._log()
+        try:
+            before = item.widget.region.y - log.region.y
+        except Exception:  # noqa: BLE001 - not laid out yet: nothing to keep in place
+            change()
+            return
+        before = max(0, min(before, max(0, log.size.height - 1)))
+        change()
+
+        def restore() -> None:
+            try:
+                after = item.widget.region.y - log.region.y
+            except Exception:  # noqa: BLE001 - gone from the screen
+                return
+            if after != before:
+                log.scroll_to(y=max(0, log.scroll_y + after - before), animate=False,
+                              immediate=True)
+
+        self.call_after_refresh(restore)
+
+    def _anchor(self) -> Turn | FoldBlock | None:
+        """The item the person is reading: the selection, else the first one whose header is
+        in the pane."""
+        if self.selected is not None:
+            return self._turn_of(self.selected) if isinstance(self.selected, FoldBlock) \
+                else self.selected
+        log = self._log()
+        for turn in self.session_log.turns:
+            try:
+                if turn.widget.region.y >= log.region.y or turn.region.bottom > log.region.y:
+                    return turn
+            except Exception:  # noqa: BLE001
+                continue
+        return None
+
+    def set_all(self, opened: bool) -> None:
+        """Expand all: every turn open and every block whole. Collapse all: every turn as its
+        line. Both are the person's choice, so they stick."""
+        def change() -> None:
+            for turn in self.session_log.turns:
+                if opened:
+                    for block in turn.items:
+                        block.set_fold(Fold.EXPANDED, manual=True)
+                turn.set_closed(not opened, manual=True)
+
+        anchor = self._anchor()
+        if isinstance(self.selected, FoldBlock) and not opened:
+            self._select(self._turn_of(self.selected))
+        if anchor is None:
+            change()
+        else:
+            self._keep_in_place(anchor, change)
+
+    def blocks_action(self, what: str, *args: int) -> None:
+        """The keys and palette entries of the blocks. None sends anything or moves the focus."""
+        items = self.items()
+        if what == "start":
+            self._log().release_anchor()  # what arrives now does not move the pane
+            if self.selected is None and items:
+                self._select(items[-1])
+        elif what == "select" and items:
+            step = args[0]
+            if self.selected not in items:
+                self._select(items[-1] if step < 0 else items[0])
+            else:
+                index = items.index(self.selected) + step
+                self._select(items[max(0, min(len(items) - 1, index))])
+        elif what == "edge" and items:
+            self._select(items[-1] if args[0] else items[0])
+            if args[0]:
+                self._log().scroll_end(animate=False)
+        elif what == "edge":
+            self._log().scroll_end(animate=False)
+        elif what == "latest":
+            if self.query_one(PromptInput).browsing and items:
+                self._select(items[-1], scroll=False)
+            self._log().anchor()  # and it follows what arrives again
+        elif what == "page":
+            log = self._log()
+            (log.scroll_page_down if args[0] > 0 else log.scroll_page_up)(animate=False)
+        elif what == "toggle":
+            item = self.selected if self.selected in items else self._latest_block()
+            if item is not None:
+                self.toggle_item(item)
+        elif what == "all":
+            self.set_all(bool(args[0]))
+
+    def browsing_changed(self, browsing: bool) -> None:
+        self.query_one("#footer", Static).update(plain(BROWSE_FOOTER if browsing else FOOTER))
+        if not browsing:
+            self._select(None)
 
     def set_ready(self, ready: bool) -> None:
         self.ready = ready
-        self.query_one(PromptInput).placeholder = READY_HINT if ready else BUSY_HINT
+        self.query_one(PromptInput).set_hint(READY_HINT if ready else BUSY_HINT)
 
     def set_working(self, label: str | None) -> None:
         self._working = label
@@ -1020,6 +1674,13 @@ class HarnessApp(App[int]):
         seconds = int(time.monotonic() - self._started)
         working.update(plain(f"{self._working}: thinking ({seconds} s), ctrl+c interrupts"))
         working.display = True
+
+    def push_screen(self, *args, **kwargs):  # type: ignore[override]
+        """Any screen over the conversation (the approval box, the palette, a picker) ends
+        browsing: Textual sends no Blur to the input it covers (review 2026-11-27)."""
+        for prompt in self.query(PromptInput):
+            prompt.set_browsing(False)
+        return super().push_screen(*args, **kwargs)
 
     def open_approval(self, header: list[str], content: list[str], approval_hash: str,
                       question: str) -> None:
@@ -1063,7 +1724,7 @@ class HarnessApp(App[int]):
                         severity="warning", timeout=3)
             return False
         if line.strip():
-            self._append(Block(plain(line), classes="you"))
+            self.start_turn(line)
         return True
 
     def action_interrupt(self) -> None:
@@ -1105,6 +1766,13 @@ class HarnessApp(App[int]):
             self.action_interrupt()
         elif what == "quit":
             self.action_leave()
+        elif what == "browse":
+            prompt = self.query_one(PromptInput)
+            prompt.focus()
+            prompt.set_browsing(True)
+            self.blocks_action("start")
+        elif what in BLOCK_ENTRIES:
+            self.blocks_action(*BLOCK_ENTRIES[what])
 
     def _skill_chosen(self, name: str | None) -> None:
         if name is not None:
