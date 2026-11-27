@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from harness.core.response_mode import ResponseMode
+
 # What an argument position takes, for completion (completion.py) and the short forms
 # (shortforms.py). Values that are typed freely complete nothing.
 PROJECT = "project"  # a folder under projects/ of the vault
@@ -20,6 +22,8 @@ SKILL_INPUT = "skill-input"  # NAME=VALUE, or a path when the skill declares one
 INPUT_PATH = "input-path"  # NAME=PATH of --file
 PATH = "path"  # a path on the disk, relative to the working folder
 TEXT = "text"  # free text
+MODE = "mode"  # a response mode (response-mode): one of MODES
+MODES: tuple[str, ...] = tuple(mode.value for mode in ResponseMode)
 
 
 @dataclass(frozen=True)
@@ -70,6 +74,8 @@ TABLE: tuple[CommandSpec, ...] = (
     CommandSpec("file", 1, 1, "/file PATH",
                 "attach a text file to the next question (it is never stored)",
                 positional=(PATH,)),
+    CommandSpec("mode", 0, 1, f"/mode [{'|'.join(MODES)}]",
+                "the response mode of this session (nothing is sent)", positional=(MODE,)),
     CommandSpec("exit", 0, 0, "/exit", "leave (end of input leaves too)"),
 )
 
