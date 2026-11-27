@@ -1,6 +1,6 @@
 # Tasks
 
-Cada `[x]` lleva su recibo debajo, con fecha y plataforma. Cada grupo es un tramo de `design.md` («Plan de tramos»): su propia rama desde `develop`, su PR y `scripts/verify.sh` en verde. Los controles negativos se aplican con un guion fuera del repositorio (mutación, prueba, restauración) y su recibo es `1 failed` o más. Los grupos 2 a 8 dependen de las respuestas de Wilson a P2 (alcance) y P4 (versiones) de `design.md`; el grupo 1 no.
+Cada `[x]` lleva su recibo debajo, con fecha y plataforma. Cada grupo es un tramo de `design.md` («Plan de tramos»): su propia rama desde `develop`, su PR y `scripts/verify.sh` en verde. Los controles negativos se aplican con un guion fuera del repositorio (mutación, prueba, restauración) y su recibo es `1 failed` o más. Decisiones de Wilson del 2026-11-27 (`design.md`): SQLModel completo; el grupo 1 entra ya y los grupos 2 a 8 empiezan cuando estén mergeadas `feature/prompt-economy`, `feature/approval-buttons` y `feature/collapsible-blocks`.
 
 ## 1. Tramo 0 · Guarda contra SQL construido
 
@@ -13,7 +13,7 @@ Cada `[x]` lleva su recibo debajo, con fecha y plataforma. Cada grupo es un tram
 
 ## 2. Tramo 1 · Dependencias, modelos y fontanería, sin cambiar conducta
 
-- [ ] 2.1 `sqlmodel` y `sqlalchemy` fijadas con `==` (D8, P4). Recibo: versión, licencia, fecha de publicación (≥ 14 días) y ruedas `cp314` para macOS arm64 y Windows amd64 de cada una, leídas de PyPI ese día; `uv lock --check` pasa; la diferencia de `uv.lock` añade solo esas dos distribuciones.
+- [ ] 2.1 `sqlmodel` y `sqlalchemy` fijadas con `==` (D8, Q4). Recibo: versión, licencia, fecha de publicación (≥ 14 días) y ruedas `cp314` para macOS arm64 y Windows amd64 de cada una, leídas de PyPI ese día; `uv lock --check` pasa; la diferencia de `uv.lock` añade solo esas dos distribuciones.
 - [ ] 2.2 `harness/storage/tables.py` con las 10 tablas de dominio y el tipo guardado (D2), y `tests/unit/test_schema_matches_migrations.py` (D3). Oráculo: la prueba pasa comparando `table_info`, `foreign_key_list` e índices (con el `WHERE` de los parciales). Controles negativos: quitar una columna del modelo, cambiar su nulabilidad, quitar el `sqlite_where` de `idx_approvals_one_live_per_step` y añadir una migración `008` de prueba con una columna → cada uno `1 failed` que nombra tabla y columna o índice.
 - [ ] 2.3 `Engine` por conexión sobre la conexión de `connect()` (D4, D7): `creator`, `StaticPool`, `AUTOCOMMIT`; ningún sitio de producto lo usa todavía. Oráculo: prueba de que `engine.raw_connection()` es la misma conexión, que los dos pragmas siguen activos y que usarla desde otro hilo da `ProgrammingError` (premisa P9). Control negativo: un `Engine` con `sqlite:///` propio → la prueba de identidad falla.
 - [ ] 2.4 Base de la versión anterior (spec «Una base existente abre sin cambios»): un constructor en `tests/` que crea y puebla, con SQL crudo y literal, una base sintética con la forma de filas de hoy (UUID con guiones, fechas `isoformat()` con `+00:00`, una ejecución de Skill con aprobación, una llamada MCP). Oráculo: `iterdump()` idéntico antes y después de abrirla, listar sesiones e historial; lo mismo en sentido inverso (filas escritas por el código nuevo, leídas con SQL crudo). Control negativo: escribir un UUID sin guiones en el código nuevo → `1 failed`.
@@ -62,5 +62,5 @@ Cada `[x]` lleva su recibo debajo, con fecha y plataforma. Cada grupo es un tram
 
 ## Workflow follow-up
 
-- Añadir la fila del change al plan de `docs/plan/` en el corte que Wilson elija (P1).
+- Añadir la fila del change al plan de `docs/plan/` en el corte de Q1 (Corte 8 por defecto).
 - Archivar el change cuando los tramos estén mergeados y la demo 8.3 tenga estado.

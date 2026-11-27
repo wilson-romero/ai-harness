@@ -52,8 +52,8 @@ Riesgo de seguridad medido hoy (proposal): 0 sitios donde un dato llegue al text
 - **Qué:** SQLModel para declarar las tablas y componer consultas; SQLAlchemy Core (que viene con él) para lo de tipo B. La guarda del tramo 0 (D9) entra antes y es independiente.
 - **Por qué:** es lo que Wilson pidió, y es un proyecto para aprender: declarar tablas como clases tipadas y componer consultas con expresiones es la forma habitual en Python. Pero el inventario dice que el riesgo de inyección medido es 0 y que el riesgo real es la regresión; eso lo cierra la guarda, no el ORM. Se dice así para no vender seguridad que no da.
 - **Alternativas consideradas y rechazadas:**
-  - *Solo SQLAlchemy Core (sin SQLModel):* una dependencia menos y sin la ambigüedad de un modelo que parece pydantic y no valida (P4). Se rechaza porque no da lo que Wilson nombró (SQLModel) y la diferencia real es pequeña: las 29 de tipo B son Core en las dos opciones. Queda como opción en P2.
-  - *Quedarse con `sqlite3` y añadir solo la guarda:* elimina el mismo riesgo medido, sin dependencias ni migración de 60 sentencias. Se rechaza solo porque no cumple el objetivo de Wilson de no escribir SQL a mano; es la opción más barata y se le ofrece explícitamente (P2).
+  - *Solo SQLAlchemy Core (sin SQLModel):* una dependencia menos y sin la ambigüedad de un modelo que parece pydantic y no valida (P4). Se rechaza porque no da lo que Wilson nombró (SQLModel) y la diferencia real es pequeña: las 29 de tipo B son Core en las dos opciones. Era la opción (b) de la pregunta Q2; Wilson eligió SQLModel completo (2026-11-27).
+  - *Quedarse con `sqlite3` y añadir solo la guarda:* elimina el mismo riesgo medido, sin dependencias ni migración de 60 sentencias. Se rechaza solo porque no cumple el objetivo de Wilson de no escribir SQL a mano; era la opción más barata, la (c) de Q2; Wilson eligió SQLModel completo (2026-11-27).
   - *Otro ORM (Peewee, Pony):* sin ventaja sobre SQLAlchemy y sin la integración con pydantic que Wilson busca.
 - **Impacto:** `pyproject.toml`, `uv.lock` (tramo 1); spec «Ninguna sentencia SQL se construye con datos».
 
@@ -113,11 +113,19 @@ Riesgo de seguridad medido hoy (proposal): 0 sitios donde un dato llegue al text
 - **Qué:** `sqlmodel` y `sqlalchemy` fijadas con `==` en `pyproject.toml`, con versiones publicadas hace al menos 14 días el día del tramo 1 (el 2026-11-27, `sqlmodel` 0.0.50 tiene 14 días y `SQLAlchemy` 2.1.9, 11). Se anota en `tasks.md` versión, licencia, fecha y ruedas `cp314` de cada una.
 - **Por qué:** el proyecto era biblioteca estándar más pydantic; esto suma dos paquetes, uno con extensiones compiladas (SQLAlchemy) y otro anterior a 1.0 con cinco versiones entre el 2026-09-22 y el 2026-11-13 (P1), es decir, con cambios frecuentes que pueden romper. Fijar exacto y esperar unos días reduce el riesgo de una versión retirada o comprometida.
 - **Alternativas consideradas y rechazadas:** rangos (`>=`), como `pydantic` hoy (una actualización de `sqlmodel` 0.0.x podría cambiar la conducta sin que nadie la pida); vendorizar (mantenimiento propio de 2 bibliotecas).
-- **Impacto:** `pyproject.toml`, `uv.lock`; pregunta P4.
+- **Impacto:** `pyproject.toml`, `uv.lock`; decisión Q4.
 
 ### D9 · La guarda: el texto de una sentencia es un literal
 
-- **Qué:** `tests/unit/test_sql_literals.py` recorre el AST de `harness/` y, en cada llamada a `execute`, `executemany`, `executescript`, `exec_driver_sql`, `text`, `literal_column` y `prefix_with`, exige que el primer argumento sea un literal de cadena (o una concatenación implícita de literales) o un nombre de módulo ligado a un literal. Rechaza f-strings, `+`, `%`, `.format` y cualquier otra expresión, y nombra fichero y línea. Única excepción, con su motivo en la prueba: `executescript` de `migrate()` sobre ficheros del paquete. Desde el tramo 1 también rechaza `.commit(`, `.rollback(` y `.begin(` sobre objetos de SQLAlchemy (D4). En el tramo 6 se añade que `execute` sobre la base principal solo puede aparecer en `database.py` y `locks.py`. Los 3 f-strings de hoy se reescriben como literales completos en el tramo 0.
+- **Qué:** `tests/unit/test_sql_literals.py` recorre el AST de `harness/` y de `main.py`. Regla exacta del tramo 0 (2026-11-27):
+  - Se examina toda llamada `<cualquier objeto>.execute|executemany|executescript|exec_driver_sql(...)`. Su sentencia es el primer argumento posicional o la palabra clave `sql`/`sql_script`/`statement`; una llamada sin sentencia o con `*args` se rechaza.
+  - La sentencia tiene que ser **SQL literal**: un literal `str` (los literales adyacentes ya son uno para Python); `a + b` con `a` y `b` SQL literal; o un nombre ligado **una sola vez** en el mismo módulo, a nivel de módulo, a SQL literal, y no ligado en ningún otro sitio del módulo (ni en una función, bucle, `with`, `import`, `except`, `match`, ni declarado `global`/`nonlocal`). La resolución es transitiva y sin ciclos.
+  - Se rechaza todo lo demás: f-strings (aunque solo interpolen constantes), `%`, `.format`, `str.join`, llamadas, atributos, subíndices, variables locales y parámetros, `bytes`.
+  - Un método SQL no se puede **nombrar sin llamarlo** (`run = conn.execute`, `self._run = conn.execute`, `partial(conn.execute)`), ni pedir con `getattr(obj, "execute")`: así un alias no puede esquivar la regla.
+  - Única excepción, con su motivo en la prueba: `executescript` dentro de `migrate()` en `harness/storage/database.py` (ficheros de migración del paquete).
+  - Límites conocidos, escritos en la prueba: otro módulo puede reasignar una constante (`engine._HALF_DONE = …`); `getattr` con un nombre calculado y `operator.methodcaller` no se siguen; no se revisan `scripts/` ni `tests/` (`scripts/demo_architecture_skills.py` tiene un `execute(sql)` de ayuda); lo que haga una biblioteca o una extensión en C queda fuera.
+  - En el tramo 1, con la dependencia ya dentro, se añaden `text`, `literal_column` y `prefix_with`, y el rechazo de `.commit(`, `.rollback(` y `.begin(` de SQLAlchemy (D4). En el tramo 6, que `execute` sobre la base principal solo aparezca en `database.py` y `locks.py`.
+  - Los 3 f-strings de hoy pasan a formas aceptadas sin cambiar el texto de la sentencia: `"… AND " + _HALF_DONE` y `"… WHERE " + _HALF_DONE` en `engine.py`; `IN (?, ?, ?, ?)` literal en `conversation.py`, como ya hace `engine.py:243` (si `OPEN_RUN_STATES` cambia de longitud, SQLite rechaza la llamada por número de parámetros: falla en voz alta, no en silencio).
 - **Por qué:** es el único control que cubre el riesgo medido (la regresión), con o sin ORM, y se puede demostrar que dice NO.
 - **Alternativas consideradas y rechazadas:** `grep` por `execute(f"` (no ve sentencias de varias líneas ni variables intermedias); la regla S608 de Ruff (Ruff no es dependencia; solo marca algunos patrones y se silencia con `noqa`, como ya pasa en `engine.py:1343`); `sqlite3.Connection.set_authorizer` (autoriza operaciones, no distingue texto construido de literal).
 - **Impacto:** spec «La comprobación rechaza una sentencia construida»; tramo 0 y 6.
@@ -137,7 +145,7 @@ Riesgo de seguridad medido hoy (proposal): 0 sitios donde un dato llegue al text
 - [`sqlalchemy.exc.IntegrityError` en vez de `sqlite3.IntegrityError` hace que un `except` deje de capturar] → D6; prueba de dos sesiones con la misma referencia remota y de dos ejecuciones abiertas a la vez en cada tramo que lo toque.
 - [`tables.py` y las migraciones divergen] → la prueba de igualdad de D3, con su control negativo.
 - [`sqlmodel` 0.0.x rompe en una versión nueva] → D8, fijada exacta; subir de versión es un cambio propio con `scripts/verify.sh`.
-- [Dos dependencias más y código compilado] → D8; el coste se acepta solo si Wilson lo aprueba (P2).
+- [Dos dependencias más y código compilado] → D8; Wilson aceptó el coste al elegir SQLModel completo (Q2, 2026-11-27).
 - **Límite que no se arregla:** los `CHECK` no se modelan en `tables.py`; un valor fuera de rango se descubre al escribir (`IntegrityError`), como hoy, no al construir el objeto.
 - **Límite que no se arregla:** la guarda revisa el código del repositorio, no lo que haga una biblioteca por dentro.
 - **Límite que no se arregla:** el motor de Skills seguirá leyendo filas como `row["col"]` tras este change (D5).
@@ -158,10 +166,13 @@ Cada tramo es una rama `feature/sqlmodel-persistence-<n>` desde `develop`, un PR
 
 **Vuelta atrás:** cada tramo se revierte con su PR; como no hay migración ni cambio de datos, una base escrita por un tramo la lee el anterior (lo comprueba la tarea 2.4 en sentido inverso: filas escritas por la versión con ORM, leídas con SQL crudo de pruebas).
 
-## Preguntas para Wilson
+## Decisiones de Wilson (2026-11-27)
 
-- **P1. ¿En qué corte va?** (a) Corte 8, como change propio junto a `hardening` (recomendado: es endurecimiento transversal sin EA); (b) un corte nuevo «Persistencia» en la tabla; (c) después de la Puerta MVP sin EA, para no competir con ella. Recomendación: (a), y el tramo 0 ya.
-- **P2. ¿Qué alcance?** (a) SQLModel completo, tramos 0–6 (recomendado si el objetivo es aprender el ORM); (b) solo SQLAlchemy Core, mismos tramos sin modelos `table=True` (una dependencia menos, sin P4); (c) solo el tramo 0 y seguir con `sqlite3` (cubre el mismo riesgo medido, sin dependencias). Recomendación: (a), sabiendo que la seguridad la da el tramo 0 y que (c) es honesta y suficiente si lo que preocupa es solo la inyección.
-- **P3. ¿Tipos ricos en los modelos?** (a) columnas con el tipo guardado (`str`), conversión en repositorios (recomendado, D2); (b) `TypeDecorator` propios para `UUID` y fechas que guarden la forma de hoy. Recomendación: (a) en este change; (b) como mejora posterior.
-- **P4. ¿Qué versiones?** (a) las más nuevas con al menos 14 días el día del tramo 1 (recomendado, D8); (b) las más nuevas ese día. Recomendación: (a).
-- **P5. ¿La migración 008 de la otra rama espera?** (a) se mergea antes del tramo 1 y `tables.py` nace con ella (recomendado); (b) entra después y actualiza `tables.py` en su propio commit, guiada por la prueba de igualdad.
+Sustituyen a las preguntas abiertas de la primera versión de este diseño (allí P1–P5; aquí Q1–Q5, para no confundirlas con las premisas medidas P1–P9).
+
+- **Q2 · Alcance: SQLModel completo** (decidido por Wilson). Se hacen los tramos 0 a 6 tal como están en «Plan de tramos».
+- **Orden:** el tramo 0 entra ya, en paralelo con las ramas abiertas. Los tramos 1 a 6 empiezan solo cuando estén mergeadas `feature/prompt-economy`, `feature/approval-buttons` y `feature/collapsible-blocks` (decidido por Wilson).
+- **Q1 · Corte:** Corte 8, como change propio junto a `hardening`. *Por defecto; Wilson puede revisarlo.*
+- **Q3 · Tipos:** columnas con el tipo guardado (`str`) y conversión en los repositorios (D2); los `TypeDecorator` quedan como mejora posterior. *Por defecto; Wilson puede revisarlo.*
+- **Q4 · Versiones:** las más nuevas con al menos 14 días el día del tramo 1 (D8). *Por defecto; Wilson puede revisarlo.*
+- **Q5 · Migración 008:** se mergea antes del tramo 1 y `tables.py` nace con ella. *Por defecto; Wilson puede revisarlo.*
