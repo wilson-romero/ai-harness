@@ -11,6 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from harness.config import Settings
+from harness.core.answer_style import with_notice
 from harness.core.contracts import RequestStatus, Session
 from harness.core.errors import (
     HarnessError,
@@ -162,6 +163,7 @@ def _run(args: argparse.Namespace) -> int:
             provider_factory(settings),
             settings.provider,
             settings.request_timeout_s,
+            answer_notice=settings.answer_notice,
         )
         service.recover()
         recover_runs(conn, settings.data_dir)
@@ -297,12 +299,14 @@ def _memory(args: argparse.Namespace) -> int:
     # They still refuse a data directory inside the vault, like `ask --project`, so that
     # such a configuration is caught by any memory command, before it can be used to write.
     memory = load_memory_settings(os.environ)
-    ensure_data_dir_outside_vault(Settings.from_env(os.environ).data_dir, memory.vault_root)
+    settings = Settings.from_env(os.environ)
+    ensure_data_dir_outside_vault(settings.data_dir, memory.vault_root)
     if args.memory_command == "search":
         return _search(memory.vault_root, terms, args.project, args.limit)
     if args.memory_command == "context":
         context = build_context(memory.vault_root, args.project, memory.context_max_bytes)
-        print(context.text)
+        # What `ask --project` sends before the question: the answer notice and the block.
+        print(with_notice(settings.answer_notice, context.text))
         _context_summary(context)
         return EXIT_OK
     return _maintain(memory.vault_root)

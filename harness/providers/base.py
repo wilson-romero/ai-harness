@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Protocol
 
 from harness.core.contracts import LLMRequest
+from harness.core.errors import InvalidInput
 
 
 class ProviderError(Exception):
@@ -14,6 +15,13 @@ class ProviderError(Exception):
     The message is printed to the terminal: a provider builds it from fixed text and counts,
     never from page content, URLs or anything the remote side wrote.
     """
+
+
+class PromptTooLong(InvalidInput):
+    """The whole text the provider would receive is over its limit. Nothing was sent.
+
+    The provider measures everything it would type; the service, which composed that text,
+    adds how much of it is the person's and how much the harness's own."""
 
 
 class AuthenticationRequired(ProviderError):

@@ -171,7 +171,8 @@ def converse(args: argparse.Namespace, settings: Settings, terminal: Conversatio
     conn = open_database(settings.data_dir)
     try:
         service = SessionService(conn, settings.data_dir, factory, settings.provider,
-                                 settings.request_timeout_s)
+                                 settings.request_timeout_s,
+                                 answer_notice=settings.answer_notice)
         service.recover()
         recover_runs(conn, settings.data_dir)
         width = getattr(terminal, "pane_columns", None)  # the full screen's conversation pane

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from harness.core.answer_style import answer_notice
 from harness.core.errors import InvalidInput
 
 
@@ -26,6 +27,9 @@ class Settings:
     copilot_max_prompt_chars: int | None = None
     # Automated tests run the browser without a window; real use is always visible.
     browser_headless: bool = False
+    # The concise-answer notice of plain questions with `HARNESS_CONCISE_ANSWERS=on`; None
+    # (the default) otherwise.
+    answer_notice: str | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
@@ -43,6 +47,7 @@ class Settings:
             copilot_ready_timeout_s=_number(env, "HARNESS_COPILOT_READY_TIMEOUT_S", 60.0),
             copilot_max_prompt_chars=_positive_int(env, "HARNESS_COPILOT_MAX_PROMPT_CHARS"),
             browser_headless=env.get("HARNESS_TEST_HEADLESS") == "1",
+            answer_notice=answer_notice(env),
         )
 
     def require_copilot_url(self) -> str:
