@@ -778,6 +778,7 @@ class SidePanel(Static):
             lines.extend([(f" {panel.session_id}", "dim"), "\n"])
             entry("Project", panel.project)
             entry("Provider", panel.provider)
+            entry("Mode", panel.mode)
             entry("Sends", str(panel.sends))
             entry("Last request", self.working or panel.last_request)
             entry("Memory", f"{len(panel.notes)} note(s) in the last question")

@@ -97,6 +97,7 @@ class PanelState:
     notes: tuple[str, ...]  # memory notes included in the last question (shown names)
     sends: int  # requests of this session that went to the provider
     last_request: str  # status of the last request of this session, or "-"
+    mode: str = "auto"  # the session's response mode, and the last confirmed one if it differs
 
 
 @runtime_checkable

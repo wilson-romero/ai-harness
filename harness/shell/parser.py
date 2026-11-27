@@ -27,6 +27,7 @@ COMMANDS: dict[str, tuple[int, int | None]] = {
     "context": (0, 0),
     "skill": (1, None),
     "file": (1, 1),
+    "mode": (0, 1),
     "exit": (0, 0),
 }
 _SHOWN_NAME_CHARS = 40

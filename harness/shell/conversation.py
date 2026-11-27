@@ -36,6 +36,7 @@ from harness.core.errors import (
     UsageError,
 )
 from harness.core.answer_style import with_notice
+from harness.core.response_mode import describe_mode
 from harness.core.service import SessionService
 from harness.core.strict_json import decode_text_limited
 from harness.memory.config import MemorySettings, ensure_data_dir_outside_vault
@@ -112,6 +113,7 @@ a question that begins with /):
   /context              the memory block sent with each question of this session
   /skill NAME [NAME=VALUE ...] [--file NAME=PATH ...]   run a skill in this session
   /file PATH            attach a text file to the next question (it is never stored)
+  /mode [auto|quick|deep]   the response mode of this session (nothing is sent)
   /exit                 leave (end of input leaves too)
 Ctrl+C interrupts a question in progress; it is never resent. Ctrl+C at the approval prompt
 leaves the approval undecided. At that prompt, n asks for the word reject to confirm; any other
@@ -536,7 +538,17 @@ class Conversation:
             notes=self._notes,
             sends=int(sends),
             last_request=last[1] if last is not None else "-",
+            mode=self._mode_shown(session),
         )
+
+    def _mode_shown(self, session: Session) -> str:
+        """The session's response mode, and the mode its last request ended in when that is
+        another one (response-mode D5): words of a closed list, nothing foreign."""
+        modes = self._service.last_request_modes(session.session_id)
+        confirmed = modes[1] if modes is not None else None
+        if confirmed is None or confirmed is session.response_mode:
+            return session.response_mode.value
+        return f"{session.response_mode} (last: {confirmed})"
 
     def _session_choices(self) -> list[str]:
         """What /sessions lists, one line each, numbered as /resume takes them: it sets the
@@ -651,7 +663,10 @@ class Conversation:
             f"session:  {session.session_id} ({terminal_safe(session.name)}), {session.status}",
             f"project:  {session.project_id or '-'}",
             f"provider: {self._deps.provider_name}",
-            "last request: " + (f"{last.request_id} {last.request_status}" if last else "-"),
+            "last request: " + (f"{last.request_id} {last.request_status}" if last else "-")
+            + (f", {shown}" if last and (shown := describe_mode(
+                last.requested_mode, last.confirmed_mode)) else ""),
+            f"mode:     {session.response_mode}",
             "attachment: " + (self._attachment[0] if self._attachment else "-"),
         ]))
 
@@ -702,11 +717,24 @@ class Conversation:
             self._say("No messages.")
             return
         for entry in entries:
-            self._say(f"[{entry.request_status}] {entry.role}:")
+            mode = describe_mode(entry.requested_mode, entry.confirmed_mode)
+            state = entry.request_status if mode is None else f"{entry.request_status}, {mode}"
+            self._say(f"[{state}] {entry.role}:")
             if entry.content is None:
                 self._say("(content not stored)")
             else:
                 self._foreign(entry.content, markdown=True)
+
+    def _cmd_mode(self, *words: str) -> None:
+        """Show or set the session's response mode (response-mode D1, D5). It writes only the
+        session: nothing is sent, the provider opens nothing and no conversation starts."""
+        if not words:
+            session = self._service.require_session(str(self._session_id))
+            self._say(f"response mode: {session.response_mode} (this session)")
+            return
+        mode = self._service.set_mode(self._session_id, self._deps.provider, words[0])
+        self._say(f"response mode: {mode}; kept for this session and set on the provider before "
+                  "each question; nothing was sent")
 
     def _cmd_memory(self, *terms: str) -> None:
         parsed = parse_query(" ".join(terms))
