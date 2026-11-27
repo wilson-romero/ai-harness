@@ -38,6 +38,7 @@ class Tui:
                 conversation, service, _ = make_conversation(
                     conn, data_dir, self.terminal, self.provider, **options)
                 conversation._deps.columns = self.terminal.pane_columns
+                conversation._deps.layout = self.terminal.layout_columns  # as app.py wires it
                 self.conversation, self.service = conversation, service
                 self.terminal.attach(conversation)
                 return asyncio.run(conversation.run(session))
