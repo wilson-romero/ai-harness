@@ -73,7 +73,7 @@ def _parse(line: str, *, short: bool) -> Question | Command | Empty:
     if not stripped.startswith("/"):
         return Question(line)
     rest = stripped[1:]
-    words = _split(rest)
+    words = split_words(rest)
     name = words[0] if words and not rest[:1].isspace() else ""
     if short and name not in COMMANDS and name:
         resolved = resolve_name(name)
@@ -98,7 +98,7 @@ def _parse(line: str, *, short: bool) -> Question | Command | Empty:
     return Command(name, args)
 
 
-def _split(text: str) -> list[str]:
+def split_words(text: str) -> list[str]:
     """Blank-separated words; `"…"` groups blanks into one word. One pass, no backtracking."""
     words: list[str] = []
     current: list[str] = []

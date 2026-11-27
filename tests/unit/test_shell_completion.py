@@ -295,3 +295,76 @@ async def test_without_a_vault_there_are_no_projects_and_no_error(conn, data_dir
     await conversation.run()
     assert conversation._completion_data().projects == ()
     assert suggest("/new ", conversation._completion_data()) != NONE  # still --project
+
+
+# -- a candidate is offered only if it reads back as the one word it is (independent review) --
+
+# Each is split by the parser (any `isspace()` character cuts a word) or read as an option.
+SPLIT_NAMES = (
+    " z.md",  # a leading space: shown almost like z.md, read as z.md
+    "a\u00a0--file\u00a0focus=.env",  # NBSP: one name, three words, the last one an option
+    "--file\u00a0source=.env",  # starts as an option
+    "b\u202fc.md",  # NARROW NO-BREAK SPACE
+    "d\u3000e.md",  # IDEOGRAPHIC SPACE
+    "f\u2007g.md",  # FIGURE SPACE
+    "-x.md",  # a leading dash: an option to the parser
+)
+
+
+def _reads_back(word: str) -> bool:
+    from harness.shell.parser import split_words
+
+    return split_words(word) == [word]
+
+
+def test_names_the_parser_would_split_or_take_as_an_option_are_never_offered(tmp_path):
+    made = []
+    for name in (*SPLIT_NAMES, "z.md", "ok.md"):
+        try:
+            (tmp_path / name).write_text("x", encoding="utf-8")
+            made.append(name)
+        except OSError:
+            pass
+    assert "a\u00a0--file\u00a0focus=.env" in made and "b\u202fc.md" in made
+    offered = [item.insert for item in list_folder("", cwd=tmp_path).items]
+    assert sorted(offered) == ["ok.md", "z.md"]
+    offered = [item.insert for item in list_folder("", prefix="source=", cwd=tmp_path).items]
+    assert sorted(offered) == ["source=ok.md", "source=z.md"]
+    # Negative control: each of them really is cut by the parser or starts as an option.
+    assert not [name for name in SPLIT_NAMES if _reads_back(name) and not name.startswith("-")]
+
+
+def test_every_source_offers_only_what_reads_back_as_one_word():
+    nbsp = "\u00a0"
+    data = CompletionData(
+        projects=(f"demo{nbsp}--project", "-p", "bueno"),
+        skills=(SkillChoice(f"one{nbsp}x", "s", ("source",)),
+                SkillChoice("one", "s", (f"source{nbsp}--file", "-in", "ok"))),
+        sessions=(SessionChoice(f"01a5{nbsp}--x", "-", "t"), SessionChoice("01a6", "-", "t")))
+    assert inserts(suggest("/new ", data)) == ["bueno ", "--project "]
+    assert inserts(suggest("/skill ", data)) == ["one "]
+    assert inserts(suggest("/skill one ", data)) == ["ok=", "--file "]
+    assert inserts(suggest("/resume 01a", data)) == ["01a6"]
+    # Negative control: the data holds them; only the offer leaves them out.
+    assert f"demo{nbsp}--project" in data.projects and not _reads_back(f"demo{nbsp}--project")
+
+
+async def test_the_sessions_for_the_list_are_read_with_a_bound(conn, data_dir):
+    """Read at every line: the database gives at most MAX_SESSIONS rows, the newest, never the
+    whole table (independent review, 2026-11-27)."""
+    terminal = ScriptedTerminal(["/exit"])
+    conversation, service, _ = make_conversation(conn, data_dir, terminal)
+    await conversation.run()
+    for number in range(completion.MAX_SESSIONS + 20):
+        service.create_session(f"sesion {number}")
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+    try:
+        data = conversation._completion_data()
+    finally:
+        conn.set_trace_callback(None)
+    assert len(data.sessions) == completion.MAX_SESSIONS
+    newest = [str(s.session_id) for s in service.list_sessions()[: completion.MAX_SESSIONS]]
+    assert [s.session_id for s in data.sessions] == newest
+    reads = [sql for sql in statements if "FROM sessions" in sql]
+    assert reads and all(f"LIMIT {completion.MAX_SESSIONS}" in sql for sql in reads), reads

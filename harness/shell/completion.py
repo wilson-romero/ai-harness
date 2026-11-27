@@ -31,6 +31,7 @@ from harness.shell.commands import (
     CommandSpec,
     resolve_name,
 )
+from harness.shell.parser import LineError, split_words
 from harness.shell.shortforms import Known
 from harness.text.safe_text import terminal_safe
 
@@ -54,10 +55,24 @@ def shown(text: str, limit: int = MAX_HELP_CHARS) -> str:
     return line if len(line) <= limit else line[: limit - 1] + "…"
 
 
+def one_word(text: str) -> bool:
+    """A value completion may put on the line: shown as it is (no control, format or line
+    separator character) and read back by the parser as exactly this one word, never as an
+    option. So no `isspace()` character at all (NBSP, U+202F, U+3000 and the like cut a word
+    as a space does), no double quote and no leading `-` (independent review, 2026-11-27)."""
+    if not text or text.startswith("-") or '"' in text or terminal_safe(text) != text:
+        return False
+    if any(char.isspace() for char in text):
+        return False
+    try:
+        return split_words(text) == [text]
+    except LineError:
+        return False
+
+
 def acceptable_path(text: str) -> bool:
-    """A path offered by completion: no control, format or line separator character (they are
-    not shown) and nothing the command line would split or quote (a space, a double quote)."""
-    return bool(text) and terminal_safe(text) == text and " " not in text and '"' not in text
+    """A path offered by completion (and by the file picker): one word as `one_word` says."""
+    return one_word(text)
 
 
 # -- the snapshot of harness data ---------------------------------------------------------------
@@ -229,7 +244,8 @@ def _for(takes: str | None, spec: CommandSpec, start: int, word: str, args: list
             return NONE  # after the project or the first word of a name: a name, typed
         if takes == PROJECT_OR_NAME and "--project" in args:
             return NONE
-        items = [Item(f"{slug} ", "project", PROJECT_ITEM) for slug in data.projects]
+        items = [Item(f"{slug} ", "project", PROJECT_ITEM) for slug in data.projects
+                 if one_word(slug)]
         if takes == PROJECT_OR_NAME:
             items += _option_items(spec)
         return Suggestions(start, word, tuple(rank(word, items, lambda i: i.insert.strip())))
@@ -237,10 +253,11 @@ def _for(takes: str | None, spec: CommandSpec, start: int, word: str, args: list
         if word.isdigit():
             return NONE  # a number of the last /sessions list
         items = [Item(s.session_id, shown(f"{s.project}  {s.title}"), SESSION_ITEM)
-                 for s in data.sessions]
+                 for s in data.sessions if one_word(s.session_id)]
         return Suggestions(start, word, tuple(rank(word, items, lambda i: f"{i.insert} {i.help}")))
     if takes == SKILL:
-        items = [Item(f"{s.name} ", shown(s.help or "skill"), SKILL_ITEM) for s in data.skills]
+        items = [Item(f"{s.name} ", shown(s.help or "skill"), SKILL_ITEM) for s in data.skills
+                 if one_word(s.name)]
         return Suggestions(start, word, tuple(rank(word, items, lambda i: i.insert.strip())))
     if takes in (SKILL_INPUT, INPUT_PATH):
         skill = data.skill(args[0]) if args else None
@@ -250,7 +267,8 @@ def _for(takes: str | None, spec: CommandSpec, start: int, word: str, args: list
                 prefix = word.partition("=")[0] + "="
                 return Suggestions(start, word, (), path=word[len(prefix):], prefix=prefix)
             return NONE  # NAME=VALUE: the value is typed
-        items = [Item(f"{name}=", "input", INPUT_ITEM) for name in inputs]
+        items = [Item(f"{name}=", "input", INPUT_ITEM) for name in inputs
+                 if one_word(name) and "=" not in name]
         if takes == SKILL_INPUT:
             items += _option_items(spec)
         ranked = tuple(rank(word, items, lambda i: i.insert))
