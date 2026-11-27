@@ -9,6 +9,8 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from harness.storage.private import private_dir, private_file
+
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 DATABASE_NAME = "harness.sqlite3"
 
@@ -28,7 +30,8 @@ _TRANSIENT_OPEN_ERRORS = {"SQLITE_IOERR_TRUNCATE", "SQLITE_IOERR_SHMOPEN"}
 
 def connect(data_dir: Path) -> sqlite3.Connection:
     """Open the local database. Transactions are explicit: see `transaction`."""
-    data_dir.mkdir(parents=True, exist_ok=True)
+    private_dir(data_dir)  # owner-only where the system uses permission bits (F-08)
+    private_file(data_dir / DATABASE_NAME)
     deadline = time.monotonic() + OPEN_RETRY_S
     pause = 0.02
     while True:

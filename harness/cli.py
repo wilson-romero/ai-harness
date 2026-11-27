@@ -28,7 +28,7 @@ from harness.memory.config import (
     load_memory_settings,
 )
 from harness.memory.context import ProjectContext, build_context
-from harness.memory.maintenance import maintenance_report
+from harness.memory.maintenance import MAX_NAME_COMPARISONS, maintenance_report
 from harness.memory.paths import validate_project_slug
 from harness.memory.search import (
     DEFAULT_LIMIT,
@@ -41,6 +41,7 @@ from harness.shell.app import add_chat_parser, run_chat, stdio_is_terminal
 from harness.skills.commands import add_skill_parser, run_skill_command
 from harness.skills.engine import recover_runs
 from harness.storage.database import open_database
+from harness.text.safe_text import safe_foreign_text
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -222,7 +223,9 @@ def _ask(
     for warning in response.warnings:
         print(f"warning: {warning}", file=sys.stderr)
     if response.status is RequestStatus.COMPLETED:
-        print(response.text)
+        # Provider text is foreign: no escape sequence, control or invisible character reaches
+        # the terminal, and known credentials are masked (security review 2026-11-27, F-03).
+        print(safe_foreign_text(response.text).text)
         return EXIT_OK
     print(
         f"error: request {response.request_id} ended as {response.status}: {response.detail}",
@@ -251,7 +254,10 @@ def _history(service: SessionService, session_id: str) -> int:
         print("No messages.")
         return EXIT_OK
     for entry in entries:
-        content = entry.content if entry.content is not None else "(content not stored)"
+        if entry.content is None:
+            content = "(content not stored)"
+        else:
+            content = safe_foreign_text(entry.content).text  # as `ask` prints it (F-03)
         print(f"[{entry.request_status}] {entry.role}: {content}")
     return EXIT_OK
 
@@ -358,5 +364,11 @@ def _maintain(root: Path) -> int:
     print(report.text, end="")
     if report.truncated_walk:
         print("warning: the vault walk stopped at the file limit", file=sys.stderr)
+    if report.truncated_comparisons:
+        print(
+            f"warning: name comparisons stopped at {MAX_NAME_COMPARISONS} pairs; "
+            "duplicate_candidates or the fixes of broken_links are incomplete",
+            file=sys.stderr,
+        )
     print("maintain: dry run, nothing in the vault was changed", file=sys.stderr)
     return EXIT_OK

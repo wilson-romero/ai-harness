@@ -33,7 +33,9 @@ Ver `proposal.md` para el porqué. Estado del que parte (medido el 2026-11-25 so
   - Marcadores de pytest por SEC (`@pytest.mark.sec01`): tocaría 852 tests y no dice nada del requisito ni del control negativo.
   - Comprobar solo que el fichero de test existe: un test renombrado pasaría.
 - **Límite escrito:** la comprobación garantiza que lo citado existe, no que pruebe lo que dice la matriz; eso lo garantiza la revisión del documento y el control negativo citado.
-- **Impacto:** `scripts/check_sec_matrix.py`, `scripts/verify.sh`, tests del script; tareas 1.1–1.4.
+- **Revisado en la implementación (2026-11-25):** cada campo va en negrita (`**Estado:** parcial`) para que el documento se lea bien en GitHub, y se añaden tres campos: `Propiedad` (la propiedad en una frase), `Windows` (qué se ha ejecutado allí y qué no) y `Motivo` (obligatorio en `pendiente de merge`, `no cubierto` y `BLOCKED`). Un requisito se cita como `` `ruta de la spec` · Nombre del requisito ``. La misma ejecución de `pytest --collect-only` comprueba también los identificadores citados en `docs/security/known-debt.md`, y el script comprueba que los enlaces relativos de `README.md`, `SECURITY.md` y los documentos de `docs/security/` apuntan a un fichero que existe; así no hacen falta tests aparte que vuelvan a recoger la batería. Cuando se escriba la guía de diagnóstico (aplazada, ver D4), se añade a esas dos listas.
+- **Revisado tras la revisión independiente (2026-11-25):** la comprobación cerraba menos de lo que decía. Ahora también falla si un test se cita dos veces en una fila; si un identificador con caso (`fichero::test[caso]`) no se recoge tal cual (sin caso sigue valiendo cualquiera de los casos de la función); si un identificador que aparece en cualquier parte de la matriz (tabla de mutaciones, controles negativos, límites) no se recoge; si un test citado está marcado `skip` o `xfail`, o se puede omitir (`skipif`, `pytest.skip` en el test, en un ayudante o en una fixture del módulo o de `tests/*.py`) y el campo `Windows` de la fila no dice que se omite; y si el estado de una fila no es el fijado en `docs/security/sec-states.json`, de modo que cambiar un estado exige dos ediciones. Límites escritos que una comprobación no puede cerrar con honradez: sustituir los tests de una fila por otros que existen pero no prueban la propiedad pasa; borrar casos de un test citado por su función pasa mientras quede uno; una omisión decidida por código fuera del módulo y de `tests/*.py`, o una marca puesta con `pytest.param(..., marks=...)`, no se detecta. Cambiar un estado en la matriz y en el fichero de estados a la vez pasa: el fichero solo hace visible el cambio en dos sitios del diff.
+- **Impacto:** `scripts/check_sec_matrix.py`, `scripts/verify.sh`, `docs/security/sec-states.json`, tests del script; tareas 1.1–1.5.
 
 ### D3 · Matriz de partida (lo que existe en `develop` el 2026-11-25)
 
@@ -61,7 +63,10 @@ Los identificadores de esta tabla se comprobaron el 2026-11-25 contra la salida 
 
 ### D4 · Runbook y guía de diagnóstico
 
-- **Qué:** `docs/runbook/install-and-use.md` con dos columnas de comandos (macOS/zsh y Windows/PowerShell): instalar uv, `uv sync`, `.env` y variables (`HARNESS_DATA_DIR` fuera del repo), activar el hook del guard, primer uso con el Mock, memoria, Skills, MCP, y Copilot enlazando al runbook de su change. `docs/runbook/diagnosis.md` organizado por síntoma: `uncertain` (qué significa, que nunca se reenvía solo, cómo seguir: `ask` nuevo explícito o `skill resume --retry-step`), `awaiting_approval` y código 3, `authentication_required` (`copilot login`), sesión ocupada, bloqueos (`HARNESS_DATA_DIR/locks/`: no borrar a mano con un proceso vivo; un bloqueo de SQLite se libera solo al morir su dueño), dónde están los logs y qué contienen, y qué hay en `HARNESS_DATA_DIR` y qué no debe salir nunca de la máquina (perfil de Edge, claves, logs de stderr, base de datos). Cada síntoma enlaza el test que lo produce.
+**Aplazada el 2026-11-25 por decisión de Wilson: la interfaz conversacional va antes** (change `interactive-shell`). Un runbook y una guía de diagnóstico escritos hoy describirían una interfaz que va a cambiar enseguida. Lo que sigue queda como diseño de referencia para cuando exista la interfaz nueva; los nombres de fichero pasan a español (`instalacion-y-uso.md`, `diagnostico.md`).
+
+
+- **Qué:** `docs/runbook/instalacion-y-uso.md` con dos columnas de comandos (macOS/zsh y Windows/PowerShell): instalar uv, `uv sync`, `.env` y variables (`HARNESS_DATA_DIR` fuera del repo), activar el hook del guard, primer uso con el Mock, memoria, Skills, MCP, y Copilot enlazando al runbook de su change. `docs/runbook/diagnostico.md` organizado por síntoma: `uncertain` (qué significa, que nunca se reenvía solo, cómo seguir: `ask` nuevo explícito o `skill resume --retry-step`), `awaiting_approval` y código 3, `authentication_required` (`copilot login`), sesión ocupada, bloqueos (`HARNESS_DATA_DIR/locks/`: no borrar a mano con un proceso vivo; un bloqueo de SQLite se libera solo al morir su dueño), dónde están los logs y qué contienen, y qué hay en `HARNESS_DATA_DIR` y qué no debe salir nunca de la máquina (perfil de Edge, claves, logs de stderr, base de datos). Cada síntoma enlaza el test que lo produce.
 - **Por qué:** el runbook es lo que más tarda en escribirse bien y lo primero que se necesita al volver a un proyecto educativo meses después. Enlazar cada síntoma a un test permite reproducirlo en lugar de describirlo de memoria.
 - **Alternativas rechazadas:** meterlo todo en el README: ya tiene 327 líneas (2026-11-25).
 - **Impacto:** tareas 2.x.
@@ -82,6 +87,36 @@ Los identificadores de esta tabla se comprobaron el 2026-11-25 contra la salida 
 - **Por qué:** cada límite ya está escrito en su design, pero disperso; una deuda sin dueño ni decisión no se cierra nunca.
 - **Impacto:** tarea 3.1.
 
+### D6 · Merge de `develop` (2026-11-27): la matriz describe lo que hay ahora
+
+- **Qué:** `feature/hardening` se escribió sobre `v0.2.0`. Se mergea `develop` = `57c413d` (0.2.1, conversación, pantalla completa, Copilot Web, paridad con Windows, `prompt-economy`) y se reescriben los textos que describían `v0.2.0`: la matriz pasa SEC-06 de `pendiente de merge` a `parcial` (fijado en `sec-states.json`) y añade a SEC-01, 03, 07, 08, 10 y 15 los tests y recibos de `copilot-web-provider` y de la conversación; los campos `Windows` citan la ejecución de `57c413d` en un PC personal con Windows (1592 pasados, 17 omitidos, 1 fallo por carga que pasa solo; demos PASS; tests `edge` NOT RUN); la deuda conocida cierra el stderr MCP sin redactar (ya se redacta en `develop`) y quita lo que decía «sin mergear».
+- **Por qué:** una matriz que describe una versión anterior a la que se va a mergear afirma cosas falsas en los dos sentidos (huecos ya cerrados y conducta nueva sin fila). Solo se afirma lo que respalda un test recogido o un recibo; lo demás queda NOT RUN.
+- **Alternativas rechazadas:** mergear sin tocar la matriz y actualizarla en otro change: la comprobación de la matriz falló nada más mergear (un test renombrado en `develop`), así que no se podía dejar para después; reescribir la matriz desde cero: perdería los recibos y la tabla de mutaciones, que siguen valiendo.
+- **Impacto:** `docs/security/sec-matrix.md`, `docs/security/sec-states.json`, `docs/security/known-debt.md`, `README.md`, `SECURITY.md`; tareas 6.x.
+- **Límite escrito:** los tests que solo existen en esta rama no estaban en `57c413d`: su fila lo dice (NOT RUN en Windows).
+
+### D7 · Correcciones de la revisión de seguridad del 2026-11-27
+
+- **Qué:** los nueve hallazgos (F-01..F-09; siete de severidad baja confirmados y dos pendientes de validar), cada uno vuelto a comprobar sobre el árbol mergeado con un test que falla antes de corregir, y la corrección mínima:
+  - F-01: el patrón de GitLab acepta el cuerpo largo actual (20 a 300 caracteres, posesivo) y el sufijo `.<versión>.<sufijo>`.
+  - F-02: `LineRedactor` quita las secuencias de escape de cada línea antes de redactarla.
+  - F-03: `ask` e `history` imprimen con `safe_foreign_text`, la limpieza de la conversación.
+  - F-04: `render_for_terminal` marca cada fila del contenido con `| ` y la corta con `wrap_rows` al ancho de la terminal (`|+` en las continuaciones); no cambia ni el contenido ni lo que se hashea.
+  - F-05: `read_reply` vuelve a aplicar en Python el tope de 200 000 caracteres y lo da por cortado si lo pasa.
+  - F-06: `verify.sh` comprueba el lock antes de cualquier `uv run`, exporta `UV_LOCKED=1` y termina comprobando que el árbol sigue limpio.
+  - F-07: los enlaces rotos se resuelven con un conjunto de sufijos y una búsqueda de corrección por nombre; las comparaciones de nombres se hacen con las cotas rápidas de `difflib` delante (no cambian el resultado) y con un tope de 100 000 pares por pasada, con aviso.
+  - F-08: `harness/storage/private.py` crea el directorio de datos (y los que le falten por encima), la base, `locks/` y sus ficheros y `copilot/login.json` con `0700`/`0600`, sin ramas por plataforma; la clave HMAC, los logs de stderr MCP y el perfil de Edge, que ya eran `0700`, crean con él también las carpetas que les falten por encima (cualquiera de ellos puede crear el directorio de datos antes que la base).
+  - F-09: el selector de presentación de emoji (U+FE0F) cuenta una columna.
+- **Por qué:** cada uno rompe o debilita un control documentado (SEC-01, 03, 12, 15) y su arreglo es pequeño; dejarlos escritos como deuda costaría más que arreglarlos.
+- **Alternativas rechazadas:**
+  - F-02: limpiar la línea entera con `terminal_safe` (también los caracteres de formato): cambiaría en el log más de lo que el hallazgo pide (un tabulador pasaría a espacio, se perderían caracteres que el servidor escribió); se quitan solo las secuencias de escape, que es lo que dejaba la credencial sin límite de palabra, y el carácter de formato dentro de una credencial se escribe como límite (SEC-01).
+  - F-04: solo prefijar sin cortar: una línea rellenada hasta el ancho de la terminal volvería a dar una fila sin marca al partirla la terminal.
+  - F-07: solo un tope, sin arreglar el coste de los enlaces: el tope cortaría un informe normal con muchos enlaces repetidos; un tope compartido por las dos pasadas: medido, la búsqueda de correcciones agotaba el tope y dejaba sin comparar los duplicados.
+  - F-08: estrechar también lo que ya existe (`chmod` en cada apertura): fallaría con una carpeta que la persona eligió y no es suya, y cambiaría permisos que nadie pidió; se crea privado y se documenta cómo estrechar lo antiguo. Usar `os.umask`: es global al proceso y afecta a otros hilos.
+  - F-09: delegar la anchura en Rich: el modo de texto plano solo usa la biblioteca estándar (shell-appearance D3).
+- **Impacto:** sin delta de spec (`skip_specs` se mantiene): F-01, F-02 y F-03 hacen cumplir requisitos ya escritos (`secret-redaction`, «Formatos conocidos enmascarados»; `mcp-gateway`, «Resultados de herramientas enmascarados»), F-04 el de `human-approval` «Lo que se muestra es lo que se aprueba», F-05 el límite de lectura de `copilot-web-provider`; F-07 (tope con aviso) y F-08 (modos) son conducta nueva sin requisito: queda **pendiente de Wilson** si merecen uno en `memory-maintenance` y `session-management`. Tests en `tests/security/test_audit_findings.py`; tareas 5.x; matriz (SEC-01, 03, 12, 15) y deuda (puntos 12 a 14).
+- **Riesgos:** [un token de GitLab de más de 300 caracteres de cuerpo] → no se reconoce (límite escrito); [el aviso de aprobación de la CLI se corta al ancho que da la terminal al imprimirlo] → si la ventana se estrecha después, la terminal vuelve a partir filas (como en la conversación); [los modos solo protegen lo nuevo] → `SECURITY.md` dice cómo estrechar un directorio antiguo; en Windows no se usan y no se fija ninguna ACL.
+
 ## Risks / Trade-offs
 
 - [La matriz dice más de lo que prueban los tests citados] → cada fila cita su control negativo; la revisión independiente de este change lee la matriz contra los tests; la comprobación solo garantiza existencia (límite escrito en D2).
@@ -93,9 +128,16 @@ Los identificadores de esta tabla se comprobaron el 2026-11-25 contra la salida 
 
 Sin migración. Vuelta atrás: revertir el change y quitar la línea de `verify.sh`.
 
-## Decisiones pendientes de Wilson (antes de implementar)
+## Decisiones de Wilson
 
-1. ¿Aceptas que la copia y restauración de `HARNESS_DATA_DIR`, la retención de SQLite y la rotación de logs queden aplazadas (proyecto educativo)? (Ya indicado por ti el 2026-11-25; se pide confirmar la lista.)
-2. Deuda 2: ¿se quitan `--password-store=basic` y `--use-mock-keychain` (obliga a iniciar sesión de nuevo y puede pedir el llavero) o se aceptan?
+Decididas el 2026-11-25:
+
+1. **Aplazar** la copia y restauración de `HARNESS_DATA_DIR`, la retención de SQLite y la rotación de logs (proyecto educativo), y **reducir este change** a la matriz SEC con su comprobación, la deuda conocida y la corrección de frases de `README.md` y `SECURITY.md`; el runbook y la guía de diagnóstico se aplazan también (la interfaz conversacional va antes; ver D4).
+2. Deuda 2: **se mantienen** `--password-store=basic` y `--use-mock-keychain` en el perfil dedicado de Edge, para no perder la sesión iniciada; se revisa cuando la sesión caduque. El texto que lo sostiene vive en el change `copilot-web-provider`, que no está mergeado en `develop`.
+
+Pendientes:
+
+5. (2026-11-27, D7) ¿Las correcciones F-07 (tope de comparaciones con aviso) y F-08 (modos `0700`/`0600` del directorio de datos) se escriben como requisito en `memory-maintenance` y `session-management`, o se quedan como conducta documentada en el README y `SECURITY.md`?
+
 3. Deuda 6: ¿se redacta el stderr de los servidores MCP antes de guardarlo o se acepta guardarlo crudo con `0600`?
 4. Deuda 9: ¿harás la medición sobre el vault real o se cierra como no aplicable en un proyecto que solo usa prompts sintéticos?

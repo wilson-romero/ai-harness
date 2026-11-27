@@ -21,6 +21,7 @@ from tests.skill_support import (
     WriteEffect,
     build,
     copy_skills,
+    unmark_rows,
     with_effect,
 )
 
@@ -179,7 +180,8 @@ def test_escape_sequence_in_a_model_output(conn, data_dir, tmp_path):
     engine, session, _, _ = _engine(conn, data_dir, tmp_path, terminal, answer=answer)
     _run(engine, session)
     shown = terminal.shown[0]
-    content = shown.split("-" * 72 + "\n", 1)[1].rsplit("\n" + "-" * 72, 1)[0]
+    content = unmark_rows(
+        shown.split("-" * 72 + "\n", 1)[1].rsplit("\n" + "-" * 72, 1)[0].split("\n"))
     for char in ("\x1b", "‮", "\x07"):
         assert char not in shown
     proposal_line = next(l for l in shown.splitlines() if "bytes:" in l)
@@ -225,6 +227,52 @@ def test_granted_approval_expired_before_the_effect(conn, data_dir, tmp_path):
         "SELECT event_type FROM audit_events WHERE event_type LIKE 'approval.%' ORDER BY rowid")]
     # 8.8: an answer that arrives after the expiry is never recorded as `granted`.
     assert events == ["approval.requested", "approval.expired"]
+
+
+class _BusyWriteEffect(WriteEffect):
+    """A test effect whose exclusive section is taken while `busy` is set."""
+
+    def __init__(self, folder) -> None:
+        super().__init__(folder)
+        self.busy = True
+
+    def exclusive(self, context):
+        import contextlib
+
+        from harness.skills.effects import EffectBusy
+
+        if self.busy:
+            raise EffectBusy("the test effect is busy")
+        return contextlib.nullcontext()
+
+
+def test_granted_approval_that_expires_while_the_effect_is_busy_is_not_consumed(
+        conn, data_dir, tmp_path):
+    """Independent review of hardening (2026-11-25): the expiry is checked again at the
+    moment of consuming. Granted, then the effect is busy (the approval stays `granted`), the
+    expiry passes, and a resume with the effect free must not consume nor apply it."""
+    from harness.skills.effects import EffectBusy
+
+    clock = Clock()
+    root = copy_skills(tmp_path)
+    with_effect(root, "demo-echo", "test.write")
+    effect = _BusyWriteEffect(tmp_path / "efecto")
+    engine, sessions, _ = build(
+        conn, data_dir, root=root, terminal=ApprovingTerminal(), clock=clock,
+        provider=ScriptedProvider({"tarea: demo-echo/draft": GOOD_ECHO}),
+        effects={"test.write": effect})
+    session = sessions.create_session("Demo")
+    with pytest.raises(EffectBusy):
+        _run(engine, session)
+    assert [a["status"] for a in _approval(conn)] == ["granted"] and effect.written() == []
+    run_id = conn.execute("SELECT run_id FROM skill_runs").fetchone()[0]
+    clock.advance(901)  # past HARNESS_APPROVAL_TTL_S (900 s by default)
+    effect.busy = False
+    outcome = _resume(engine, run_id)
+    assert effect.written() == []
+    statuses = [a["status"] for a in _approval(conn)]
+    assert "consumed" not in statuses and statuses[0] == "expired", statuses
+    assert outcome.status != "completed"
 
 
 # -- 5.4 single use, alteration and the closed list of effects ------------------------------------
@@ -405,7 +453,8 @@ def _shown(terminal, label):
 
 
 def _shown_content(terminal):
-    return terminal.shown[0].split("-" * 72 + "\n", 1)[1].rsplit("\n" + "-" * 72, 1)[0]
+    marked = terminal.shown[0].split("-" * 72 + "\n", 1)[1].rsplit("\n" + "-" * 72, 1)[0]
+    return unmark_rows(marked.split("\n"))
 
 
 @pytest.mark.parametrize("target", [

@@ -41,6 +41,7 @@ from harness.mcp.policy import (
     parse_arguments,
 )
 from harness.storage.database import open_database
+from harness.storage.private import private_dir
 from harness.text.safe_text import safe_foreign_line
 
 if TYPE_CHECKING:
@@ -335,7 +336,7 @@ def _server_log(data_dir: Path, server: str) -> Path | None:
     directory = data_dir / "logs" / "mcp"
     path = directory / f"{server}.stderr.log"
     try:
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        private_dir(directory)  # and its missing parents (security review 2026-11-27, F-08)
         if hasattr(os, "getuid"):
             os.chmod(directory, 0o700)
             if path.exists():

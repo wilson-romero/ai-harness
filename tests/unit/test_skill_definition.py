@@ -121,6 +121,24 @@ def test_invalid_fixtures(root, name, reason):
     assert not listing[name].valid and any(reason in r for r in listing[name].reasons)
 
 
+@pytest.mark.parametrize("relative", [
+    "run.sh",                   # a script at the root, next to SKILL.md and workflow.json
+    "helper.md",                # even a Markdown file: the root holds exactly two files
+    "templates/draft.md.py",    # a content name must match whole, not start like one
+    "templates/draft.mdx",
+    "references/notes.md.sh",
+])
+def test_a_file_outside_the_closed_list_invalidates_the_skill(root, relative):
+    """Independent review of hardening (2026-11-25): the closed list of files is exact at the
+    root and in the subfolders; a prefix match or an open root would let a script in."""
+    target = root / "demo-echo" / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("echo synthetic\n", encoding="utf-8")
+    assert f"unexpected file: {relative}" in _reasons(root, "demo-echo")
+    listing = {item.name: item for item in list_skills(root, EFFECTS)}
+    assert not listing["demo-echo"].valid
+
+
 def test_hidden_file_is_ignored_and_does_not_change_the_hash(root):
     before = load_skill(root, "demo-echo", EFFECTS).sha256
     (root / "demo-echo" / ".DS_Store").write_bytes(b"\x00\x01binario")

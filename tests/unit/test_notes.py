@@ -130,3 +130,24 @@ def test_project_membership_rule():
     assert project_section("Memoria-CC/c.md", fm_beta, "demo-alpha") is None
     assert project_section("Memoria/personas.md", fm_alpha, "demo-alpha") is None
     assert project_section("daily/2026-11-21.md", fm_alpha, "demo-alpha") is None
+
+
+@pytest.mark.parametrize(("block", "slug"), [
+    ("project_slug: demo-alpha-2", "demo-alpha"),   # the slug is a prefix of the declared one
+    ("project_slug: demo-alpha", "demo-alpha-2"),   # the declared one is a prefix of the slug
+    ("project_slug: alpha", "demo-alpha"),          # a suffix
+    ("tags: [decision, demo-alpha-2]", "demo-alpha"),
+    ("tags: [decision, demo-alpha]", "demo-alpha-2"),
+    ("tags: demo-alpha-2", "demo-alpha"),             # a scalar tag, not a list
+    ("tags: [x-demo-alpha]", "demo-alpha"),
+])
+def test_a_project_named_inside_another_is_not_that_project(block, slug):
+    """Independent review of hardening (2026-11-25), SEC-02: a note belongs to a project only
+    by the exact slug, never by a substring or a prefix of it."""
+    fm, _ = parse_frontmatter(f"---\ntype: decision\n{block}\n---\ncuerpo\n")
+    assert project_section("Decisiones/a.md", fm, slug) is None
+
+
+def test_the_exact_project_in_a_scalar_tag_still_counts():
+    fm, _ = parse_frontmatter("---\ntype: decision\ntags: demo-alpha\n---\ncuerpo\n")
+    assert project_section("Decisiones/a.md", fm, "demo-alpha") == "Decisiones"

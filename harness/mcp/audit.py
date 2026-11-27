@@ -14,6 +14,7 @@ from uuid import uuid7
 
 from harness.storage.database import transaction, utc_now
 from harness.storage.locks import NamedLock
+from harness.storage.private import private_dir
 from harness.text.safe_text import safe_foreign_line
 
 NAME_LIMIT = 64
@@ -59,7 +60,7 @@ def args_key(data_dir: Path) -> bytes:
     read outside the lock made a concurrent recovery's rename fail (WinError 32).
     """
     path = data_dir / ARGS_KEY
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    private_dir(path.parent)  # and its missing parents (security review 2026-11-27, F-08)
     if hasattr(os, "getuid"):
         os.chmod(path.parent, 0o700)
     lock = NamedLock(data_dir, "mcp-args-key")
