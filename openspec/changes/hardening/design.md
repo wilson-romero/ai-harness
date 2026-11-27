@@ -87,6 +87,36 @@ Los identificadores de esta tabla se comprobaron el 2026-11-25 contra la salida 
 - **Por qué:** cada límite ya está escrito en su design, pero disperso; una deuda sin dueño ni decisión no se cierra nunca.
 - **Impacto:** tarea 3.1.
 
+### D6 · Merge de `develop` (2026-11-27): la matriz describe lo que hay ahora
+
+- **Qué:** `feature/hardening` se escribió sobre `v0.2.0`. Se mergea `develop` = `57c413d` (0.2.1, conversación, pantalla completa, Copilot Web, paridad con Windows, `prompt-economy`) y se reescriben los textos que describían `v0.2.0`: la matriz pasa SEC-06 de `pendiente de merge` a `parcial` (fijado en `sec-states.json`) y añade a SEC-01, 03, 07, 08, 10 y 15 los tests y recibos de `copilot-web-provider` y de la conversación; los campos `Windows` citan la ejecución de `57c413d` en un PC personal con Windows (1592 pasados, 17 omitidos, 1 fallo por carga que pasa solo; demos PASS; tests `edge` NOT RUN); la deuda conocida cierra el stderr MCP sin redactar (ya se redacta en `develop`) y quita lo que decía «sin mergear».
+- **Por qué:** una matriz que describe una versión anterior a la que se va a mergear afirma cosas falsas en los dos sentidos (huecos ya cerrados y conducta nueva sin fila). Solo se afirma lo que respalda un test recogido o un recibo; lo demás queda NOT RUN.
+- **Alternativas rechazadas:** mergear sin tocar la matriz y actualizarla en otro change: la comprobación de la matriz falló nada más mergear (un test renombrado en `develop`), así que no se podía dejar para después; reescribir la matriz desde cero: perdería los recibos y la tabla de mutaciones, que siguen valiendo.
+- **Impacto:** `docs/security/sec-matrix.md`, `docs/security/sec-states.json`, `docs/security/known-debt.md`, `README.md`, `SECURITY.md`; tareas 6.x.
+- **Límite escrito:** los tests que solo existen en esta rama no estaban en `57c413d`: su fila lo dice (NOT RUN en Windows).
+
+### D7 · Correcciones de la revisión de seguridad del 2026-11-27
+
+- **Qué:** los nueve hallazgos (F-01..F-09; siete de severidad baja confirmados y dos pendientes de validar), cada uno vuelto a comprobar sobre el árbol mergeado con un test que falla antes de corregir, y la corrección mínima:
+  - F-01: el patrón de GitLab acepta el cuerpo largo actual (20 a 300 caracteres, posesivo) y el sufijo `.<versión>.<sufijo>`.
+  - F-02: `LineRedactor` quita las secuencias de escape de cada línea antes de redactarla.
+  - F-03: `ask` e `history` imprimen con `safe_foreign_text`, la limpieza de la conversación.
+  - F-04: `render_for_terminal` marca cada fila del contenido con `| ` y la corta con `wrap_rows` al ancho de la terminal (`|+` en las continuaciones); no cambia ni el contenido ni lo que se hashea.
+  - F-05: `read_reply` vuelve a aplicar en Python el tope de 200 000 caracteres y lo da por cortado si lo pasa.
+  - F-06: `verify.sh` comprueba el lock antes de cualquier `uv run`, exporta `UV_LOCKED=1` y termina comprobando que el árbol sigue limpio.
+  - F-07: los enlaces rotos se resuelven con un conjunto de sufijos y una búsqueda de corrección por nombre; las comparaciones de nombres se hacen con las cotas rápidas de `difflib` delante (no cambian el resultado) y con un tope de 100 000 pares por pasada, con aviso.
+  - F-08: `harness/storage/private.py` crea el directorio de datos (y los que le falten por encima), la base, `locks/` y sus ficheros y `copilot/login.json` con `0700`/`0600`, sin ramas por plataforma.
+  - F-09: el selector de presentación de emoji (U+FE0F) cuenta una columna.
+- **Por qué:** cada uno rompe o debilita un control documentado (SEC-01, 03, 12, 15) y su arreglo es pequeño; dejarlos escritos como deuda costaría más que arreglarlos.
+- **Alternativas rechazadas:**
+  - F-02: limpiar la línea entera con `terminal_safe` (también los caracteres de formato): cambiaría en el log más de lo que el hallazgo pide (un tabulador pasaría a espacio, se perderían caracteres que el servidor escribió); se quitan solo las secuencias de escape, que es lo que dejaba la credencial sin límite de palabra, y el carácter de formato dentro de una credencial se escribe como límite (SEC-01).
+  - F-04: solo prefijar sin cortar: una línea rellenada hasta el ancho de la terminal volvería a dar una fila sin marca al partirla la terminal.
+  - F-07: solo un tope, sin arreglar el coste de los enlaces: el tope cortaría un informe normal con muchos enlaces repetidos; un tope compartido por las dos pasadas: medido, la búsqueda de correcciones agotaba el tope y dejaba sin comparar los duplicados.
+  - F-08: estrechar también lo que ya existe (`chmod` en cada apertura): fallaría con una carpeta que la persona eligió y no es suya, y cambiaría permisos que nadie pidió; se crea privado y se documenta cómo estrechar lo antiguo. Usar `os.umask`: es global al proceso y afecta a otros hilos.
+  - F-09: delegar la anchura en Rich: el modo de texto plano solo usa la biblioteca estándar (shell-appearance D3).
+- **Impacto:** sin delta de spec (`skip_specs` se mantiene): F-01, F-02 y F-03 hacen cumplir requisitos ya escritos (`secret-redaction`, «Formatos conocidos enmascarados»; `mcp-gateway`, «Resultados de herramientas enmascarados»), F-04 el de `human-approval` «Lo que se muestra es lo que se aprueba», F-05 el límite de lectura de `copilot-web-provider`; F-07 (tope con aviso) y F-08 (modos) son conducta nueva sin requisito: queda **pendiente de Wilson** si merecen uno en `memory-maintenance` y `session-management`. Tests en `tests/security/test_audit_findings.py`; tareas 5.x; matriz (SEC-01, 03, 12, 15) y deuda (puntos 12 a 14).
+- **Riesgos:** [un token de GitLab de más de 300 caracteres de cuerpo] → no se reconoce (límite escrito); [el aviso de aprobación de la CLI se corta al ancho que da la terminal al imprimirlo] → si la ventana se estrecha después, la terminal vuelve a partir filas (como en la conversación); [los modos solo protegen lo nuevo] → `SECURITY.md` dice cómo estrechar un directorio antiguo; en Windows no se usan y no se fija ninguna ACL.
+
 ## Risks / Trade-offs
 
 - [La matriz dice más de lo que prueban los tests citados] → cada fila cita su control negativo; la revisión independiente de este change lee la matriz contra los tests; la comprobación solo garantiza existencia (límite escrito en D2).
@@ -106,6 +136,8 @@ Decididas el 2026-11-25:
 2. Deuda 2: **se mantienen** `--password-store=basic` y `--use-mock-keychain` en el perfil dedicado de Edge, para no perder la sesión iniciada; se revisa cuando la sesión caduque. El texto que lo sostiene vive en el change `copilot-web-provider`, que no está mergeado en `develop`.
 
 Pendientes:
+
+5. (2026-11-27, D7) ¿Las correcciones F-07 (tope de comparaciones con aviso) y F-08 (modos `0700`/`0600` del directorio de datos) se escriben como requisito en `memory-maintenance` y `session-management`, o se quedan como conducta documentada en el README y `SECURITY.md`?
 
 3. Deuda 6: ¿se redacta el stderr de los servidores MCP antes de guardarlo o se acepta guardarlo crudo con `0600`?
 4. Deuda 9: ¿harás la medición sobre el vault real o se cierra como no aplicable en un proyecto que solo usa prompts sintéticos?

@@ -20,7 +20,7 @@ Corte **8 · Cierre** de `docs/plan/2026-11-24-ai-harness-cortes.md`, en la part
 
 - **Copia y restauración de `HARNESS_DATA_DIR`:** aplazada por decisión de Wilson del 2026-11-25. Es una tarea de operación en producción y este proyecto es educativo; los datos de un piloto con prompts sintéticos se pueden regenerar. La guía de diagnóstico sí dice qué contiene el directorio y qué no se debe copiar fuera (perfil de Edge, claves HMAC, logs).
 - Retención o purga de filas de SQLite, rotación de logs entre ejecuciones, monitorización: operación en producción, aplazadas por el mismo motivo.
-- Cualquier cambio de conducta del producto. Un hueco que la matriz descubra se apunta como `no cubierto` o `parcial` con una tarea en el change que corresponda; no se arregla aquí.
+- Cualquier cambio de conducta del producto. Un hueco que la matriz descubra se apunta como `no cubierto` o `parcial` con una tarea en el change que corresponda; no se arregla aquí. **Revisado el 2026-11-27 por encargo de Wilson:** la excepción son los nueve hallazgos de la revisión de seguridad del 2026-11-27 (grupo 5 de `tasks.md`, design D7), pequeños y cada uno con su test; el resto de lo que esa revisión señaló va a la deuda conocida, no se arregla aquí.
 - Curador y Sueño asistidos (`memory-curation`), que siguen en el Corte 8 después del MVP.
 - Lo que depende de EA: SEC-11 y la parte de COM de SEC-10 quedan BLOCKED en la matriz.
 - Ejecutar el runbook de Windows como puerta: es confirmación opcional.
@@ -39,5 +39,5 @@ Ninguna. Este change es documentación y una comprobación de desarrollo; no cam
 
 - Documentación nueva: `docs/security/sec-matrix.md`, `docs/security/known-debt.md`, `docs/runbook/instalacion-y-uso.md`, `docs/runbook/diagnostico.md`; enlaces desde `README.md` y `SECURITY.md`.
 - Script nuevo: `scripts/check_sec_matrix.py` (biblioteca estándar; ejecuta `pytest --collect-only` como subproceso con plazo) y su llamada en `scripts/verify.sh`; tests del script en `tests/unit/`.
-- Código de producto: ninguno. Dependencias: ninguna.
+- Código de producto: ninguno hasta el 2026-11-27; desde entonces, las correcciones del grupo 5 (`harness/text/redaction.py`, `harness/cli.py`, `harness/skills/approvals.py`, `harness/providers/copilot_web.py`, `harness/memory/maintenance.py`, `harness/storage/` con el módulo nuevo `private.py`, `harness/browser/login.py`, `harness/shell/render.py`) y `scripts/verify.sh`. Dependencias: ninguna.
 - Demo: `scripts/demo_hardening.py`.
