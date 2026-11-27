@@ -283,3 +283,24 @@ def test_emoji_presentation_sequences_never_make_a_row_wider_than_the_terminal(c
     assert all(row.startswith(MARKED) for row in rows)
     wide = [cell_len(row) for row in rows if cell_len(row) >= columns]
     assert wide == []
+
+
+@pytest.mark.skipif(not OWNER_ONLY, reason="POSIX permission bits are not used on this system")
+@pytest.mark.parametrize("first", ["mcp-key", "mcp-log", "edge-profile"])
+def test_the_data_dir_is_owner_only_whichever_command_creates_it_first(tmp_path, first):
+    """`mcp call` and `copilot login` may create HARNESS_DATA_DIR before the database does."""
+    from harness.browser.profile import prepare_profile
+    from harness.mcp.audit import args_key
+    from harness.mcp.commands import _server_log
+
+    previous = os.umask(0o022)
+    try:
+        data_dir = tmp_path / "fresh" / "data"
+        {"mcp-key": lambda: args_key(data_dir),
+         "mcp-log": lambda: _server_log(data_dir, "synthetic"),
+         "edge-profile": lambda: prepare_profile(data_dir / "edge-profile")}[first]()
+        modes = {path.name: oct(stat.S_IMODE(path.stat().st_mode))
+                 for path in (tmp_path / "fresh", data_dir)}
+    finally:
+        os.umask(previous)
+    assert modes == {"fresh": "0o700", "data": "0o700"}

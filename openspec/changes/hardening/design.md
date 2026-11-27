@@ -105,7 +105,7 @@ Los identificadores de esta tabla se comprobaron el 2026-11-25 contra la salida 
   - F-05: `read_reply` vuelve a aplicar en Python el tope de 200 000 caracteres y lo da por cortado si lo pasa.
   - F-06: `verify.sh` comprueba el lock antes de cualquier `uv run`, exporta `UV_LOCKED=1` y termina comprobando que el árbol sigue limpio.
   - F-07: los enlaces rotos se resuelven con un conjunto de sufijos y una búsqueda de corrección por nombre; las comparaciones de nombres se hacen con las cotas rápidas de `difflib` delante (no cambian el resultado) y con un tope de 100 000 pares por pasada, con aviso.
-  - F-08: `harness/storage/private.py` crea el directorio de datos (y los que le falten por encima), la base, `locks/` y sus ficheros y `copilot/login.json` con `0700`/`0600`, sin ramas por plataforma.
+  - F-08: `harness/storage/private.py` crea el directorio de datos (y los que le falten por encima), la base, `locks/` y sus ficheros y `copilot/login.json` con `0700`/`0600`, sin ramas por plataforma; la clave HMAC, los logs de stderr MCP y el perfil de Edge, que ya eran `0700`, crean con él también las carpetas que les falten por encima (cualquiera de ellos puede crear el directorio de datos antes que la base).
   - F-09: el selector de presentación de emoji (U+FE0F) cuenta una columna.
 - **Por qué:** cada uno rompe o debilita un control documentado (SEC-01, 03, 12, 15) y su arreglo es pequeño; dejarlos escritos como deuda costaría más que arreglarlos.
 - **Alternativas rechazadas:**
