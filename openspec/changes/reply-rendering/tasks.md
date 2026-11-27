@@ -102,6 +102,10 @@
     - `openspec validate --all --strict`: 25 de 25 válidos, código 0.
     - `scripts/check_sec_matrix.py`: PASS (15 filas, 135 pruebas), código 0.
     - `scripts/check_public_safety.py` sobre los 18 ficheros del change: PASS, código 0.
+  - Repetidas tras la tarea 2.3, sobre `589619e` (con `develop` integrado en `fe808fc`):
+    - Sin Edge: `1884 passed, 157 deselected` en 314 s, sin fallos.
+    - Edge: `155 passed, 1886 deselected` en 1278 s, código 0.
+    - `openspec validate --all --strict` 25 de 25, `check_sec_matrix.py` PASS y `check_public_safety.py` PASS.
 - [x] 6.3 Sin código por plataforma: `tests/unit/test_portability.py` pasa con los ficheros nuevos.
   - Recibo: está en la tanda sin Edge de 6.2, que pasa entera.
 - [x] 6.4 Capturas antes (`1a49ad2`) y después, con Pilot y el Mock: una tabla y un bloque de código a 80×40, 100×40 y 120×40, y una respuesta de 73 líneas al llegar a 100×30. Texto y SVG, fuera del repo; el texto va en el informe del change.
