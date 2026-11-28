@@ -135,6 +135,25 @@ Una revisión de seguridad de `develop` (sobre `5af28ed`, con datos sintéticos 
 - **Decisión:** pendiente de Wilson; fuera del alcance de la ronda de paridad con Windows, que solo cubre el motivo de `timeout`. El arreglo natural es llevar cualquier motivo previo al envío con la cancelación y que el servicio lo clasifique por su tipo.
 - **Dueño:** Wilson.
 
+## 16. Carpeta de trabajo: la carrera que queda abierta y Windows sin ejecutar (rama `feature/workspace-tools`)
+
+- **Qué:**
+  - **La carrera.** Entre el paseo componente a componente y la apertura de un fichero de la carpeta de trabajo, otro proceso con la cuenta de la persona puede cambiar una carpeta intermedia por un enlace. El harness detecta:
+    - el cambio del fichero mismo: la identidad sobre el descriptor, `O_NOFOLLOW` y la nueva resolución dentro de la carpeta;
+    - el de la carpeta raíz: su identidad se comprueba al principio de cada llamada (no durante ella).
+
+    Pero no puede cerrar la ventana de las carpetas intermedias: `os.open` no admite `dir_fd` en Windows, así que no hay `openat` portable.
+  - **Windows.** En Windows no se ha ejecutado nada de los tramos B1 y B2 (NOT RUN). Las uniones reales, `st_nlink` en NTFS, los nombres cortos 8.3, los flujos alternativos y las rutas largas se rechazan por regla y se prueban simulados en macOS.
+  - **El plazo de una llamada (revisión de `d0a65d8`, hallazgo 5).** Una llamada de `/plan` o `/agent` espera como mucho `call_timeout_s` (10 s) y Ctrl+C o el plazo del plan la cortan, pero lo que se acota es la **espera**: un `read` o un `list` sobre un disco de red que no contesta queda bloqueado dentro del sistema en un hilo aparte, que no se puede cancelar, hasta que el sistema responde (después su resultado se descarta). `main.py workspace` y la elección de la carpeta (`--root`, `/workspace`, con su búsqueda de un segundo camino) no tienen plazo: sobre un disco así, se quedan esperando.
+  - **El segundo camino a una carpeta protegida (hallazgo 1).** Se busca hasta dos niveles de subcarpetas y 2 000 carpetas listadas; uno más profundo o más allá no se ve. Los puntos de montaje **dentro** de la carpeta se atraviesan sin aviso. Las rutas de red y de dispositivo de Windows (`\\?\GLOBALROOT\…`, `\\localhost\C$\…`) se rechazan por su forma; que no haya otra en Windows no se ha comprobado (NOT RUN).
+  - **Lo que vuelve al proveedor con el consentimiento dado (tramo B2).** Dentro de `/agent`, un fichero hostil de la carpeta puede convencer al modelo de leer otro fichero normal de ella y de mandar su contenido en la vuelta siguiente. Lo acotan el consentimiento por carpeta, las reglas fijas, el tope de 4 KiB por paso y que cada vuelta se muestra antes de salir, pero no se impide.
+- **Riesgo:**
+  - un proceso local que ya tiene la cuenta de la persona podría hacer leer al harness un fichero de fuera de la carpeta. Ese proceso podría leerlo igualmente sin el harness;
+  - con el consentimiento dado, el texto de un fichero normal de la carpeta puede llegar al proveedor sin que la persona lo pidiera expresamente;
+  - una diferencia de conducta del sistema en Windows que la simulación no reproduzca.
+- **Decisión:** aceptado. El atacante de este diseño es el contenido de la carpeta, no un proceso concurrente. Las órdenes para el PC de pruebas están en `docs/runbook/workspace-tools.md` («Windows») y en `openspec/changes/workspace-tools/tasks.md` 8.1 y 8.2.
+- **Dueño:** Wilson.
+
 ## Fuera del alcance: aplazado (proyecto educativo)
 
 Decidido por Wilson el 2026-11-25: el proyecto sirve para aprender a construir un harness, no para producción. Se aplaza lo que solo sirve para operar en producción:

@@ -30,7 +30,7 @@ from harness.mcp.audit import (
     record_finished,
     record_running,
 )
-from harness.mcp.config import LoadedConfig
+from harness.mcp.config import InternalServer, LoadedConfig
 from harness.mcp.policy import Decision, ParsedArguments, decide_before_start, decide_offered
 from harness.storage.private import private_dir
 
@@ -88,6 +88,10 @@ def call_tool(
                             parsed.canonical, parsed.size, key, plan)
         return CallReport(DENIED, decision, call_id=row.call_id)
     entry = config.servers[server]
+    if isinstance(entry, InternalServer):
+        # The harness's own server (workspace-tools D7): the same policy above and the same
+        # `tool_calls` table, but no process; it records its own finished row.
+        return entry.call(conn, key, tool, parsed, plan, stop=stop)
     declared = entry.tools[tool]
     call_id = new_call_id()
     lock = call_lock(data_dir, call_id)

@@ -97,7 +97,8 @@ def test_every_command_of_d10_and_nothing_else():
                              "memory", "context", "skill", "file", "exit",
                              "mode",  # response-mode, 2026-11-27
                              "plan",  # code-mode slice 2
-                             "agent"}  # code-mode A3
+                             "agent",  # code-mode A3
+                             "workspace"}  # workspace-tools B2
 
 
 @pytest.mark.parametrize("line, message", [

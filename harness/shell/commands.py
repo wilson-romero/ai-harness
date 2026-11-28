@@ -24,6 +24,9 @@ PATH = "path"  # a path on the disk, relative to the working folder
 TEXT = "text"  # free text
 MODE = "mode"  # a response mode (response-mode): one of MODES
 MODES: tuple[str, ...] = tuple(mode.value for mode in ResponseMode)
+WORKSPACE = "workspace"  # /workspace: a folder on the disk, or off, or send on|off
+WORKSPACE_WORDS: tuple[str, ...] = ("off", "send")
+SEND_WORDS: tuple[str, ...] = ("on", "off")
 
 
 @dataclass(frozen=True)
@@ -90,6 +93,11 @@ TABLE: tuple[CommandSpec, ...] = (
     CommandSpec("agent", 1, None, "/agent [--box] QUESTION",
                 "like /plan, but each plan's results go back to the provider, turn by turn",
                 positional=(TEXT,), options=(BOX,), full_name_only=True),
+    # workspace-tools B2: the work folder of this session (no default, no variable); its
+    # reads appear in the catalogue of /plan and /agent only while one is set.
+    CommandSpec("workspace", 0, 2, "/workspace [PATH|off|send on|off]",
+                "the work folder /plan and /agent may read; send: consent for this provider",
+                positional=(WORKSPACE,)),
     CommandSpec("mode", 0, 1, f"/mode [{'|'.join(MODES)}]",
                 "the response mode of this session (nothing is sent)", positional=(MODE,)),
     CommandSpec("exit", 0, 0, "/exit", "leave (end of input leaves too)"),
