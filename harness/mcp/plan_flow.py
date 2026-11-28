@@ -126,6 +126,9 @@ class PlanSetting:
     # A3: the provider the results go back to, in a loop (`/agent`); None: they are only
     # shown (`/plan`). It only words the box and the report: the loop sends them itself.
     loop_to: str | None = None
+    # A3: told (k, n) in the conversation's thread just before step k of n is called; the
+    # progress of a loop for the side panel. It only observes.
+    progress: Callable[[int, int], None] | None = None
 
 
 AUTO_READ_ENV = "HARNESS_AUTO_READ"
@@ -259,9 +262,16 @@ async def _run(plan: Plan, plan_id: str, request: PlanRequest, request_id: UUID,
                approval_hash: str, deadline: int, view: PlanView,
                setting: PlanSetting) -> PlanOutcome:
     approved = ApprovedPlan(plan, plan_id, request.session_id, request_id, approval_hash)
+    on_step = None
+    if setting.progress is not None:
+        here, progress = asyncio.get_running_loop(), setting.progress
+
+        def on_step(position: int, total: int) -> None:  # in the worker thread
+            here.call_soon_threadsafe(progress, position, total)
+
     report = await run_in_thread(functools.partial(
         execute_plan, setting.data_dir, approved, setting.load_config, setting.environ,
-        clock=setting.clock,
+        clock=setting.clock, on_step=on_step,
     ))
     show_report(view, report, len(plan.steps), deadline, loop_to=setting.loop_to)
     return PlanOutcome("ran", report)

@@ -230,11 +230,87 @@ Cada paso de un plan aprobado SHALL ejecutarse por la misma pasarela que `mcp ca
 - **THEN** el servidor sintético recibe exactamente las llamadas del plan y ninguna más
 
 ### Requirement: El resultado es para la persona
-El resultado de cada paso SHALL mostrarse como texto ajeno, literal, saneado y con las credenciales enmascaradas. SHALL NOT enviarse al modelo salvo por una orden explícita de la persona, que cuenta como un envío.
+El resultado de cada paso SHALL mostrarse como texto ajeno, literal, saneado y con las credenciales enmascaradas. SHALL NOT enviarse al modelo salvo en un bucle `/agent` con el consentimiento de «Consentimiento del bucle»; cada turno cuenta como un envío.
 
 #### Scenario: Sin vuelta a Copilot
-- **WHEN** termina un plan aprobado
+- **WHEN** termina un plan aprobado de `/plan`
 - **THEN** el proveedor no recibe ninguna pregunta nueva
+
+### Requirement: Consentimiento del bucle
+Un bucle SHALL empezar solo con `/agent PREGUNTA`, escrito entero, y si `HARNESS_LOOP_PROVIDERS` nombra al proveedor. Sin eso no SHALL registrarse ni enviarse nada. Con un proveedor no sintético, una línea del harness SHALL decir, una vez por bucle y antes del primer resultado, adónde va.
+
+#### Scenario: Sin consentimiento
+- **WHEN** la persona escribe `/agent` y `HARNESS_LOOP_PROVIDERS` no nombra al proveedor
+- **THEN** no hay ninguna solicitud ni ningún bucle registrado, y el mensaje dice qué variable poner
+
+#### Scenario: `/plan` con el bucle permitido
+- **WHEN** `HARNESS_LOOP_PROVIDERS` nombra al proveedor y la persona usa `/plan`
+- **THEN** se envía una sola pregunta y los resultados solo se muestran
+
+### Requirement: Los resultados vuelven como datos
+Cada turno con resultados SHALL ser el aviso fijo del harness, un bloque entre dos marcas nuevas de ese turno y la gramática con un nonce nuevo. Cada resultado SHALL limpiarse, enmascararse, neutralizar `<<<` y `>>>` y acotarse antes de componer, y cada línea SHALL llevar un prefijo. Un plan dentro de un resultado SHALL NOT tomarse por el del modelo.
+
+#### Scenario: Un resultado hostil
+- **WHEN** un resultado trae marcas parecidas, `<<<`, `>>>`, un aviso falso, un plan, un nonce y escapes
+- **THEN** el bloque tiene una sola marca de apertura y una de cierre, cada línea va marcada y el plan escrito no se ejecuta
+
+#### Scenario: Un nonce inyectado
+- **WHEN** el modelo copia el nonce que trae un resultado
+- **THEN** el plan se rechaza con `nonce_mismatch`
+
+### Requirement: Topes de lo que se envía
+Cada resultado SHALL enviarse con 4 096 bytes como mucho, y los de un plan con 12 288 repartidos, como cabeza y cola con una marca de lo omitido. Un turno de más de 28 000 caracteres SHALL NOT enviarse.
+
+#### Scenario: Un resultado enorme
+- **WHEN** un paso devuelve decenas de miles de bytes
+- **THEN** se envían su cabeza y su cola, con la marca de cuántos bytes se omitieron
+
+### Requirement: Lo que se muestra es lo que se envía
+Antes de cada turno, la persona SHALL ver el texto entero que se envía, el mismo, bajo una línea del harness con su tamaño y su destino. El panel lateral y `/status` SHALL mostrar el turno en curso.
+
+#### Scenario: Comparar
+- **WHEN** termina un bucle de tres turnos
+- **THEN** el texto mostrado antes de los turnos 2 y 3 es igual al que recibió el proveedor
+
+### Requirement: Progreso visible del bucle
+Durante un bucle, el panel lateral SHALL mostrar el turno (`turn k of N`), su fase (enviando y esperando, aprobación, `running step k of n`) y los segundos desde que empezó el bucle. Al terminar, el panel y `/status` SHALL decir cómo acabó, con sus envíos y sus segundos.
+
+#### Scenario: Fases de un bucle de dos turnos
+- **WHEN** el turno 1 trae un plan de dos pasos y el turno 2 la respuesta
+- **THEN** el panel pasa por el envío del turno 1, la aprobación, el paso 1 de 2, el paso 2 de 2 y el envío del turno 2, y `/status` dice `completed (answer), 2 send(s), done in N s`
+
+### Requirement: Fin del bucle
+Un turno SHALL ser una pregunta. El bucle SHALL parar en una respuesta sin plan, en un segundo plan rechazado, en una respuesta que no terminó entera, en un plan no aprobado o parado por el harness y en Ctrl+C. Tras `HARNESS_LOOP_MAX_TURNS` turnos SHALL ir un turno de cierre sin catálogo cuya respuesta no SHALL leerse como plan.
+
+#### Scenario: Tres turnos
+- **WHEN** el modelo propone dos planes de lecturas por regla y después responde
+- **THEN** el proveedor recibe exactamente tres preguntas
+
+#### Scenario: El tope
+- **WHEN** `HARNESS_LOOP_MAX_TURNS=2` y el modelo propone un plan en cada turno
+- **THEN** hay tres preguntas y el plan de la respuesta de cierre no se ejecuta
+
+#### Scenario: Un paso que falla
+- **WHEN** un paso termina con un error de la herramienta
+- **THEN** el error vuelve como dato y el bucle sigue
+
+### Requirement: Aprobación en cada turno
+Cada plan del bucle SHALL aprobarse como en `/plan`: un plan de solo lecturas `auto_read`, por la regla; cualquier otro, en la caja, en cada turno.
+
+#### Scenario: Dos planes que no son por regla
+- **WHEN** dos turnos traen un plan con una lectura que no es `auto_read`
+- **THEN** la caja se abre dos veces
+
+#### Scenario: La regla apagada para un bucle
+- **WHEN** la persona escribe `/agent --box PREGUNTA` y los dos planes del bucle son de lecturas `auto_read`
+- **THEN** la caja se abre dos veces y ningún prompt contiene `--box`
+
+### Requirement: Registro del bucle
+Cada bucle SHALL dejar una fila con su estado y cada turno una fila con su número, su clase y su solicitud, en la transacción de la solicitud, sin texto. Un bucle que quedó `running` sin su proceso SHALL marcarse `interrupted` y no SHALL reanudarse.
+
+#### Scenario: Tras una caída
+- **WHEN** empieza un `/agent` y hay un bucle `running` cuyo bloqueo está libre
+- **THEN** ese bucle queda `interrupted` (`abandoned`) y no se le envía nada
 
 ### Requirement: Un plan nunca se reenvía ni se repite solo
 Tras un timeout o una interrupción después del envío, la pregunta del plan SHALL quedar `uncertain` y no reenviarse. Un plan interrumpido SHALL NOT volver a ejecutarse sin una nueva aprobación.

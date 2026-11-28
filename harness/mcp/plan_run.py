@@ -322,9 +322,12 @@ def execute_plan(
     stop: object | None = None,
     clock: Callable[[], datetime] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    on_step: Callable[[int, int], None] | None = None,
 ) -> PlanReport:
     """Check, consume and run an approved plan, in the calling thread, with a database
-    connection of its own (D10). Never raises for what a step does; returns the report."""
+    connection of its own (D10). Never raises for what a step does; returns the report.
+    `on_step(k, n)` is told, in this thread, just before step k of n is called (code-mode A3:
+    the progress the side panel shows); it only observes."""
     from harness.mcp.client import StopSignal
 
     stopper = stop if isinstance(stop, StopSignal) else StopSignal()
@@ -343,7 +346,8 @@ def execute_plan(
                           detail="another process holds this plan; nothing was run")
     try:
         recover_plans(conn, data_dir)
-        return _execute(conn, data_dir, approved, load_config, environ, stopper, clocks)
+        return _execute(conn, data_dir, approved, load_config, environ, stopper, clocks,
+                        on_step)
     finally:
         lock.release()
         conn.close()
@@ -369,7 +373,8 @@ def _refuse_before(conn: sqlite3.Connection, approved: ApprovedPlan, code: str, 
 
 def _execute(conn: sqlite3.Connection, data_dir: Path, approved: ApprovedPlan,
              load_config: Callable[[], LoadedConfig], environ: Mapping[str, str],
-             stop: object, clocks: _Clocks) -> PlanReport:
+             stop: object, clocks: _Clocks,
+             on_step: Callable[[int, int], None] | None = None) -> PlanReport:
     plan = approved.plan
     now = clocks.now()
     row = conn.execute("SELECT * FROM plan_runs WHERE plan_id = ?",
@@ -428,7 +433,7 @@ def _execute(conn: sqlite3.Connection, data_dir: Path, approved: ApprovedPlan,
                               "the MCP list cannot be read now; nothing was run", now,
                               consumed=True)
     return _run_steps(conn, data_dir, approved, config, environ, stop, clocks, steps,
-                      int(row["deadline_s"]), by_rule=row["means"] == "rule")
+                      int(row["deadline_s"]), by_rule=row["means"] == "rule", on_step=on_step)
 
 
 def changed_entry(step: PlanStep, config: LoadedConfig, *, by_rule: bool) -> bool:
@@ -456,7 +461,8 @@ def _list_changed(step: PlanStep, position: int) -> StepResult:
 def _run_steps(conn: sqlite3.Connection, data_dir: Path, approved: ApprovedPlan,
                config: LoadedConfig, environ: Mapping[str, str], stop: object,
                clocks: _Clocks, steps: list[tuple[str, str, str, bytes]],
-               deadline: int, *, by_rule: bool) -> PlanReport:
+               deadline: int, *, by_rule: bool,
+               on_step: Callable[[int, int], None] | None = None) -> PlanReport:
     from harness.mcp.client import StopSignal
 
     assert isinstance(stop, StopSignal)
@@ -482,6 +488,8 @@ def _run_steps(conn: sqlite3.Connection, data_dir: Path, approved: ApprovedPlan,
                 status, code, detail = "failed", "list_changed", result.detail
                 break
             parsed = parse_arguments(arguments.decode("utf-8"))
+            if on_step is not None:
+                on_step(position, len(steps))
             try:
                 report = call_tool(conn, data_dir, config, server, tool, parsed, key,
                                    lambda name=server: server_log(data_dir, name), environ,

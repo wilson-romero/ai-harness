@@ -7,6 +7,7 @@ import inspect
 import re
 import sqlite3
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid7
@@ -66,6 +67,9 @@ REMOTE_REF = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 CONCISE_NOTICE_NAME = "the concise-answer notice"
 PLAN_NOTICE_NAME = "the plan instructions and catalogue"  # code-mode D8
+# What a caller records about a request in the very transaction that records it (code-mode
+# A3: the turn of a loop). It gets the connection and the new request's id.
+RequestLink = Callable[[sqlite3.Connection, UUID], None]
 
 
 def _own_share(sent_text: str, prompt: str, context: ProjectContext | None,
@@ -400,6 +404,7 @@ class SessionService:
         *,
         attachment: str | None = None,
         stored_text: str,
+        link: RequestLink | None = None,
     ) -> LLMResponse:
         """A `/plan` question (code-mode D8) from a caller that holds the session: `ask_taken`
         with the harness's plan instructions in the place of the answer notice (the answer
@@ -418,7 +423,28 @@ class SessionService:
         sent = question if attachment is None else f"{attachment}\n\n{question}"
         return await self._ask_locked(session.session_id, provider, sent, context,
                                       stored_text=stored_text, notice=instructions,
-                                      notice_name=PLAN_NOTICE_NAME)
+                                      notice_name=PLAN_NOTICE_NAME, link=link)
+
+    async def ask_loop_turn(
+        self,
+        session_id: UUID,
+        provider: LLMProvider,
+        text: str,
+        *,
+        stored_text: str,
+        link: RequestLink,
+    ) -> LLMResponse:
+        """A turn after the first of an `/agent` loop (code-mode A3), from a caller that holds
+        the session: `text` is the whole of what is sent, composed and shown by the loop (the
+        harness's notice, the data block, the grammar), with no answer notice and no memory
+        block. Same states, deadline (the session's mode), size check before anything is
+        recorded, and no resend. `stored_text` is a short label, never the results; `link`
+        records the turn in the transaction that records the request."""
+        self._require_session(str(session_id))
+        if not text.strip() or not is_valid_unicode(text):
+            raise InvalidInput("a loop turn must be non-empty, valid Unicode text")
+        return await self._ask_locked(session_id, provider, text, None,
+                                      stored_text=stored_text, link=link)
 
     def require_session(self, raw_session_id: str) -> Session:
         return self._require_session(raw_session_id)
@@ -459,6 +485,7 @@ class SessionService:
         notice: str | None = None,
         notice_name: str = CONCISE_NOTICE_NAME,
         set_mode: ResponseMode | None = None,
+        link: RequestLink | None = None,
     ) -> LLMResponse:
         # Read under the session lock: nobody else can change the session until it is released.
         session = repo.get_session(self._conn, session_id)
@@ -547,6 +574,8 @@ class SessionService:
                     session_id=session_id,
                     request_id=request.request_id,
                 )
+            if link is not None:
+                link(self._conn, request.request_id)  # in this transaction: both or neither
             self._audit(request, RequestStatus.PENDING)
 
         sent = False

@@ -37,7 +37,7 @@ def test_first_run_creates_the_schema(conn):
     session_core = {"sessions", "requests", "messages", "audit_events", "schema_migrations"}
     assert tables == session_core | {
         "request_context", "skill_runs", "skill_steps", "approvals", "tool_calls",
-        "effect_sources", "plan_runs",
+        "effect_sources", "plan_runs", "loop_runs", "loop_turns",
     }
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
@@ -243,7 +243,7 @@ def test_a_database_at_008_upgrades_to_009_and_keeps_its_rows(data_dir, tmp_path
     session = _new_session(conn, "A")
     with transaction(conn):
         conn.execute("UPDATE sessions SET response_mode = 'deep' WHERE name = 'A'")
-    assert migrate(conn) == [9, 10]  # and 010 (code-mode A2), which keeps every plan row
+    assert migrate(conn) == [9, 10]  # and 010 (code-mode A2, A3), which keeps every plan row
     assert conn.execute("SELECT response_mode FROM sessions WHERE session_id = ?",
                         (str(session.session_id),)).fetchone()[0] == "deep"
     assert conn.execute("SELECT COUNT(*) FROM plan_runs").fetchone()[0] == 0

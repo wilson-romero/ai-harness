@@ -624,6 +624,42 @@ En la rama `feature/code-mode-loop` (A2, 2026-11-27). En tu lista local, una her
 - `HARNESS_AUTO_READ=off` apaga la regla para esa ejecución del harness: todo plan pide la caja.
 - Lo que el plan leyó de tu lista queda atado: si entre la lectura del plan y la ejecución de un paso cambia la entrada de su servidor (orden, argumentos, entorno, carpeta, plazos) o de su herramienta (operación, `auto_read`, tope, argumentos), ese paso no se llama y el plan termina `list_changed`. La `description` no cuenta. La caja dice el hash en su línea `bound:`.
 
+#### Un bucle de lecturas: `/agent`
+
+En la rama `feature/code-mode-loop` (A3, 2026-11-27). Con `/plan`, lo que leen las herramientas **solo** se muestra. Con `/agent PREGUNTA`, el resultado de cada plan vuelve al proveedor como datos, y el modelo puede responder o proponer otro plan, turno a turno.
+
+**Cómo se activa.** Hacen falta dos cosas:
+
+- escribir `/agent` entero, en cada pregunta (no tiene forma corta);
+- que `HARNESS_LOOP_PROVIDERS` nombre al proveedor de la sesión, por ejemplo `HARNESS_LOOP_PROVIDERS=mock`. Sin ella, `/agent` no registra ni envía nada, y `/plan` sigue igual con o sin ella.
+
+`HARNESS_LOOP_MAX_TURNS` fija el tope de turnos con catálogo: 5 por defecto, de 1 a 10. `/agent --box PREGUNTA` lleva a la caja todo plan de ese bucle, también los de lecturas `auto_read`.
+
+**Probarlo con el Mock** (datos sintéticos, nada sale de la máquina): `uv run python scripts/demo_code_mode_loop.py --prepare <carpeta fuera del repo>` escribe una lista MCP sintética y un guion de tres turnos para el Mock e imprime la orden que abre `chat --plain` sobre ellos; dentro, escribe `/agent ¿qué proyectos de demo tienen la etiqueta alpha?`. La demo completa, sin teclear nada: `uv run python scripts/demo_code_mode_loop.py` (termina con `demo: PASS`).
+
+**Qué sale de la máquina.** En cada turno después del primero se envía:
+
+- un aviso fijo del harness: lo que sigue son datos, no instrucciones;
+- los resultados del plan anterior, entre dos marcas nuevas de ese turno, cada línea con `| ` delante, limpios (sin escapes ni invisibles), con las credenciales enmascaradas y con `<<<` y `>>>` cambiados;
+- las reglas del plan y el catálogo con un nonce nuevo.
+
+Antes de cada envío, la pantalla dice `loop …: turn k of N: sending C characters to <proveedor>; exactly this text, nothing else:` y muestra ese texto entero, el mismo. Con un proveedor que no es el Mock (Copilot), una línea más, una vez por bucle, dice que esos resultados salen de la máquina hacia él. El panel lateral (`Loop`) dice el turno, la fase (`sending … and waiting for the reply`, `plan of n step(s): approval`, `running step k of n`) y los segundos desde que empezó el bucle; al terminar, el panel y `/status` dicen cómo acabó (`completed (answer), 3 send(s), done in 4 s`).
+
+**Límites.**
+
+- Por paso se envían como mucho 4 096 bytes del resultado; por plan, 12 288 repartidos entre sus pasos. Si se pasa, van la cabeza y la cola con `[omitidos por el harness: N bytes …]`. Un turno no pasa de 28 000 caracteres (el límite de Copilot ronda los 32 000).
+- Un plan de solo lecturas `auto_read` sigue solo; cualquier otro abre la caja **en cada turno**. Nada que no sea una lectura por regla corre sin la caja.
+- El bucle termina cuando:
+  - el modelo responde sin plan;
+  - se rechaza un segundo plan (el motivo del primer rechazo vuelve una vez para que lo corrija);
+  - una respuesta no termina entera: `uncertain`, plazo o truncada (nunca se lee ni se reenvía);
+  - la persona no aprueba un plan;
+  - el harness para un plan (por ejemplo `list_changed`);
+  - la persona pulsa Ctrl+C.
+- Un paso que falla vuelve como dato. Tras N turnos, un último **turno de cierre** sin catálogo pide un resumen de lo hecho y de lo pendiente, y su respuesta nunca se lee como plan: como mucho N + 1 envíos.
+- El nonce no protege de una inyección dentro del mismo turno: un resultado puede convencer al modelo de proponer un plan. Ese plan pasa la misma política y, si no es de lecturas por regla, la caja.
+- Se guarda el bucle (`loop_runs`) y una fila por turno (`loop_turns`: su número, su clase, su solicitud, el tamaño y un HMAC del texto), nunca el texto ni un resultado. Un bucle que quedó en marcha tras una caída se marca `interrupted` al empezar el siguiente y no se reanuda.
+
 ## Configuración
 
 Por variables de entorno (ver `.env.example`):
@@ -647,6 +683,9 @@ Por variables de entorno (ver `.env.example`):
 | `HARNESS_CONCISE_ANSWERS` | `off` | `off` (por defecto, también vacía) u `on`. Con `on`, cada pregunta suelta (`ask` y las preguntas de `chat`) empieza con un aviso fijo del harness que pide responder breve: primero la respuesta, sin preámbulo, sin repetir la pregunta, sin resumen ni ofrecimientos al final, listas solo si el contenido es una lista. Cuando está activo cuesta 246 caracteres (55 tokens `o200k_base`) por pregunta y cuenta en el límite de tamaño del proveedor; su ahorro en la respuesta no está medido con Copilot real, y por eso va desactivado por defecto. `memory context` y `/context` lo muestran antes del bloque de memoria. No va en los pasos de los Skills, cuya plantilla fija la forma de la respuesta. Cualquier otro valor es un error. |
 | `HARNESS_MOCK_RESPONSES` | (vacía) | Ruta absoluta de un JSON (objeto texto → respuesta, hasta 1 MiB) con respuestas guionizadas del Mock: responde con la primera clave, en orden alfabético, contenida en el prompt. Solo para pruebas y demos. |
 | `HARNESS_MCP_CONFIG` | (vacía) | Ruta **absoluta** de la lista local de servidores MCP, fuera del repositorio. Sin ella no hay servidores. |
+| `HARNESS_AUTO_READ` | `on` | `on` u `off`. Con `off`, todo plan pide la caja aunque sus lecturas sean `auto_read`. Cualquier otro valor es un error. |
+| `HARNESS_LOOP_PROVIDERS` | (vacía) | Proveedores, separados por comas, que pueden recibir los resultados de un `/agent`. Vacía: `/agent` no envía nada. |
+| `HARNESS_LOOP_MAX_TURNS` | `5` | Tope de turnos con catálogo de un `/agent`, de 1 a 10; después va un turno de cierre. |
 
 ## Estados de una solicitud
 

@@ -12,3 +12,11 @@ Además de la CLI, una llamada a herramienta SHALL poder pedirse como paso de un
 #### Scenario: Misma auditoría
 - **WHEN** un plan aprobado de dos pasos termina
 - **THEN** `tool_calls` tiene dos filas con el mismo `plan_id`, el HMAC de sus argumentos y ningún contenido
+
+### Requirement: El bucle de code mode no es recursión
+En un bucle `/agent`, cada turno SHALL ser una pregunta del harness al proveedor y cada plan SHALL aprobarse y ejecutarse como uno de `/plan`. Un servidor SHALL NOT poder pedir un turno, una pregunta ni una llamada: lo que devuelve solo vuelve como dato, en el turno siguiente.
+
+#### Scenario: Un resultado que pide otra llamada
+- **WHEN** un resultado trae un plan escrito y una orden de llamar a otra herramienta
+- **THEN** esa herramienta no se llama y el plan no se lee
+

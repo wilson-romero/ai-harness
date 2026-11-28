@@ -130,6 +130,21 @@ Desde A2 (rama `feature/code-mode-loop`):
 - Lo que la lista decía de cada paso al leer el plan (orden de arranque y sus argumentos, entorno, carpeta, plazos, operación, `auto_read`, tope y argumentos) queda atado por un hash. Si cambia antes de ese paso, el paso no se llama (`list_changed`). Probado con siete cambios distintos, con su control (la misma lista escrita otra vez corre).
 - Lo que **no** cubre: quien pueda escribir tu lista puede marcar `auto_read`. La lista tiene que ser solo tuya; en Windows el harness no mira sus ACL.
 
+Desde A3 (`/agent`, rama `feature/code-mode-loop`), los resultados **sí** pueden volver al proveedor. Lo anterior sigue valiendo para `/plan`, que envía una sola pregunta. Lo que el harness garantiza para `/agent`, cada punto con su test:
+
+- Nada sale sin dos consentimientos: `/agent` escrito entero y `HARNESS_LOOP_PROVIDERS` con el nombre del proveedor. Sin ellos no se registra ni se envía nada (`test_without_consent_nothing_leaves_the_machine`).
+- Nada que no sea una lectura `auto_read` corre sin la caja, en ningún turno: cada plan pasa por la misma aprobación de `/plan` (`test_a_plan_that_is_not_by_rule_asks_the_box_every_turn`).
+- Lo que se envía es lo que se mostró, carácter a carácter (`test_what_is_sent_is_exactly_what_was_shown`). Va limpio, con las credenciales enmascaradas y acotado: 4 096 bytes por paso, 12 288 por plan y 28 000 caracteres por turno (`test_mcp_loop.py`).
+- Un resultado no cierra su bloque ni imita el aviso, una cabecera del harness o la gramática: cada línea lleva un prefijo, `<<<`/`>>>` se cambian y la marca es nueva en cada turno (`test_a_hostile_result_stays_inside_its_block`). Un plan escrito dentro de un resultado nunca se lee (`test_a_plan_inside_a_result_is_never_the_model_s`), y un nonce que trae un resultado se rechaza (`test_a_nonce_injected_by_a_result_is_refused`).
+- N turnos son N preguntas. Tras el tope, un solo turno de cierre, cuya respuesta nunca se lee como plan. Una respuesta `uncertain`, fallida o truncada para el bucle sin leerse ni reenviarse, aunque traiga un plan válido (`test_a_reply_not_completed_is_never_read_even_with_a_valid_plan_in_it`). Ctrl+C durante una pregunta o un paso para el bucle y no se envía nada más; en el aviso del código deja la aprobación `undecided`, como en `/plan`.
+- `/agent --box` lleva a la caja todo plan del bucle (`test_box_sends_every_plan_of_the_loop_to_the_box`).
+- No se guarda el texto de ningún turno ni ningún resultado, solo tamaños y un HMAC.
+
+Lo que **no** garantiza:
+
+- El nonce no protege de una inyección **dentro del mismo turno**. El resultado y el nonce nuevo viajan juntos, y un resultado puede convencer al modelo de proponer un plan válido. Ese plan pasa la misma política y, si no es de lecturas por regla, la caja. Con `auto_read`, una lectura así corre sin preguntar: es lo que la persona permitió al marcarla.
+- Lo que el proveedor haga con los resultados que recibe es cosa suya. Con Copilot, salen de la máquina.
+
 ## Matriz SEC y deuda conocida
 
 Qué propiedad de seguridad (SEC-01..SEC-15) prueba qué test, con su control negativo y sus límites, está en [`docs/security/sec-matrix.md`](docs/security/sec-matrix.md); `scripts/verify.sh` comprueba que lo que cita existe. Lo que no se hace o no se prueba, con su decisión, está en [`docs/security/known-debt.md`](docs/security/known-debt.md).
