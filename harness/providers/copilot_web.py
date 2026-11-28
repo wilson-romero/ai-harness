@@ -887,6 +887,7 @@ class _Turn:
         self.confirmed_mode = None
         self.memory_after = None
         self._clock = self._fired = None
+        self.gave_up = None  # a reason from an earlier attempt never travels with this one
         timings = self.timings
         timings.attempts += 1
         timings.path = "reload"

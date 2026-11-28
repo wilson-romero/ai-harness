@@ -642,3 +642,24 @@ async def test_the_idle_bound_at_its_edge(talk, copilot_app, data_dir, idle_s, p
         r = await t.ask(s, "dos ZQX-END-2")
     assert r.status is RequestStatus.COMPLETED and t.timings[1].path == path
     assert t.timings[1].declined == (None if path == "reuse" else "idle")
+
+
+# Windows parity 3, on the reuse path (task 8.6): a held tab that is not reused falls back to
+# the reload, and a page that is then not ready reports the same structural detail.
+
+
+async def test_a_declined_tab_that_reloads_into_a_page_never_ready_says_what_it_showed(
+        talk, copilot_app, data_dir):
+    measured(data_dir, fast=False)
+    async with talk(HARNESS_COPILOT_READY_TIMEOUT_S="3") as t:
+        s = t.session()
+        assert (await t.ask(s, "uno ZQX-END-1")).status is RequestStatus.COMPLETED
+        t.provider._held.memory.at -= 121.0  # declined as idle: the question reloads
+        copilot_app.headless_page = "other"  # the reload gets a page without the chat
+        r = await t.ask(s, "dos ZQX-END-2")
+    assert r.status is RequestStatus.TIMEOUT, r.detail
+    assert t.timings[1].path == "reload" and t.timings[1].declined == "idle"
+    detail = r.detail or ""
+    assert "not ready in time" in detail and "nothing was sent" in detail
+    assert "ended by HARNESS_COPILOT_READY_TIMEOUT_S" in detail and "user turns" in detail
+    assert copilot_app.prompt_count == 1  # only the first question was sent
