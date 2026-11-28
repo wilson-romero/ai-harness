@@ -370,6 +370,240 @@ Comprobaciones (macOS arm64, `caffeinate -i`):
 - La tanda `-m edge` **no se ejecutó**: esta rama no cambia el código del proveedor que trae el merge. El coordinador la ejecuta en `develop`.
 - `openspec validate --all --strict`: 28 passed. `check_public_safety.py`: `PASS (511 file(s))`. `check_sec_matrix.py`: `PASS (15 rows, 169 tests)`. `scripts/demo_code_mode.py`: código 0, `demo: PASS`.
 
+## 10. A2 · Lecturas permitidas por regla (`feature/code-mode-loop`, 2026-11-27)
+
+Va aquí, tras el tramo 2, porque la hoja de ruta del dueño (design, «Fase A») la pone antes que la medición del tramo 3; se numera 10 para no renumerar las secciones 5 a 9. Desde `develop` = `a9c51fe`. Decisiones en design, «Lo que decidió A2» (A2-1 a A2-7). Cada garantía tiene un test y un mutante que lo mata (abajo); los tests se escribieron con el código, así que el «visto fallar» de cada uno es su mutante.
+
+- [x] 10.1 `auto_read` en `ToolEntry`, falso por defecto, solo con `operation: read` (A2-1).
+  - Oráculo: `test_mcp_auto_read.py::test_auto_read_is_valid_only_as_a_boolean_on_a_read` (escritura, `"true"`, `1`: `ConfigError` que nombra `tools.t`) y `::test_auto_read_is_false_unless_the_person_writes_it`.
+  - Control negativo: mutante A01.
+- [x] 10.2 Un plan de solo lecturas por regla corre sin la caja, con `running plan:` y los pasos antes, y `means = rule` (A2-5).
+  - Oráculo: `::test_a_plan_of_auto_reads_runs_without_the_box_and_says_so_first` (ninguna pregunta de aprobación, las líneas de los pasos antes que el primer resultado, `('completed', 'consumed', 'rule', 'rule:auto_read', None, None)`, una fila `plan.approval.granted` con `means=rule`, dos `tool_calls` del plan); en pantalla completa, `::test_the_full_screen_runs_a_plan_by_rule_without_the_box`; en la CLI, `::test_the_cli_runs_a_plan_by_rule_without_the_code`.
+  - Control negativo: mutantes A09, A14 y A17.
+- [x] 10.3 Un plan con un paso que no es por regla va entero a la caja; sin respuesta no corre nada.
+  - Oráculo: `::test_a_plan_with_one_read_not_by_rule_goes_to_the_box_whole` y `::test_a_plan_left_undecided_in_the_box_runs_nothing_even_if_one_step_is_by_rule` (`starts.log` vacío).
+  - Control negativo: mutantes A02 y A04.
+- [x] 10.4 El interruptor `HARNESS_AUTO_READ` y la opción `--box` (A2-4).
+  - Oráculo: `::test_harness_auto_read_off_asks_the_box_for_every_plan`, `::test_without_an_answer_and_the_rule_off_nothing_runs` y `::test_a_wrong_switch_sends_nothing` (`yes`, `ON`, `0`: 0 envíos, 0 solicitudes; sin variable, `on`).
+  - Control negativo: mutantes A03 y A13.
+  - `--box`, añadida al verificar A2 (A2-4 revisada): `::test_box_turns_the_rule_off_for_one_question_only` (dos preguntas: la primera `code` con la caja, la segunda `rule`; ningún prompt con `--box`; el historial guarda `/plan PREGUNTA` dos veces), `::test_box_without_an_answer_runs_nothing`, `::test_box_alone_is_no_question` (0 envíos, 0 solicitudes) y su control `::test_control_box_later_in_the_question_is_part_of_it` (más adelante es texto y la regla vale). Control negativo: mutantes A18, A20 y A21.
+- [x] 10.4b La regla que ya no vale no ejecuta nada (A2-8): `::test_a_rule_that_no_longer_holds_runs_nothing` (`starts.log` vacío). Control negativo: mutante A19.
+- [x] 10.5 La lista atada al leer el plan y comprobada antes de cada paso (A2-2).
+  - Oráculo: `::test_a_list_changed_after_the_plan_was_read_refuses_the_step`, 7 casos (orden, entorno, plazo de llamada, plazo de arranque, tope de resultado, `auto_read` quitado, límites de un argumento): `starts.log` vacío, `('failed', …, 'list_changed', 1)`, 0 filas en `tool_calls`. Con la caja: `::test_a_command_changed_while_the_box_is_open_refuses_the_plan`. Con dos servidores: `::test_a_step_after_the_first_is_refused_when_its_entry_changed` (el paso 1 corre, el 2 no arranca, `stopped_at = 2`). Una fila sin atadura: `::test_a_plan_recorded_before_010_never_runs` (`plan_altered`).
+  - Controles: la misma lista escrita otra vez corre (`::test_control_the_same_list_written_again_runs`); una `description` nueva no cambia nada (`::test_control_a_new_description_changes_nothing_that_runs`); una herramienta quitada se sigue denegando en la pasarela (`test_shell_plan.py::test_the_policy_is_decided_again_when_the_plan_runs`, sin tocar).
+  - Control negativo: mutantes A05 a A08, A15 y A16.
+- [x] 10.6 La decisión que se muestra es la de la política (A2-6).
+  - Oráculo: `::test_the_decision_shown_is_the_policy_s_own`. Control negativo: mutante A10.
+- [x] 10.7 Migración 010 y las migraciones que reconstruyen con las claves apagadas (A2-3).
+  - Oráculo: `::test_a_database_at_009_upgrades_to_010_and_keeps_its_plans_and_their_calls` (mismas filas, `entries_sha256` NULL, `foreign_key_check` vacío, claves encendidas y cumplidas, `rule` y `list_changed` admitidos); `tests/unit/test_sql_literals.py` pasa.
+  - Control negativo: `::test_a_rebuilding_migration_that_would_break_a_reference_is_refused` (una 010 que borra la tabla referida: `MigrationError`, nada aplicado, versión 9, claves encendidas) y los mutantes A11 y A12.
+  - Premisa medida: los dos procedimientos con las claves encendidas fallan (design A2-3).
+  - Guardas de versión tocadas: `test_storage.py` (`[1..10]`, `[7, 8, 9, 10]`, `[9, 10]`) y `test_response_mode.py` (`[8, 9, 10]`).
+- [x] 10.8 Documentación: README «Lecturas permitidas por regla: `auto_read`», SECURITY «Planes de lectura» (desde A2), filas SEC-05 y SEC-12 de la matriz (tests y requisitos, sin cambio de estado).
+  - Oráculo: `scripts/check_sec_matrix.py` con código 0 (recibo en 10.10).
+- [x] 10.9 Sin código condicionado por plataforma: `tests/unit/test_portability.py` dentro de la tanda de 10.10.
+
+### Mutantes de A2
+
+17 mutantes (2026-11-27, macOS arm64), con `scripts` fuera del repo: cada uno se aplica con un ancla única, se ejecutan sus tests con `-x` y un `PYTHONPYCACHEPREFIX` nuevo, y se deshace.
+
+| # | Mutante | Lo mata |
+|---|---|---|
+| A01 | `auto_read` admitido en una escritura | `test_mcp_auto_read.py::test_auto_read_is_valid_only_as_a_boolean_on_a_read[entry0]` |
+| A02 | Cualquier plan corre por regla | `::test_a_plan_with_one_read_not_by_rule_goes_to_the_box_whole` |
+| A03 | El interruptor no se mira | `::test_harness_auto_read_off_asks_the_box_for_every_plan` |
+| A04 | Basta un paso por regla (`any`) | `::test_a_plan_with_one_read_not_by_rule_goes_to_the_box_whole` |
+| A05 | La entrada no se comprueba al ejecutar | `::test_a_list_changed_after_the_plan_was_read_refuses_the_step[argument limits]` |
+| A06 | La orden no entra en el hash | `::…refuses_the_step[command]` |
+| A07 | La entrada de la herramienta no entra en el hash | `::…refuses_the_step[argument limits]` |
+| A08 | No se compara la atadura de la fila | `::test_a_plan_recorded_before_010_never_runs` |
+| A09 | La regla queda como `code` | `::test_a_plan_of_auto_reads_runs_without_the_box_and_says_so_first` |
+| A10 | La decisión mostrada es una constante | `::test_the_decision_shown_is_the_policy_s_own` |
+| A11 | No se mira `foreign_key_check` tras reconstruir | `::test_a_rebuilding_migration_that_would_break_a_reference_is_refused` |
+| A12 | Las claves quedan apagadas tras reconstruir | `::test_a_database_at_009_upgrades_to_010_and_keeps_its_plans_and_their_calls` |
+| A13 | Cualquier valor del interruptor vale | `::test_a_wrong_switch_sends_nothing[yes]` |
+| A14 | Sin las líneas de `running plan:` | `::test_a_plan_of_auto_reads_runs_without_the_box_and_says_so_first` |
+| A15 | La `description` entra en el hash | `::test_control_a_new_description_changes_nothing_that_runs` |
+| A16 | Una herramienta quitada cuenta como «cambiada» | `test_shell_plan.py::test_the_policy_is_decided_again_when_the_plan_runs` |
+| A17 | Al leer el plan, todo paso se toma por regla | `::test_a_plan_with_one_read_not_by_rule_goes_to_the_box_whole` |
+| A18 | `--box` no apaga la regla | `::test_box_turns_the_rule_off_for_one_question_only` |
+| A19 | No se mira lo que devuelve `record_rule` | `::test_a_rule_that_no_longer_holds_runs_nothing` |
+| A20 | `--box` en cualquier posición | `::test_control_box_later_in_the_question_is_part_of_it` |
+| A21 | `--box` sin pregunta se acepta | `::test_box_alone_is_no_question` |
+
+Resultado: **17 de 17 muertos, 0 supervivientes**. Verificación independiente (2026-11-27, otro agente sobre `d508812` con los arreglos de A2): los 17 se reescribieron desde la tabla con un guion nuevo (ancla única, sus tests con `-x`, `PYTHONPYCACHEPREFIX` nuevo, se deshace) y los 17 murieron con el test que dice la tabla; A18 a A21, 4 de 4 muertos. Equivalente, sin mutar: quitar `auto_read` del hash de la herramienta. Lo repite a propósito `changed_entry` («un plan por regla exige que siga siendo `auto_read`»), así que ese mutante sobreviviría y quitar los dos lo mata A05.
+
+- [x] 10.10 Comprobaciones de A2 (macOS arm64, `caffeinate -i`, 2026-11-27, sobre `a9c51fe` con el cambio sin confirmar):
+  - `caffeinate -i uv run pytest -m "not edge and not copilot"`: **2398 passed, 191 deselected** en 412 s, código 0.
+  - `openspec validate --all --strict`: 28 passed, 0 failed, código 0.
+  - `scripts/check_public_safety.py`: PASS (497 ficheros), código 0.
+  - `scripts/check_sec_matrix.py`: PASS (15 filas, 176 tests), código 0.
+  - `scripts/demo_code_mode.py`: `demo: PASS`, código 0 (sin `auto_read` en su lista: corre igual que antes de A2).
+  - La tanda Edge no se ejecutó: A2 no toca `harness/providers/`, `harness/browser/` ni `tests/browser/`.
+  - Windows: NOT RUN (los tests de A2 son posteriores a la última ejecución allí; nada de A2 depende de la plataforma).
+
+### Hallazgo de Windows en `develop` = `a9c51fe` (2026-11-27)
+
+- [x] 10.11 `tests/unit/test_shell_plan.py::test_the_plan_deadline_ends_a_step_in_course` fallaba en Windows, en la tanda y solo, con `mcp.calls() == []`.
+  - Medido allí por el coordinador: el temporizador del plazo del plan (1 s, fijado por el test) vencía a +1,01 s, y el servidor sintético arrancaba a +2,49 s y llamaba a +2,495 s. Con el temporizador 5 s más tarde, pasaba. Es el reloj del test, no un defecto: el plazo vencía antes de que hubiera paso en curso.
+  - Arreglo, solo en el test: el reloj del plazo es del test. Un `Timer` sustituto (solo en `plan_run`) dispara cuando el servidor ya ha recibido la llamada (su propio `calls.log`), no tras 1 s. Se sigue comprobando lo mismo: el ejecutor arma el plazo de 1 s, el plazo alcanzado a mitad del paso lo termina con su árbol de procesos (`mcp.server.stopped()`), el plan queda `timeout`/`deadline` en el paso 1 y el paso 2 no se llama.
+  - El hermano con la misma suposición: `::test_a_single_hung_step_ends_as_its_own_timeout` tenía `startup=1`, que en esa máquina vencería en el arranque y no en la llamada. Pasa a `startup=30`: lo que termina el paso sigue siendo su presupuesto de llamada de 1 s, y el plazo del plan (41 s con la gracia) sigue sin competir. Ningún otro test de plan o de bucle fija un plazo corto contra el arranque (`grep -n "startup=\|deadline_s\", lambda" tests/unit/test_shell_plan.py tests/unit/test_mcp_plan_run.py tests/unit/test_mcp_auto_read.py tests/unit/test_shell_agent.py`).
+  - Control negativo (macOS, 2026-11-27): con el sustituto disparando en el acto (la carrera de Windows reproducida), el test falla (`1 failed`); con la espera, pasa (`1 passed`).
+  - Para la máquina Windows (PowerShell, en la raíz del repo, sobre el HEAD de esta rama): `uv run pytest -q -p no:cacheprovider "tests/unit/test_shell_plan.py::test_the_plan_deadline_ends_a_step_in_course" "tests/unit/test_shell_plan.py::test_a_single_hung_step_ends_as_its_own_timeout"`, y cinco veces seguidas: `1..5 | ForEach-Object { uv run pytest -q -p no:cacheprovider tests/unit/test_shell_plan.py -k "deadline_ends or hung_step" }`. Estado en Windows: **NOT RUN**.
+
+## 11. A3 · El bucle `/agent` (`feature/code-mode-loop`, 2026-11-27)
+
+Sobre A2 (`d508812`) y sus arreglos (`0aead98`). Decisiones en design, «Lo que decidió A3» (A3-1 a A3-11). Empezado por un agente que se paró a mitad; otro lo terminó (2026-11-27): leyó el árbol heredado, conservó su código y sus tests (la tanda pasaba, 2476 passed), movió las tablas a la migración 010, añadió el progreso, `--box`, tres caminos de Ctrl+C y de respuesta no completada y el trabajo futuro, y **volvió a escribir y ejecutar todos los mutantes** (abajo): la tabla heredada decía 32 de 32 sin recibo. Cada test tiene su «visto fallar» en el mutante que lo mata. El Mock no cambia (`harness/providers/mock.py` intacto): los tests lo envuelven en `LoopMock`, que guarda cada `prompt` y su plazo.
+
+- [x] 11.1 Consentimiento: `/agent` entero y `HARNESS_LOOP_PROVIDERS` (A3-1).
+  - Oráculo: `test_shell_agent.py::test_without_consent_nothing_leaves_the_machine` (sin la variable, con otro proveedor, vacía: 0 llamadas, 0 solicitudes, 0 bucles, `starts.log` vacío), `::test_agent_is_typed_in_full` (`/a`, `/ag`, `/agen`: nada), `::test_with_the_loop_allowed_plan_still_sends_nothing_back` (una llamada; «nothing was sent to the provider»), `test_mcp_loop.py::test_the_providers_are_named_one_by_one`.
+  - Con un proveedor no sintético: `::test_a_provider_outside_the_machine_is_named_once_before_the_first_result` (un aviso, antes del primer envío con resultados; nada de los resultados en `messages` ni en `audit_events`) y `::test_a_synthetic_provider_gets_no_notice`.
+  - Control negativo: mutantes B01, B19, B23 y B26.
+- [x] 11.2 El turno: aviso, datos entre marcas nuevas, gramática con nonce nuevo (A3-2); `PLAN_INSTRUCTIONS` idéntico.
+  - Oráculo: `test_mcp_loop.py::test_a_results_turn_is_notice_then_data_then_grammar_with_a_new_nonce`, `::test_every_line_of_the_block_is_marked_as_the_harness_s_or_a_result_s`, `::test_the_plan_question_is_unchanged_and_the_loop_s_says_it_is_a_loop` (SHA-256 de `PLAN_INSTRUCTIONS` igual al de `a9c51fe`), `test_shell_agent.py::test_every_turn_has_its_own_nonce_and_marker` (5 valores distintos en 3 turnos; el nonce siempre después del cierre del bloque).
+  - Control negativo: mutantes B10, B11 y B30.
+- [x] 11.3 Un resultado hostil (modo `forge-data` del servidor sintético: marcas parecidas, `<<<`/`>>>`, un aviso falso, una cabecera falsa, un plan de escritura, un nonce, escapes y 32 000 bytes).
+  - Oráculo: `test_shell_agent.py::test_a_hostile_result_stays_inside_its_block` (una sola apertura y un solo cierre, cada línea `| ` o `--- `, sin `<<<`/`>>>` dentro, sin escapes, un solo aviso, la cola conservada y el medio marcado, el nonce falso solo dentro); `::test_a_plan_inside_a_result_is_never_the_model_s` (un plan, una llamada a `get_project_metadata`); `::test_a_nonce_injected_by_a_result_is_refused` (`nonce_mismatch`); `test_mcp_loop.py::test_a_hostile_result_cannot_close_the_block_or_pass_for_the_harness` y `::test_the_marker_must_never_appear_inside_the_block`.
+  - Control negativo: mutantes B04, B05, B06 y B09.
+- [x] 11.4 Topes (A3-3).
+  - Oráculo: `test_mcp_loop.py::test_the_caps_sit_under_the_provider_and_the_screen`, `::test_a_long_text_keeps_its_head_and_tail_within_the_limit` (ASCII, 2, 3 y 4 bytes por carácter), `::test_a_huge_result_is_cut_in_the_middle_with_a_mark`, `::test_the_plan_s_results_share_one_bound`, `::test_the_largest_turn_fits_its_cap` (10 pasos de 60 000 `€`), `::test_long_arguments_are_cut_in_the_step_header`, `::test_a_turn_over_its_cap_is_never_composed`.
+  - Control negativo: mutantes B07, B08, B25 y B27.
+- [x] 11.5 Lo mostrado es lo enviado; el contador (A3-6).
+  - Oráculo: `test_shell_agent.py::test_what_is_sent_is_exactly_what_was_shown` (el texto bajo cada línea `sending …` es el `prompt` recibido; `sent_bytes` y `sent_hmac` de `loop_turns` coinciden con él), `::test_three_turns_two_reads_by_rule_and_an_answer` (`/status`: `loop: completed (answer), 3 send(s)`), `::test_the_side_panel_counts_the_turns` (pantalla completa: `turn 2 of 5`, `turn 3 of 5` y el final en el panel).
+  - Control negativo: mutantes B17, B31 y B32.
+- [x] 11.6 Fin del bucle; exactamente N llamadas en cada camino (A3-4).
+  - Oráculo, cada uno con su número de llamadas:
+    - respuesta final: `::test_three_turns_two_reads_by_rule_and_an_answer` (3);
+    - tope y cierre: `::test_the_cap_then_one_closing_turn_whose_reply_is_never_read` (3; el plan de la respuesta de cierre no corre) y `::test_a_cap_of_one_asks_once_and_closes` (2);
+    - tope mal escrito: `::test_a_wrong_cap_sends_nothing` (0) y `test_mcp_loop.py::test_any_other_cap_is_refused_before_anything_is_sent` (14 valores);
+    - rechazo: `::test_a_refused_plan_s_reason_goes_back_once` (2), `::test_a_second_refusal_stops_the_loop` (2) y `::test_a_refusal_on_the_last_turn_goes_to_the_closing_turn` (2); `test_mcp_loop.py::test_a_correction_sends_only_the_reader_s_reason`;
+    - respuesta incierta, fallida o truncada: `::test_a_reply_that_did_not_complete_whole_stops_the_loop_unread` (2, sin leer el plan del turno 2);
+    - fallo de un paso: `::test_a_failed_step_goes_back_as_data` (2; el token enmascarado, sin escapes);
+    - plan parado por el harness: `::test_a_plan_the_harness_stops_stops_the_loop` (1, `list_changed`);
+    - no aprobado: `::test_a_plan_not_approved_stops_the_loop` (1; sin decidir y rechazado);
+    - Ctrl+C: `::test_ctrl_c_during_a_turn_stops_the_loop_and_sends_nothing_more` (2; el turno 2 `uncertain`, no se reenvía), `::test_ctrl_c_while_a_step_runs_stops_the_loop` (1; el paso termina con su árbol, plan `interrupted`) y `::test_ctrl_c_at_the_box_leaves_it_undecided_and_stops_the_loop` (1; como en `/plan`, Ctrl+C en el aviso del código es `undecided`: el bucle para con `not_approved`);
+    - una respuesta no completada que trae texto con un plan válido: `::test_a_reply_not_completed_is_never_read_even_with_a_valid_plan_in_it` (2; `uncertain`, `failed` y `timeout`; el plan nunca se lee).
+  - Control negativo: mutantes B02, B03, B12, B13, B14, B15, B21, B28, B29, B37 y B38.
+- [x] 11.7 Aprobación por turno (A3-5): `::test_a_plan_that_is_not_by_rule_asks_the_box_every_turn` (dos cajas, `means = code` las dos; la caja dice que los resultados vuelven). `ApprovalScreen`, `ApprovalButton` y `ProposalArea` sin tocar (`git diff` de `harness/shell/tui.py`: solo `refresh_panel` y la entrada «Loop» del panel).
+  - Control negativo: mutante B16.
+  - `/agent --box` (A3-10): `::test_box_sends_every_plan_of_the_loop_to_the_box` (dos cajas con planes de lecturas `auto_read`; ningún prompt con `--box`). Control negativo: mutante B34.
+- [x] 11.8 `/mode` y el plazo (A3-1): `::test_mode_never_starts_a_loop` (0 llamadas, 0 bucles) y `::test_a_turn_uses_the_session_s_mode_and_its_deadline` (tres preguntas en `deep`, las tres con el plazo de `deep`).
+- [x] 11.9 Registro y caída (A3-7): tablas en la migración 010 (la 011 es de `feature/workspace-tools`); `::test_a_loop_left_running_is_marked_interrupted_and_never_resumed` (`interrupted`/`abandoned`, 0 envíos a ese bucle; `/status` lo decía `running` antes), `::test_the_history_keeps_a_label_of_each_turn_never_the_results`, `::test_a_loop_s_rows_reject_what_they_must_not_hold`. Guardas de versión: `test_storage.py` sigue en `[…, 10]` y espera las tablas `loop_runs` y `loop_turns`; `test_response_mode.py` sin cambios. Guardas de órdenes: `test_shell_parser.py`, `test_shell_input.py` (`/agent {}` con argumentos hostiles) y `test_shell_tui_completion.py` (14).
+  - Control negativo: mutantes B18, B20 y B22.
+- [x] 11.9b Progreso (A3-9): `::test_the_panel_follows_each_phase_with_the_loop_s_seconds` (las seis líneas del panel, en orden: envío del turno 1, aprobación del plan de 2 pasos, paso 1 de 2, paso 2 de 2, envío del turno 2, fin; cada una con sus segundos; `/status`: `done in N s`). Control negativo: mutantes B33 y B35.
+- [x] 11.10 Documentación: README «Un bucle de lecturas: `/agent`» y las tres variables en la tabla, `.env.example`, SECURITY (desde A3, con lo que el nonce no protege), filas SEC-03, SEC-07, SEC-12 y SEC-15 (tests y requisitos, sin cambio de estado), spec (`code-mode`: siete requisitos y «El resultado es para la persona» enmendado; `tool-policy`: «El bucle de code mode no es recursión»).
+
+### Mutantes de A3
+
+38 mutantes (2026-11-27, macOS arm64), escritos de nuevo por quien terminó A3 sobre el árbol final: cada uno se aplica con un ancla única, se ejecutan sus tests con `-x` y un `PYTHONPYCACHEPREFIX` nuevo, y se deshace (guion fuera del repo). `::` es `tests/unit/test_shell_agent.py` y `loop::` es `tests/unit/test_mcp_loop.py`.
+
+| # | Mutante | Lo mata |
+|---|---|---|
+| B01 | Sin la comprobación del consentimiento | `::test_without_consent_nothing_leaves_the_machine[environ0]` |
+| B02 | El tope nunca cierra | `::test_the_cap_then_one_closing_turn_whose_reply_is_never_read` |
+| B03 | El tope, un turno tarde (`>` por `>=`) | ídem |
+| B04 | Sin `| ` en las líneas de un resultado | `loop::test_a_hostile_result_cannot_close_the_block_or_pass_for_the_harness` |
+| B05 | `<<<`/`>>>` sin neutralizar | ídem |
+| B06 | El resultado sin limpiar ni enmascarar | ídem |
+| B07 | El resultado sin acotar | `loop::test_a_huge_result_is_cut_in_the_middle_with_a_mark` |
+| B08 | Sin tope del turno | `loop::test_a_turn_over_its_cap_is_never_composed` |
+| B09 | La marca puede estar dentro del bloque | `loop::test_the_marker_must_never_appear_inside_the_block` |
+| B10 | La gramática antes de los datos | `loop::test_a_results_turn_is_notice_then_data_then_grammar_with_a_new_nonce` |
+| B11 | El nonce del turno anterior se reutiliza | `::test_every_turn_has_its_own_nonce_and_marker` |
+| B12 | Una respuesta truncada no para | `::test_a_reply_that_did_not_complete_whole_stops_the_loop_unread[truncate-completed]` |
+| B13 | Correcciones sin límite | `::test_a_second_refusal_stops_the_loop` |
+| B14 | Lo que para el harness no para el bucle | `::test_a_plan_the_harness_stops_stops_the_loop` |
+| B15 | Cualquier fallo de un paso para el bucle | `::test_a_failed_step_goes_back_as_data` |
+| B16 | En un bucle, todo plan por regla | `::test_a_plan_that_is_not_by_rule_asks_the_box_every_turn` |
+| B17 | Lo enviado difiere de lo mostrado (un espacio) | `::test_what_is_sent_is_exactly_what_was_shown` |
+| B18 | El turno no se registra con la solicitud | `::test_three_turns_two_reads_by_rule_and_an_answer` |
+| B19 | Sin aviso para un proveedor no sintético | `::test_a_provider_outside_the_machine_is_named_once_before_the_first_result` |
+| B20 | Sin recuperación de bucles | `::test_a_loop_left_running_is_marked_interrupted_and_never_resumed` |
+| B21 | Ctrl+C sin registrar | `::test_ctrl_c_during_a_turn_stops_the_loop_and_sends_nothing_more` |
+| B22 | El historial guarda el texto del turno | `::test_the_history_keeps_a_label_of_each_turn_never_the_results` |
+| B23 | Cualquier proveedor permitido | `loop::test_the_settings_default_to_five_turns_and_no_provider` |
+| B24 | Sin tope superior de `HARNESS_LOOP_MAX_TURNS` | `loop::test_any_other_cap_is_refused_before_anything_is_sent[11]` |
+| B25 | Solo cabeza, sin cola | `loop::test_a_long_text_keeps_its_head_and_tail_within_the_limit[text0]` |
+| B26 | `/agent` con forma corta | `::test_agent_is_typed_in_full[/a]` |
+| B27 | Un tope por paso, sin reparto | `loop::test_the_caps_sit_under_the_provider_and_the_screen` |
+| B28 | Solo se mira si hay texto, no el estado | `::test_a_reply_not_completed_is_never_read_even_with_a_valid_plan_in_it[uncertain]` |
+| B29 | La respuesta de cierre se lee | `::test_the_cap_then_one_closing_turn_whose_reply_is_never_read` |
+| B30 | `PLAN_INSTRUCTIONS` cambia un byte | `loop::test_the_plan_question_is_unchanged_and_the_loop_s_says_it_is_a_loop` |
+| B31 | `/status` sin el bucle | `::test_three_turns_two_reads_by_rule_and_an_answer` |
+| B32 | El panel no se vuelve a leer | `::test_the_side_panel_counts_the_turns` |
+| B33 | El ejecutor no avisa de cada paso | `::test_the_panel_follows_each_phase_with_the_loop_s_seconds` |
+| B34 | `/agent --box` no apaga la regla | `::test_box_sends_every_plan_of_the_loop_to_the_box` |
+| B35 | El final sin sus segundos | `::test_the_panel_follows_each_phase_with_the_loop_s_seconds` |
+| B36 | El turno 1 no se registra con su solicitud | `::test_three_turns_two_reads_by_rule_and_an_answer` |
+| B37 | Un plan interrumpido a mitad de paso no para el bucle como `interrupted` | `::test_ctrl_c_while_a_step_runs_stops_the_loop` |
+| B38 | Un plan no aprobado no para el bucle | `::test_a_plan_not_approved_stops_the_loop[undecided]` |
+
+Resultado: en la primera pasada, **37 de 38 muertos**: B28 sobrevivió. El servicio nunca da texto con una respuesta no completada, así que mirar solo el texto bastaba hoy; se añadió `::test_a_reply_not_completed_is_never_read_even_with_a_valid_plan_in_it` (una respuesta `uncertain`, `failed` o `timeout` con un plan válido dentro) y B28 murió. **38 de 38, 0 supervivientes.** B29 muere por una aserción (`turn.nonce is not None`), no por la conducta: también es un NO.
+
+- [x] 11.11 Comprobaciones de A3 (macOS arm64, `caffeinate -i`, 2026-11-27, sobre `4c5f1cd` con A3 sin confirmar, que es lo que confirma el commit de A3):
+  - `caffeinate -i uv run pytest -m "not edge and not copilot"`: **2488 passed, 191 deselected** en 468 s, código 0.
+  - `openspec validate --all --strict`: 28 passed, código 0.
+  - `scripts/check_public_safety.py`: PASS (499 ficheros), código 0.
+  - `scripts/check_sec_matrix.py`: PASS (15 filas, 195 tests), código 0.
+  - `scripts/demo_code_mode_loop.py`: `demo: PASS`, código 0. `scripts/demo_code_mode.py`: código 0 (sin `auto_read` en su lista: igual que antes de A2).
+  - La tanda Edge **no se ejecutó**: A3 no toca `harness/providers/`, `harness/browser/` ni `tests/browser/` (`harness/providers/mock.py` tampoco).
+  - Sin código condicionado por plataforma: `tests/unit/test_portability.py` dentro de la tanda.
+  - Windows: NOT RUN.
+- [x] 11.12 Demo: `uv run python scripts/demo_code_mode_loop.py` imprime `demo: PASS` (código 0, 2026-11-27): (a) consentimiento apagado, 0 envíos y 0 arranques; (b) tres turnos, dos planes por regla y la respuesta, exactamente 3 envíos, cada turno mostrado tal como se envió; (c) el tope `HARNESS_LOOP_MAX_TURNS=2` con su cierre sin gramática, y el plan de la respuesta de cierre no corre; (d) un plan rechazado (`nonce_mismatch`) cuyo motivo vuelve una vez, después la respuesta; (e) un resultado hostil (`forge-data`) que queda en su bloque, cortado con su cola, y su nonce rechazado; (f) lo guardado, sin ningún resultado. Para probarlo a mano: `--prepare DIR` (README). Estado de la demo de Wilson: **NOT RUN**.
+
+### Correcciones de la revisión independiente de `fa6b6d1` (2026-11-28)
+
+Decisiones del dueño (hallazgos 2, 3 y 4) en el design, A3-12 a A3-17, que sustituyen a A3-8.4 y A3-8.6. Los tests de 11.13 se vieron fallar sobre el código sin corregir. Los de 11.14 a 11.20 se escribieron junto a su corrección y se vieron fallar con el mutante de la tabla que la deshace (R01-R30): ese es su recibo.
+
+- [x] 11.13 (MEDIO) Una credencial que el corte revela (A3-16): la cabeza y la cola se limpian otra vez tras `bounded`, y el turno entero tiene que ser un punto fijo de `safe_foreign_text` y `normalise_content` (`loop.sendable`) o no se envía (`turn_not_clean`). Visto fallar: `test_mcp_loop.py::test_a_credential_the_cut_reveals_is_masked_in_what_is_sent[head ends at the token]` y `[tail starts at the token]` (el token salía entero en lo enviado) y `test_shell_agent.py::test_a_credential_at_the_cut_is_masked_alike_on_screen_and_in_what_is_sent` (modo `cut-credential` del servidor sintético). Además `::test_a_credential_split_by_the_cut_leaves_no_piece`, `::test_a_turn_the_screen_would_change_is_never_sent` (un token, un NFD, un U+200B) y su control `::test_control_every_ordinary_turn_is_sent_as_shown`. Mutantes R01-R04.
+- [x] 11.14 (dueño) Argumentos acotados dentro de `/agent` (A3-12): `test_mcp_auto_read.py::test_an_argument_is_bounded_only_by_its_declared_type` (siete casos), `test_shell_agent.py::test_a_read_by_rule_with_a_free_text_argument_asks_the_box_in_a_loop` (la caja y su `why:`), su control `::test_control_bounded_reads_by_rule_run_without_the_box_in_a_loop` (la línea `running plan:` dice «every argument is bounded») y `::test_plan_keeps_the_a2_rule_in_a_clean_session`. Mutantes R05-R08, R28, R29.
+- [x] 11.15 (dueño) La conversación guarda los resultados (A3-13): `::test_after_results_were_sent_the_session_says_so_and_plan_needs_bounded_args` (el aviso una vez, `/status`, `/plan` a la caja y, tras `/new`, por regla), `::test_a_loop_that_sent_no_results_leaves_the_session_clean`, `test_plan_cli.py::test_plan_in_a_session_that_holds_results_needs_bounded_arguments`. Mutantes R09-R13, R27.
+- [x] 11.16 (dueño) La caja del primer envío a un proveedor no sintético (A3-14), con un Mock que dice no ser sintético (doble de test; el proveedor real no se toca): `::test_a_provider_outside_the_machine_asks_once_with_the_exact_text` (una caja, antes del primer envío; su hash es el del `Proposal` del texto que recibió el proveedor; el tercer turno sin caja), `::test_a_send_not_approved_sends_nothing_and_stops` (sin decidir, rechazada, Ctrl+C), `::test_a_send_approved_after_it_expired_sends_nothing`, `::test_a_send_on_a_terminal_that_is_not_interactive_is_never_approved`, `::test_a_code_typed_after_ctrl_c_at_the_send_box_grants_nothing`, `::test_a_correction_needs_no_send_approval`, `::test_the_send_box_on_the_full_screen_approves_with_its_button` (Pilot, botón) y `::test_a_synthetic_provider_gets_no_notice` (sin caja con el Mock). Mutantes R14-R19, R30.
+- [x] 11.17 (BAJO) Las tablas del bucle en la migración 013 (A3-7): `::test_a_database_at_the_a2_010_gets_the_loop_tables_from_013` (con la 010 sola, `loop_runs` no existe: lo comprueba el propio test) y `::test_a_database_whose_010_held_the_loops_ends_with_the_same_schema`. Guardas de versión a `[…, 10, 13]` en `test_storage.py` y `test_response_mode.py`. La 011 es de `feature/workspace-tools` (en pausa) y la 012 queda para la rama de velocidad. Mutante R26.
+- [x] 11.18 (BAJO) Un bucle `running` sin su proceso se recupera al abrir la conversación (`_switch_to`): `::test_a_loop_left_running_is_marked_interrupted_when_the_conversation_opens` y `::test_a_loop_left_running_is_marked_interrupted_and_never_resumed` (ahora `interrupted (abandoned), 2 send(s)`, sin duración). Mutantes R20, R21.
+- [x] 11.19 (BAJO) Un bloque `json` sin el nonce del turno es la respuesta dentro del bucle (A3-15): `::test_a_json_block_without_the_turn_s_nonce_is_the_answer_in_a_loop` (antes acababa `stopped (refused)` tras gastar la corrección), `::test_a_block_with_another_nonce_is_still_refused_in_a_loop`, `::test_control_plan_still_refuses_a_block_without_a_nonce`. Mutantes R22-R24.
+- [x] 11.20 (BAJO) `HARNESS_AUTO_READ` vacía o en blanco es el valor por defecto (A3-17): `test_mcp_auto_read.py::test_the_switch_unset_empty_or_blank_is_the_default` (`"  "` antes se rechazaba) y `::test_a_wrong_switch_sends_nothing` (ahora también `o n`, `of`). README, `.env.example`. Mutante R25.
+- [x] 11.21 Demo ampliada: (g) una lectura por regla con un argumento de texto libre pide la caja dentro del bucle; (h) un proveedor no sintético (doble): la caja una vez, después sin preguntar, y sin aprobar no se envía nada; (i) una credencial en el corte, enmascarada igual en pantalla y en lo enviado.
+
+- [x] 11.22 Comprobaciones (macOS arm64, `caffeinate -i`, 2026-11-28, sobre `fa6b6d1` con estas correcciones sin confirmar): `uv run pytest -m "not edge and not copilot"` 2530 passed, 191 deselected (código 0); `openspec validate --all --strict` 28 de 28 (0); `scripts/check_public_safety.py` PASS (0); `scripts/check_sec_matrix.py` PASS, 15 filas, 206 tests (0); `scripts/demo_code_mode_loop.py` y `scripts/demo_code_mode.py` `demo: PASS` (0). Sin la batería de Edge. Windows: NOT RUN.
+
+#### Mutantes de la revisión de `fa6b6d1`
+
+Con `mutate.py` (cada uno se aplica, se corren sus tests con `-x` y se deshace). 30 de 30 muertos; R17 sobrevivió a la primera tanda y lo mató `::test_a_code_typed_after_ctrl_c_at_the_send_box_grants_nothing`, escrito para eso.
+
+| Id | Qué deshace | Lo mata |
+|----|-------------|---------|
+| R01 | la limpieza de cabeza y cola tras el corte | `test_a_credential_the_cut_reveals_is_masked_in_what_is_sent` |
+| R02 | la comprobación `sendable` del turno | `test_a_turn_the_screen_would_change_is_never_sent` |
+| R03 | `normalise_content` en `sendable` | ídem |
+| R04 | `normalise_content` en `clean_piece` | `test_control_every_ordinary_turn_is_sent_as_shown` |
+| R05 | un `string` sin `pattern` cuenta como acotado | `test_an_argument_is_bounded_only_by_its_declared_type` |
+| R06 | el tope de 64 pasa a 65 | ídem |
+| R07 | el bucle no pide argumentos acotados | `test_a_read_by_rule_with_a_free_text_argument_asks_the_box_in_a_loop` |
+| R08 | el motivo no quita la regla | ídem |
+| R09 | `/plan` no mira si la sesión tiene resultados | `test_after_results_were_sent_…` |
+| R10 | `holds_results` cuenta cualquier turno | `test_a_loop_left_running_is_marked_interrupted_and_never_resumed` |
+| R11 | sin el aviso tras el bucle | `test_after_results_were_sent_…` |
+| R12 | el aviso tras cualquier bucle | `test_a_send_not_approved_sends_nothing_and_stops[undecided]` |
+| R13 | `/status` sin la línea `results:` | `test_after_results_were_sent_…` |
+| R14 | sin la caja del primer envío | `test_a_provider_outside_the_machine_asks_once_with_the_exact_text` |
+| R15 | la caja no para el bucle | `test_a_send_not_approved_sends_nothing_and_stops[undecided]` |
+| R16 | sin caducidad | `test_a_send_approved_after_it_expired_sends_nothing` |
+| R17 | un código tras Ctrl+C aprueba | `test_a_code_typed_after_ctrl_c_at_the_send_box_grants_nothing` |
+| R18 | el hash no cubre el último carácter del texto | `test_a_provider_outside_the_machine_asks_once_with_the_exact_text` |
+| R19 | la caja en una terminal no interactiva | `test_a_send_on_a_terminal_that_is_not_interactive_is_never_approved` |
+| R20 | sin recuperar al abrir la conversación | `test_a_loop_left_running_is_marked_interrupted_and_never_resumed` |
+| R21 | `abandoned` con duración | ídem |
+| R22 | un bloque sin nonce sigue siendo rechazo | `test_a_json_block_without_the_turn_s_nonce_is_the_answer_in_a_loop` |
+| R23 | `nonce_mismatch` también pasa a respuesta | `test_a_refused_plan_s_reason_goes_back_once` |
+| R24 | todo rechazo pasa a respuesta | `test_a_correction_needs_no_send_approval` |
+| R25 | `HARNESS_AUTO_READ` en blanco se rechaza | `test_a_plan_of_auto_reads_runs_without_the_box_and_says_so_first` |
+| R26 | la 013 sin `DROP TABLE IF EXISTS` | `test_a_database_whose_010_held_the_loops_ends_with_the_same_schema` |
+| R27 | `main.py plan` no mira la sesión | `test_plan_in_a_session_that_holds_results_needs_bounded_arguments[holds-results]` |
+| R28 | la caja sin su línea `why:` | `test_a_read_by_rule_with_a_free_text_argument_asks_the_box_in_a_loop` |
+| R29 | `running plan:` sin «every argument is bounded» | `test_control_bounded_reads_by_rule_run_without_the_box_in_a_loop` |
+| R30 | la caja en cada turno, no una vez por bucle | `test_a_provider_outside_the_machine_asks_once_with_the_exact_text` |
+
 ## 5. Tramo 3 · Sonda y medición con Copilot real (unos 12 envíos del presupuesto de 100)
 
 - [ ] 5.1 Sonda sin herramientas: un bloque `json` sintético de 80 líneas, comparado byte a byte. 1–2 envíos.

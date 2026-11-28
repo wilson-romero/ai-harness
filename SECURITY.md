@@ -122,7 +122,31 @@ Lo que el harness garantiza:
 - Ningún texto del modelo ni de una herramienta aprueba, cambia el plan o dibuja una línea del harness: llegan siempre como texto ajeno, marcado.
 - Una sola pregunta por `/plan`: los resultados no vuelven al proveedor.
 
-Lo que **no** garantiza: que un modelo real proponga el plan que la pregunta necesita, ni que una lectura permitida sea inocua para tus datos. Tampoco ata la orden que arranca cada servidor: sale de tu lista local al ejecutar y no entra en el hash; la caja lo dice con una línea por servidor (atarla es un requisito de A2, en `openspec/changes/code-mode/design.md`). El plan solo lee lo que tu lista permite; lo que el servidor haga con esa lectura es cosa del servidor.
+Lo que **no** garantiza: que un modelo real proponga el plan que la pregunta necesita, ni que una lectura permitida sea inocua para tus datos. La orden que arranca cada servidor no entra en el hash aprobado; la caja lo dice con una línea por servidor. El plan solo lee lo que tu lista permite; lo que el servidor haga con esa lectura es cosa del servidor.
+
+Desde A2 (rama `feature/code-mode-loop`):
+
+- Una lectura marcada `auto_read` en tu lista se ejecuta sin la caja cuando **todos** los pasos del plan lo son; se ve antes (`running plan:`) y queda auditada con el medio `rule`. Solo vale en herramientas `read`; las escrituras siguen denegadas por la pasarela. `/plan --box` la apaga para una pregunta y `HARNESS_AUTO_READ=off`, para todas.
+- Lo que la lista decía de cada paso al leer el plan (orden de arranque y sus argumentos, entorno, carpeta, plazos, operación, `auto_read`, tope y argumentos) queda atado por un hash. Si cambia antes de ese paso, el paso no se llama (`list_changed`). Probado con siete cambios distintos, con su control (la misma lista escrita otra vez corre).
+- Lo que **no** cubre: quien pueda escribir tu lista puede marcar `auto_read`. La lista tiene que ser solo tuya; en Windows el harness no mira sus ACL.
+
+Desde A3 (`/agent`, rama `feature/code-mode-loop`), los resultados **sí** pueden volver al proveedor. Lo anterior sigue valiendo para `/plan`, que envía una sola pregunta. Lo que el harness garantiza para `/agent`, cada punto con su test:
+
+- Nada sale sin dos consentimientos: `/agent` escrito entero y `HARNESS_LOOP_PROVIDERS` con el nombre del proveedor. Sin ellos no se registra ni se envía nada (`test_without_consent_nothing_leaves_the_machine`).
+- Nada que no sea una lectura `auto_read` corre sin la caja, en ningún turno: cada plan pasa por la misma aprobación de `/plan` (`test_a_plan_that_is_not_by_rule_asks_the_box_every_turn`). Dentro de `/agent`, además, cada argumento declarado de cada paso tiene que estar acotado (`enum`, `integer`, `boolean` o `string` con `pattern` y `max_length` ≤ 64); con uno de texto libre, el plan entero va a la caja y su línea `why:` lo dice (`test_a_read_by_rule_with_a_free_text_argument_asks_the_box_in_a_loop`).
+- Con un proveedor que no es sintético (Copilot), el primer envío con resultados de cada bucle pide la caja con el texto exacto, ligado a su hash; sin aprobarla no se envía nada (`test_a_provider_outside_the_machine_asks_once_with_the_exact_text`, `test_a_send_not_approved_sends_nothing_and_stops`).
+- Lo que se envía es lo que se mostró, byte a byte (`test_what_is_sent_is_exactly_what_was_shown`). Va limpio, con las credenciales enmascaradas también después del corte por el medio (`test_a_credential_the_cut_reveals_is_masked_in_what_is_sent`), y acotado: 4 096 bytes por paso, 12 288 por plan y 28 000 caracteres por turno (`test_mcp_loop.py`). Un turno que la limpieza de la pantalla cambiaría no se envía (`test_a_turn_the_screen_would_change_is_never_sent`).
+- Tras un bucle que envió resultados, la conversación los contiene: el harness lo dice una vez y en `/status`, y en esa sesión `/plan` también exige argumentos acotados para correr por regla (`test_after_results_were_sent_the_session_says_so_and_plan_needs_bounded_args`). `/new` empieza limpia.
+- Un resultado no cierra su bloque ni imita el aviso, una cabecera del harness o la gramática: cada línea lleva un prefijo, `<<<`/`>>>` se cambian y la marca es nueva en cada turno (`test_a_hostile_result_stays_inside_its_block`). Un plan escrito dentro de un resultado nunca se lee (`test_a_plan_inside_a_result_is_never_the_model_s`), y un nonce que trae un resultado se rechaza (`test_a_nonce_injected_by_a_result_is_refused`).
+- N turnos son N preguntas. Tras el tope, un solo turno de cierre, cuya respuesta nunca se lee como plan. Una respuesta `uncertain`, fallida o truncada para el bucle sin leerse ni reenviarse, aunque traiga un plan válido (`test_a_reply_not_completed_is_never_read_even_with_a_valid_plan_in_it`). Ctrl+C durante una pregunta o un paso para el bucle y no se envía nada más; en el aviso del código deja la aprobación `undecided`, como en `/plan`.
+- `/agent --box` lleva a la caja todo plan del bucle (`test_box_sends_every_plan_of_the_loop_to_the_box`).
+- No se guarda el texto de ningún turno ni ningún resultado, solo tamaños y un HMAC.
+
+Lo que **no** garantiza:
+
+- El nonce no protege de una inyección **dentro del mismo turno**. El resultado y el nonce nuevo viajan juntos, y un resultado puede convencer al modelo de proponer un plan válido. Ese plan pasa la misma política y, si no es de lecturas por regla con argumentos acotados, la caja. Con `auto_read`, una lectura así corre sin preguntar: es lo que la persona permitió al marcarla.
+- **Lo que aún puede salir sin la caja**: los valores acotados que elige el modelo van como argumentos al servidor de esa lectura (qué proyecto de un `enum`, qué número de un rango, qué texto que cumple un `pattern`). Es un canal pequeño, no ninguno. Tú decides qué herramientas llevan `auto_read`, y el harness no juzga un `pattern`: `.*` con 64 caracteres deja pasar 64 caracteres cualesquiera.
+- Lo que el proveedor haga con los resultados que recibe es cosa suya. Con Copilot, salen de la máquina.
 
 ## Carpeta de trabajo (`main.py workspace`, rama `feature/workspace-tools`, tramo B1)
 

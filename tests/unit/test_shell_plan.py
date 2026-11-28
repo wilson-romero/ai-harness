@@ -14,6 +14,7 @@ import re
 import threading
 import time
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -455,12 +456,46 @@ def test_ctrl_c_while_a_step_runs_stops_the_plan_and_its_tree(conn, data_dir, tm
 
 def test_the_plan_deadline_ends_a_step_in_course(conn, data_dir, tmp_path, monkeypatch,
                                                  hang_guard):  # noqa: F811
+    """The plan's deadline, reached while a step is in course, ends that step and its process
+    tree. Its clock is the test's: it fires only once the server has received the call (its
+    own `calls.log`), so the test does not depend on how long the server takes to start
+    (Windows run of `a9c51fe`: the server started 2.49 s after a 1 s timer had already fired,
+    and the call never happened)."""
     import harness.mcp.plan_flow as flow
+    import harness.mcp.plan_run as plan_run
 
     monkeypatch.setattr(flow, "deadline_s", lambda plan, config: 1)
     mcp = McpList(tmp_path / "mcp", "hang-call", call=60)
+    armed: list[float] = []
+
+    class InCourse:
+        """`threading.Timer` as the executor uses it: `function(*args)` once the step's call
+        has reached the server, not after `interval` seconds."""
+
+        def __init__(self, interval, function, args=()):
+            armed.append(interval)
+            self.function, self.args, self.cancelled = function, args, threading.Event()
+            self.daemon = True
+
+        def start(self) -> None:
+            def fire() -> None:
+                limit = time.monotonic() + 30
+                while not mcp.calls() and time.monotonic() < limit:
+                    if self.cancelled.wait(0.05):
+                        return
+                self.function(*self.args)
+
+            threading.Thread(target=fire, daemon=True).start()
+
+        def cancel(self) -> None:
+            self.cancelled.set()
+
+    monkeypatch.setattr(plan_run, "threading", SimpleNamespace(Timer=InCourse))
     provider = scripted_mock(plan_reply(ALPHA, BETA))
+    started = time.monotonic()
     terminal, _ = _run(conn, data_dir, mcp, provider, [PLAN_LINE], [CODE])
+    assert time.monotonic() - started < 30
+    assert armed == [1]  # the executor armed the plan's deadline, of 1 s
     assert mcp.calls() == ["call get_project_metadata"]
     assert mcp.server.stopped()
     assert _plans(conn) == [("timeout", "consumed", "code", "deadline", 1)]
@@ -471,7 +506,9 @@ def test_a_single_hung_step_ends_as_its_own_timeout(conn, data_dir, tmp_path, ha
     """Review of `6b83412`, point 3: the plan's deadline is the sum of its steps' budgets, so a
     step that uses all of its own budget raced it; the step's own timeout must win (the
     deadline is for a plan, and keeps a grace past that sum)."""
-    mcp = McpList(tmp_path / "mcp", "hang-call", call=1, startup=1)
+    # A start-up budget far over any machine's start (Windows: 2.49 s measured), so that
+    # the call's own 1 s budget is what ends the step, wherever it runs.
+    mcp = McpList(tmp_path / "mcp", "hang-call", call=1, startup=30)
     provider = scripted_mock(plan_reply(ALPHA))
     terminal, _ = _run(conn, data_dir, mcp, provider, [PLAN_LINE], [CODE])
     assert mcp.calls() == ["call get_project_metadata"]

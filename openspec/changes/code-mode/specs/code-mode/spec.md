@@ -168,7 +168,7 @@ Un plan rechazado SHALL dar un motivo de una lista cerrada y un detalle corto y 
 - **THEN** el detalle nombra el argumento y no contiene su valor
 
 ### Requirement: Aprobación del plan entero ligada a su hash
-Antes de ejecutar nada, el harness SHALL mostrar el plan canónico entero con la decisión de la política para cada paso, y pedir una sola aprobación ligada a su hash: el botón en la pantalla completa y el código tecleado en el modo plano y en la CLI. El plan ejecutado SHALL ser byte a byte el aprobado.
+Antes de ejecutar nada, el harness SHALL mostrar el plan canónico entero con la decisión de la política para cada paso, y pedir una sola aprobación ligada a su hash: el botón en la pantalla completa y el código tecleado en el modo plano y en la CLI. El plan ejecutado SHALL ser byte a byte el aprobado. La única excepción es un plan cuyos pasos son todos lecturas permitidas por regla (requisito «Lecturas permitidas por regla»).
 
 #### Scenario: Aprobado con el botón
 - **WHEN** en la pantalla completa la persona pulsa aprobar tras ver el plan entero
@@ -177,6 +177,46 @@ Antes de ejecutar nada, el harness SHALL mostrar el plan canónico entero con la
 #### Scenario: Otro plan con la aprobación de uno
 - **WHEN** llega una aprobación para un hash distinto del plan mostrado
 - **THEN** no se ejecuta ningún paso
+
+### Requirement: auto_read solo en una lectura
+Una herramienta de la lista local SHALL poder llevar `auto_read: true` solo si su operación es `read`; en cualquier otra, o con un valor que no es booleano, la lista SHALL rechazarse sin arrancar nada.
+
+#### Scenario: auto_read en una escritura
+- **WHEN** la lista marca `auto_read: true` en una herramienta `write`
+- **THEN** la lista se rechaza con un error que nombra la herramienta
+
+### Requirement: Lecturas permitidas por regla
+Un plan cuyos pasos son todos `auto_read` SHALL ejecutarse sin la caja de aprobación, tras una línea `running plan:` con cada paso (servidor, herramienta y argumentos canónicos), y SHALL quedar auditado con el medio `rule`. Un plan con un paso que no es `auto_read` SHALL ir entero a la caja. Con `HARNESS_AUTO_READ=off` todo plan SHALL ir a la caja.
+
+#### Scenario: Plan solo de lecturas por regla
+- **WHEN** las dos herramientas del plan son `auto_read`
+- **THEN** no se pide aprobación, se ve `running plan:` con los dos pasos antes de que corran, el servidor recibe las dos llamadas y `plan_runs.means` es `rule`
+
+#### Scenario: Un paso sin regla
+- **WHEN** un plan tiene un paso `auto_read` y otro que no lo es
+- **THEN** se abre la caja con el plan entero, y sin respuesta no arranca ningún servidor
+
+#### Scenario: Regla apagada
+- **WHEN** `HARNESS_AUTO_READ` vale `off`
+- **THEN** un plan de lecturas `auto_read` pide la caja como cualquier otro
+
+### Requirement: La regla se apaga para una pregunta
+Con `--box` como primera palabra tras la orden, todo plan de esa pregunta SHALL ir a la caja. La opción SHALL NOT enviarse ni guardarse como parte de la pregunta, y `--box` sin pregunta SHALL NOT enviar nada.
+
+#### Scenario: Regla apagada para una pregunta
+- **WHEN** la persona escribe `/plan --box PREGUNTA` y después `/plan PREGUNTA`, y los dos planes son de lecturas `auto_read`
+- **THEN** el primero pide la caja y el segundo corre por la regla, y ningún prompt enviado contiene `--box`
+
+### Requirement: La lista se ata al leer el plan
+Al leer un plan, el harness SHALL fijar un hash de la entrada de la lista de cada paso (orden y argumentos de arranque, entorno, carpeta, plazos, operación, `auto_read`, tope y argumentos declarados). Antes de cada paso, el ejecutor SHALL calcularlo otra vez con la lista que va a usar y SHALL rechazar el paso, sin arrancar nada, si difiere. La `description` de la herramienta SHALL NOT contar.
+
+#### Scenario: Orden cambiada antes de ejecutar
+- **WHEN** entre la lectura del plan y su ejecución la orden de arranque del servidor gana un argumento
+- **THEN** el plan termina `failed` con `list_changed` en el paso 1 y `starts.log` queda vacío
+
+#### Scenario: Solo cambia la descripción
+- **WHEN** entre la lectura y la ejecución solo cambia la `description` de la herramienta
+- **THEN** el plan corre
 
 ### Requirement: Ejecución paso a paso por la pasarela
 Cada paso de un plan aprobado SHALL ejecutarse por la misma pasarela que `mcp call`, con su política, su auditoría, su plazo y su tope de resultado. El primer paso que falla o se deniega SHALL detener el plan: los siguientes no se ejecutan y nada se reintenta.
@@ -190,11 +230,120 @@ Cada paso de un plan aprobado SHALL ejecutarse por la misma pasarela que `mcp ca
 - **THEN** el servidor sintético recibe exactamente las llamadas del plan y ninguna más
 
 ### Requirement: El resultado es para la persona
-El resultado de cada paso SHALL mostrarse como texto ajeno, literal, saneado y con las credenciales enmascaradas. SHALL NOT enviarse al modelo salvo por una orden explícita de la persona, que cuenta como un envío.
+El resultado de cada paso SHALL mostrarse como texto ajeno, literal, saneado y con las credenciales enmascaradas. SHALL NOT enviarse al modelo salvo en un bucle `/agent` con el consentimiento de «Consentimiento del bucle»; cada turno cuenta como un envío.
 
 #### Scenario: Sin vuelta a Copilot
-- **WHEN** termina un plan aprobado
+- **WHEN** termina un plan aprobado de `/plan`
 - **THEN** el proveedor no recibe ninguna pregunta nueva
+
+### Requirement: Consentimiento del bucle
+Un bucle SHALL empezar solo con `/agent PREGUNTA`, escrito entero, y si `HARNESS_LOOP_PROVIDERS` nombra al proveedor. Sin eso no SHALL registrarse ni enviarse nada.
+
+#### Scenario: Sin consentimiento
+- **WHEN** la persona escribe `/agent` y `HARNESS_LOOP_PROVIDERS` no nombra al proveedor
+- **THEN** no hay ninguna solicitud ni ningún bucle registrado, y el mensaje dice qué variable poner
+
+#### Scenario: `/plan` con el bucle permitido
+- **WHEN** `HARNESS_LOOP_PROVIDERS` nombra al proveedor y la persona usa `/plan`
+- **THEN** se envía una sola pregunta y los resultados solo se muestran
+
+### Requirement: Caja antes del primer envío a un proveedor no sintético
+Con un proveedor cuyo contenido no es sintético, el primer turno con resultados de cada bucle SHALL abrir la caja con su texto exacto, ligado a su hash. Aprobada, el bucle SHALL seguir sin volver a preguntar. Rechazada, sin decidir o caducada, no SHALL enviarse nada y el bucle SHALL parar (`send_not_approved`). Con el Mock no SHALL abrirse.
+
+#### Scenario: Aprobar una vez
+- **WHEN** un bucle de tres turnos con un proveedor no sintético y la persona aprueba el primer envío
+- **THEN** la caja se abre una vez, su hash es el del texto que recibió el proveedor y el tercer turno se envía sin caja
+
+#### Scenario: Sin aprobar
+- **WHEN** la persona rechaza, no decide, pulsa Ctrl+C o contesta tras la caducidad
+- **THEN** el proveedor recibe solo la primera pregunta y el bucle queda `stopped` (`send_not_approved`)
+
+### Requirement: Argumentos acotados dentro del bucle
+Dentro de `/agent`, un plan SHALL correr por regla solo si cada paso es `auto_read` y cada argumento declarado de su herramienta es `enum`, `integer`, `boolean` o `string` con `pattern` y `max_length` de 64 como mucho. Si no, el plan entero SHALL ir a la caja, que SHALL decir por qué. `/plan` en una sesión limpia SHALL seguir con la regla de A2.
+
+#### Scenario: Un argumento de texto libre
+- **WHEN** un plan del bucle trae una lectura `auto_read` con un argumento `string` sin `pattern`
+- **THEN** la caja se abre y su línea `why:` nombra el paso y el argumento
+
+### Requirement: La conversación guarda los resultados
+Tras un bucle que envió resultados, el harness SHALL decirlo una vez y `/status` SHALL repetirlo, con `/new` como salida. En esa sesión, `/plan` SHALL exigir también argumentos acotados para correr por regla.
+
+#### Scenario: `/plan` después de un bucle
+- **WHEN** un bucle envió resultados y la persona usa `/plan` con una lectura `auto_read` de texto libre, y después `/new` y otra vez `/plan`
+- **THEN** el primer `/plan` abre la caja y el segundo corre por regla
+
+### Requirement: Los resultados vuelven como datos
+Cada turno con resultados SHALL ser el aviso fijo del harness, un bloque entre dos marcas nuevas de ese turno y la gramática con un nonce nuevo. Cada resultado SHALL limpiarse, enmascararse y neutralizar `<<<` y `>>>` antes de acotarse y otra vez después, y cada línea SHALL llevar un prefijo. Un plan dentro de un resultado SHALL NOT tomarse por el del modelo.
+
+#### Scenario: Un resultado hostil
+- **WHEN** un resultado trae marcas parecidas, `<<<`, `>>>`, un aviso falso, un plan, un nonce y escapes
+- **THEN** el bloque tiene una sola marca de apertura y una de cierre, cada línea va marcada y el plan escrito no se ejecuta
+
+#### Scenario: Un nonce inyectado
+- **WHEN** el modelo copia el nonce que trae un resultado
+- **THEN** el plan se rechaza con `nonce_mismatch`
+
+### Requirement: Topes de lo que se envía
+Cada resultado SHALL enviarse con 4 096 bytes como mucho, y los de un plan con 12 288 repartidos, como cabeza y cola con una marca de lo omitido. Un turno de más de 28 000 caracteres SHALL NOT enviarse.
+
+#### Scenario: Un resultado enorme
+- **WHEN** un paso devuelve decenas de miles de bytes
+- **THEN** se envían su cabeza y su cola, con la marca de cuántos bytes se omitieron
+
+### Requirement: Lo que se muestra es lo que se envía
+Antes de cada turno, la persona SHALL ver el texto entero que se envía, los mismos bytes, bajo una línea del harness con su tamaño y su destino. Un turno que la limpieza de la pantalla cambiaría no SHALL enviarse. El panel lateral y `/status` SHALL mostrar el turno en curso.
+
+#### Scenario: Comparar
+- **WHEN** termina un bucle de tres turnos
+- **THEN** el texto mostrado antes de los turnos 2 y 3 es igual al que recibió el proveedor
+
+#### Scenario: Una credencial en el corte
+- **WHEN** un resultado de más de 4 096 bytes trae un token que solo es credencial donde cae el corte
+- **THEN** el turno enviado y el mostrado lo traen enmascarado, y son iguales
+
+### Requirement: Progreso visible del bucle
+Durante un bucle, el panel lateral SHALL mostrar el turno (`turn k of N`), su fase (enviando y esperando, aprobación, `running step k of n`) y los segundos desde que empezó el bucle. Al terminar, el panel y `/status` SHALL decir cómo acabó, con sus envíos y sus segundos.
+
+#### Scenario: Fases de un bucle de dos turnos
+- **WHEN** el turno 1 trae un plan de dos pasos y el turno 2 la respuesta
+- **THEN** el panel pasa por el envío del turno 1, la aprobación, el paso 1 de 2, el paso 2 de 2 y el envío del turno 2, y `/status` dice `completed (answer), 2 send(s), done in N s`
+
+### Requirement: Fin del bucle
+Un turno SHALL ser una pregunta. El bucle SHALL parar en una respuesta sin plan, en un segundo plan rechazado, en una respuesta que no terminó entera, en un plan no aprobado o parado por el harness y en Ctrl+C. Tras `HARNESS_LOOP_MAX_TURNS` turnos SHALL ir un turno de cierre sin catálogo cuya respuesta no SHALL leerse como plan.
+
+#### Scenario: Tres turnos
+- **WHEN** el modelo propone dos planes de lecturas por regla y después responde
+- **THEN** el proveedor recibe exactamente tres preguntas
+
+#### Scenario: El tope
+- **WHEN** `HARNESS_LOOP_MAX_TURNS=2` y el modelo propone un plan en cada turno
+- **THEN** hay tres preguntas y el plan de la respuesta de cierre no se ejecuta
+
+#### Scenario: Un paso que falla
+- **WHEN** un paso termina con un error de la herramienta
+- **THEN** el error vuelve como dato y el bucle sigue
+
+#### Scenario: Un bloque json sin el nonce del turno
+- **WHEN** la respuesta final del bucle trae un bloque `json` de ejemplo sin el nonce del turno
+- **THEN** es la respuesta (`completed`, `answer`); un bloque con otro nonce se rechaza con `nonce_mismatch`
+
+### Requirement: Aprobación en cada turno
+Cada plan del bucle SHALL aprobarse como en `/plan`: un plan de solo lecturas `auto_read`, por la regla; cualquier otro, en la caja, en cada turno.
+
+#### Scenario: Dos planes que no son por regla
+- **WHEN** dos turnos traen un plan con una lectura que no es `auto_read`
+- **THEN** la caja se abre dos veces
+
+#### Scenario: La regla apagada para un bucle
+- **WHEN** la persona escribe `/agent --box PREGUNTA` y los dos planes del bucle son de lecturas `auto_read`
+- **THEN** la caja se abre dos veces y ningún prompt contiene `--box`
+
+### Requirement: Registro del bucle
+Cada bucle SHALL dejar una fila con su estado y cada turno una fila con su número, su clase y su solicitud, en la transacción de la solicitud, sin texto. Un bucle que quedó `running` sin su proceso SHALL marcarse `interrupted` y no SHALL reanudarse.
+
+#### Scenario: Tras una caída
+- **WHEN** se abre una conversación, o empieza un `/agent`, y hay un bucle `running` cuyo bloqueo está libre
+- **THEN** ese bucle queda `interrupted` (`abandoned`) y no se le envía nada
 
 ### Requirement: Un plan nunca se reenvía ni se repite solo
 Tras un timeout o una interrupción después del envío, la pregunta del plan SHALL quedar `uncertain` y no reenviarse. Un plan interrumpido SHALL NOT volver a ejecutarse sin una nueva aprobación.

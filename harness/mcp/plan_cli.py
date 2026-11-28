@@ -24,7 +24,8 @@ from harness.core.errors import UsageError
 from harness.core.service import SessionService
 from harness.mcp.commands import prefixed
 from harness.mcp.config import load_config
-from harness.mcp.plan_flow import PlanRequest, PlanSetting, run_plan
+from harness.mcp.loop_flow import IN_THIS_SESSION, holds_results
+from harness.mcp.plan_flow import PlanRequest, PlanSetting, auto_read_setting, run_plan
 from harness.mcp.plan_prompt import build_catalogue
 from harness.providers.base import close_resources, open_resources
 from harness.providers.registry import provider_factory
@@ -86,6 +87,7 @@ def run_plan_command(args: argparse.Namespace, *, terminal: TtyTerminal | None =
         raise UsageError("plan needs an interactive terminal to type the approval code; "
                          "nothing was sent")
     environ = os.environ
+    auto_read = auto_read_setting(environ)
     build_catalogue(load_config(environ))  # no read tool, or no list: stop before anything
     settings = Settings.from_env(environ)
     skills = load_skill_settings(environ)
@@ -97,9 +99,11 @@ def run_plan_command(args: argparse.Namespace, *, terminal: TtyTerminal | None =
         session, lock = service.take_session(args.session_id)
         try:
             provider = service.provider_for(session)
+            bounded = (IN_THIS_SESSION if holds_results(conn, session.session_id) else None)
             setting = PlanSetting(data_dir=settings.data_dir, environ=environ,
                                   load_config=lambda: load_config(environ),
-                                  ttl_s=skills.approval_ttl_s)
+                                  ttl_s=skills.approval_ttl_s, auto_read=auto_read,
+                                  bounded_only=bounded)
 
             async def body():
                 await open_resources(provider)

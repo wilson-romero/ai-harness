@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from harness.storage.database import open_database
 from harness.workspace import audit as audit_module
 from harness.workspace.audit import path_hmac, record_call
@@ -69,18 +71,39 @@ def test_the_path_hmac_has_its_own_domain():
     assert path_hmac(key, "a.txt") != plain and len(path_hmac(key, "a.txt")) == 64
 
 
-def test_a_later_010_still_applies_after_011(tmp_path: Path):
-    """The gap is harmless: `feature/code-mode-loop` will add 010 after 011 was applied."""
+def _migrations_without(tmp_path: Path, name: str, *versions: int) -> Path:
+    from harness.storage.database import MIGRATIONS_DIR
+
+    shipped = tmp_path / name
+    shipped.mkdir()
+    for path in sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql")):
+        if int(path.name[:3]) not in versions:
+            (shipped / path.name).write_text(path.read_text("utf-8"), "utf-8")
+    return shipped
+
+
+def _schema(conn) -> list[tuple]:
+    return [tuple(r) for r in conn.execute(
+        "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name")]
+
+
+@pytest.mark.parametrize(("absent", "later"), [((11, 13), [11, 13]), ((11,), [11])])
+def test_011_applies_on_a_database_at_010_and_at_013(tmp_path: Path, absent, later):
+    """The gap is harmless in both orders: a database at 010 (before 011 and 013) and one
+    that already has 013 (made by `develop` before this branch) both take 011 and end with
+    the schema of a fresh database."""
     from harness.storage.database import MIGRATIONS_DIR, connect, migrate
 
-    shipped = tmp_path / "migrations"
-    shipped.mkdir()
-    for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
-        (shipped / path.name).write_text(path.read_text("utf-8"), "utf-8")
     data = tmp_path / "data"
     data.mkdir()
     conn = connect(data)
-    assert migrate(conn, shipped)[-1] == 11
-    (shipped / "010_later.sql").write_text("CREATE TABLE later_table (x INTEGER);\n", "utf-8")
-    assert migrate(conn, shipped) == [10]
+    earlier = migrate(conn, _migrations_without(tmp_path, "earlier", *absent))
+    assert 11 not in earlier and earlier[-1] == (13 if 13 not in absent else 10)
+    assert migrate(conn) == later
+    fresh_dir = tmp_path / "fresh"
+    fresh_dir.mkdir()
+    fresh = connect(fresh_dir)
+    migrate(fresh, MIGRATIONS_DIR)
+    assert _schema(conn) == _schema(fresh)
     conn.close()
+    fresh.close()

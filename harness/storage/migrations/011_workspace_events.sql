@@ -1,5 +1,5 @@
--- The work-folder tools (workspace-tools design D7, B1-5). Number 011: 009 is on `develop` and
--- 010 is taken by the branch `feature/code-mode-loop`; `migrate` applies every missing version,
+-- The work-folder tools (workspace-tools design D7, B1-5). Number 011, kept for this branch:
+-- 010 and 013 are code mode's and 012 the speed branch's; `migrate` applies every missing version,
 -- so the gap does not matter and the two apply in either order.
 --
 -- Every call of a work-folder tool leaves its `tool_calls` row (server `workspace`) with the
