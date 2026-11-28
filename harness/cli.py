@@ -79,6 +79,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     history = commands.add_parser("history", help="show the history of a session")
     history.add_argument("session_id")
+    history.add_argument("--timings", action="store_true",
+                         help="also the time of each phase of every question (Copilot Web)")
 
     copilot = commands.add_parser("copilot", help="Copilot Web: manual login")
     copilot_commands = copilot.add_subparsers(dest="copilot_command", required=True)
@@ -204,7 +206,8 @@ def _run(args: argparse.Namespace) -> int:
             return _ask(service, args.session_id, args.prompt, context, mode=args.mode)
         if args.command == "ask":
             return _ask(service, args.session_id, args.prompt, mode=args.mode)
-        return _history(service, args.session_id)
+        return _history(service, args.session_id,
+                        timings=settings.data_dir if args.timings else None)
     finally:
         conn.close()
 
@@ -266,10 +269,12 @@ async def _ask_quietly(
     return await service.ask(session_id, prompt, context, mode=mode)
 
 
-def _history(service: SessionService, session_id: str) -> int:
+def _history(service: SessionService, session_id: str, *, timings: Path | None = None) -> int:
     session = service.require_session(session_id)
     if not service.provider_for(session).synthetic_content:
-        return _history_without_content(service, session)
+        return _history_without_content(service, session, timings=timings)
+    if timings is not None:
+        print(f"no timings are recorded for provider {session.provider}", file=sys.stderr)
     entries = service.history(session_id)
     if not entries:
         print("No messages.")
@@ -285,18 +290,28 @@ def _history(service: SessionService, session_id: str) -> int:
     return EXIT_OK
 
 
-def _history_without_content(service: SessionService, session: Session) -> int:
+def _history_without_content(service: SessionService, session: Session, *,
+                              timings: Path | None = None) -> int:
     """A provider with real content stores none (D11): the remote conversation and, per
-    request, its state and time."""
+    request, its state and time; with `timings` (the data directory), the time of each phase
+    of each question (change copilot-turn-speed, D1), durations only."""
     print(f"session {session.session_id} ({session.provider}, {session.status})")
     print(f"remote conversation: {session.remote_ref or '(none yet)'}")
     requests = service.requests(session)
     modes = service.request_modes(session)
     if not requests:
         print("No requests.")
+    phases = {}
+    if timings is not None:
+        from harness.providers.copilot_timings import read_for
+
+        phases = read_for(timings, [str(request_id) for request_id, _, _ in requests])
     for request_id, status, started_at in requests:
         mode = describe_mode(*modes.get(request_id, (None, None)))
         print(f"[{status}] {request_id} {started_at}" + (f" {mode}" if mode else ""))
+        if timings is not None:
+            found = phases.get(str(request_id))
+            print(f"  {found.line() if found else 'timings: none recorded'}")
     return EXIT_OK
 
 

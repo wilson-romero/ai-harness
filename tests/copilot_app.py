@@ -61,6 +61,12 @@ class SyntheticCopilot:
     page_hits: int = 0
     conversations: dict[str, list[dict[str, str]]] = field(default_factory=dict)
     mode_events: list[str] = field(default_factory=list)  # every mode the page switched to
+    # Whether each chat page load came from a browser without a window: its User-Agent says
+    # `HeadlessChrome` (measured 2026-11-27, Edge 158 with Playwright's `--headless`).
+    headless_hits: list[bool] = field(default_factory=list)
+    # How a page served to a browser without a window behaves (change copilot-turn-speed):
+    # None as any other; "login" sends it to sign in; "other" serves a page of another structure.
+    headless_page: str | None = None
 
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
@@ -118,6 +124,28 @@ class SyntheticCopilot:
                 {"role": "assistant", "text": reply, "html": rich_reply(prompt)},
             ]
             return conversation, reply
+
+    def forget(self, conversation: str) -> None:
+        """The conversation is deleted elsewhere (another device): it cannot be loaded again."""
+        with self._lock:
+            self.conversations.pop(conversation, None)
+
+    def add_elsewhere(self, conversation: str, prompt: str) -> None:
+        """A question and its answer added to a conversation from somewhere else. Not counted
+        as a prompt the page sent."""
+        with self._lock:
+            self.conversations[conversation] += [
+                {"role": "user", "text": prompt},
+                {"role": "assistant", "text": make_reply(prompt), "html": ""},
+            ]
+
+
+LATE_BLOCK_END = "ZZ-LATE-BLOCK-END"
+
+
+def late_block(chunks: int = 1) -> str:
+    """The block app.html appends after the end with late_block_ms (late_chunks parts)."""
+    return " ".join(["ZZ-LATE-BLOCK", *(f"late{k}" for k in range(1, chunks + 1)), LATE_BLOCK_END])
 
 
 async def wait_until(condition, timeout_s: float = 60.0, what: str = "condition") -> None:
@@ -177,10 +205,15 @@ def _handler(app: SyntheticCopilot) -> type[BaseHTTPRequestHandler]:
             parts = urlsplit(self.path)
             path = parts.path
             if path == "/app" or re.fullmatch(r"/c/[^/]+|/chat/conversation/[^/]+|/feed(/thread/[^/]+)?", path):
+                headless = "HeadlessChrome" in (self.headers.get("User-Agent") or "")
                 with app._lock:
                     app.page_hits += 1
+                    app.headless_hits.append(headless)
                 signed_in = SESSION_COOKIE in (self.headers.get("Cookie") or "")
-                if app.require_login and not signed_in:
+                if headless and app.headless_page == "other":
+                    self._page("structure.html")
+                    return
+                if (app.require_login and not signed_in) or (headless and app.headless_page == "login"):
                     self._send(302, b"", "text/plain", {"Location": app.login_url(app.base + self.path)})
                     return
                 query = parse_qs(parts.query)
@@ -203,6 +236,18 @@ def _handler(app: SyntheticCopilot) -> type[BaseHTTPRequestHandler]:
                 target = parse_qs(parts.query).get("return", [app.url()])[0]
                 cookie = f"{SESSION_COOKIE}; Max-Age=86400; Path=/"
                 self._send(302, b"", "text/plain", {"Location": target, "Set-Cookie": cookie})
+            elif match := re.fullmatch(r"/api/live/([^/]+)", path):
+                # What an open tab follows with live=1 (change copilot-turn-speed): a session
+                # that ended, a conversation deleted elsewhere, turns added elsewhere.
+                signed_in = SESSION_COOKIE in (self.headers.get("Cookie") or "")
+                with app._lock:
+                    turns = app.conversations.get(match.group(1))
+                if app.require_login and not signed_in:
+                    self._json({"error": "signed out"}, 401)
+                elif turns is None:
+                    self._json({"error": "not found"}, 404)
+                else:
+                    self._json({"turns": [{"role": t["role"], "text": t["text"]} for t in turns]})
             elif match := re.fullmatch(r"/api/conversation/([^/]+)", path):
                 with app._lock:
                     turns = app.conversations.get(match.group(1))

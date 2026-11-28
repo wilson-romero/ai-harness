@@ -81,9 +81,13 @@ class EdgeLauncher:
         self._starting_or_open = 0
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> EdgeLauncher:
+    def from_settings(cls, settings: Settings, *, window: bool = False) -> EdgeLauncher:
+        """The launcher of the dedicated profile. Questions may run without a window when the
+        person asks for it (`copilot_headless`); `window=True` (signing in, the probe's
+        discovery) ignores that. `browser_headless` is the automated tests' switch."""
         profile = settings.edge_profile or settings.data_dir / "edge-profile"
-        return cls(settings.data_dir, profile, headless=settings.browser_headless)
+        headless = settings.browser_headless or (settings.copilot_headless and not window)
+        return cls(settings.data_dir, profile, headless=headless)
 
     @asynccontextmanager
     async def open(self, *, wait_s: float | None = None) -> AsyncIterator[BrowserContext]:

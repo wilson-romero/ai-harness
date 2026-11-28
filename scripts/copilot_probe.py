@@ -13,6 +13,9 @@ Usage (see docs/runbook/copilot.md):
                                                         # a code block's label element, no sends
     uv run python scripts/copilot_probe.py response-mode
                                                         # the response-mode selector, no sends
+    uv run python scripts/copilot_probe.py speed [--questions N] [--rounds 1|2] [--skip-headless]
+                                                        # end signals (8 sends), then N questions
+                                                        # off, on and on without a window (3N)
 
 The probe sends only the fixed prompts below and accepts no prompt of its own from arguments,
 environment or standard input. It writes its measurements only under
@@ -39,6 +42,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -80,7 +84,12 @@ from harness.providers.copilot_ui import (  # noqa: E402
     UiMeasurement,
 )
 from harness.providers.copilot_ui import load_measurement, measurement_path  # noqa: E402
-from harness.providers.copilot_web import REPLY_MAX_CHARS, REPLY_TEXT_JS  # noqa: E402
+from harness.providers.copilot_web import REPLY_MAX_CHARS, REPLY_TEXT_JS, read_reply  # noqa: E402
+from harness.providers.copilot_web import CopilotWebProvider, TurnSpeed, _ModeSelector  # noqa: E402
+from harness.providers.copilot_timings import PHASES  # noqa: E402
+from harness.providers.copilot_ui import FastEnd  # noqa: E402
+from harness.providers.base import ProviderError  # noqa: E402
+from harness.core.contracts import LLMRequest  # noqa: E402
 from harness.core.response_mode import ResponseMode  # noqa: E402
 from harness.providers.copilot_web import (  # noqa: E402
     MODE_CONFIRM_S,
@@ -112,6 +121,16 @@ PROMPTS = (
     "exactamente este marcador: ZQX-END-3",
     "Escribe una lista de tres frutas y un bloque de codigo Python que imprima hola y, al final, "
     "repite exactamente este marcador: ZQX-END-4",
+)
+# `speed` also sends these (review 2026-11-28, finding 1d): a long reply in several phases
+# (paragraphs, a table, a code block) and one that a chat tends to ground with sources and
+# citations, which often arrive after the text looks finished.
+SPEED_PROMPTS = PROMPTS + (
+    "Escribe tres parrafos sobre el ciclo del agua, despues una tabla de cuatro filas con las "
+    "fases y su duracion aproximada, y despues un bloque de codigo Python que imprima las fases "
+    "y, al final, repite exactamente este marcador: ZQX-END-5",
+    "Busca en la web cual es la capital de Australia y su poblacion actual, cita las fuentes "
+    "y, al final, repite exactamente este marcador: ZQX-END-6",
 )
 SIZE_PROMPT_HEAD = "Responde solo con LEN-OK. Relleno sintetico sin significado: "
 SIZE_MARKER = "LEN-OK"
@@ -323,17 +342,23 @@ class Sample:
     done: bool | None
     busy: str | None
     new_path: bool = False  # the address changed since the prompt was sent (id assigned)
+    # `speed`: the hash of the reply as the provider reads it (REPLY_TEXT_JS), read last
+    reply_digest: str | None = None
+    late_digest: str | None = None  # set on the last sample: the reply read LATE_READ_S later
     resubmitted: bool = False  # set on the last sample: the first key press was lost
     confirmed: bool = False  # set on the last sample: the prompt left the editor
 
 
 async def sample_send(
-    page: Page, locators: Locators, prompt: str, marker: str, *, filled: bool = False
+    page: Page, locators: Locators, prompt: str, marker: str, *, filled: bool = False,
+    provider_text: bool = False, late_s: float = 0.0,
 ) -> list[Sample]:
     """Send one prompt and sample the page every SAMPLE_INTERVAL_S until it settles.
 
-    Only hashes, lengths and booleans are kept; the text itself is never stored.
+    Only hashes, lengths and booleans are kept; the text itself is never stored. With
+    `provider_text` each sample also hashes the reply as the provider reads it, last.
     """
+    code_label = locators.code_language.css_selector() if locators.code_language else None
     assistant = locators.assistant_turn.resolve(page)
     composer = locators.composer.resolve(page).first
     send = locators.send.resolve(page).first if locators.send else None
@@ -371,7 +396,7 @@ async def sample_send(
         # marked early in a full test run, 2026-11-25). A signal that is early by less than the
         # few milliseconds between the reads can pass unnoticed; the provider's stability
         # window covers that.
-        turn = digest = content_digest = busy = done = None
+        turn = digest = content_digest = busy = done = reply_digest = None
         text = ""
         stop_visible = await stop.is_visible() if stop else None
         send_ready = (send is None or await send.is_visible()) and await composer.is_editable()
@@ -385,6 +410,9 @@ async def sample_send(
             text = await turn.inner_text()
             digest = text_hash(text)
             content_digest = text_hash(content_up_to(text, marker))
+            if provider_text:
+                reply, _ = await read_reply(turn, code_label)
+                reply_digest = text_hash(reply)
         samples.append(
             Sample(
                 t_ms=t_ms,
@@ -398,12 +426,19 @@ async def sample_send(
                 done=done,
                 busy=busy,
                 new_path=urlsplit(page.url).path != path_before,
+                reply_digest=reply_digest,
             )
         )
         if settled(samples, locators) or t_ms > SEND_DEADLINE_S * 1000:
             if samples:
                 samples[-1].resubmitted = resubmitted
                 samples[-1].confirmed = confirmed
+                if provider_text and late_s and turn is not None:
+                    # A second read, later (review 2026-11-28, 1d): a block that came after
+                    # the page settled makes the fast end that fired before it early.
+                    await asyncio.sleep(late_s)
+                    reply, _ = await read_reply(turn, code_label)
+                    samples[-1].late_digest = text_hash(reply)
             return samples
         await asyncio.sleep(SAMPLE_INTERVAL_S)
 
@@ -606,6 +641,9 @@ class Probe:
     url: str
     out_dir: Path
     session: str | None = None  # `code-language`: the session whose conversation is opened
+    questions: int = 5  # `speed`: questions per arm
+    rounds: int = 2  # `speed`: new conversations with the end-signal prompts
+    skip_headless: bool = False  # `speed`: without the arm without a window
 
     @property
     def copilot_host(self) -> str:
@@ -613,7 +651,7 @@ class Probe:
 
     def launcher(self, profile: Path | None = None) -> EdgeLauncher:
         if profile is None:
-            return EdgeLauncher.from_settings(self.settings)
+            return EdgeLauncher.from_settings(self.settings, window=True)
         return EdgeLauncher(self.settings.data_dir, profile, headless=self.settings.browser_headless)
 
     def overrides(self) -> dict:
@@ -1404,6 +1442,420 @@ def response_mode_of(out_dir: Path) -> dict:
     return {}
 
 
+# -- speed: end signals, then the two paths compared (change copilot-turn-speed) ---------------
+
+SPEED_CONVERSATIONS = 2  # end-signal sends: the fixed prompts in this many new conversations
+SPEED_QUESTIONS = 5  # questions per arm (optimisations off, then on), at most
+DEEP_PROMPTS = (0, 4)  # SPEED_PROMPTS sent once more in `deep`, when the selector is measured
+LATE_READ_S = 5.0  # each end-signal send: the reply read again this much after it settled
+CONFIRM_WINDOWS_MS = (500, 1000)  # short confirmation windows tried for a fast end
+
+
+# The arms of `speed`, in order: the optimisations off and on with a window, then on without
+# one (`headless`, which never writes anything to ui.json).
+ARMS = ("off", "on", "headless")
+
+
+def speed_sends(questions: int, *, rounds: int = SPEED_CONVERSATIONS, headless: bool = True,
+                deep: bool = False) -> int:
+    """Every send of one `speed` run, at most: the end signals (the fixed prompts in `rounds`
+    new conversations, and DEEP_PROMPTS in `deep` when that mode is measured), then the arms
+    (`headless` False: without the arm without a window)."""
+    ends = rounds * len(SPEED_PROMPTS) + (len(DEEP_PROMPTS) if deep else 0)
+    return ends + (len(ARMS) if headless else len(ARMS) - 1) * questions
+
+
+def deep_measured(measurement: UiMeasurement) -> bool:
+    control = measurement.response_mode
+    return control is not None and "deep" in control.options
+
+
+def fast_state(sample: Sample, signal: str) -> bool | None:
+    """A structural signal in one sample: True done, False busy, None cannot tell."""
+    if signal == "stop_hidden":
+        return None if sample.stop_visible is None else not sample.stop_visible
+    if signal == "send_ready":
+        return sample.send_ready
+    if not sample.turn:
+        return None
+    if signal == "done_control":
+        return None if sample.done is None else sample.done
+    return sample.busy != "true"  # aria_busy
+
+
+def fast_fire(samples: list[Sample], signal: str, confirm_ms: int) -> float | None:
+    """When the provider's fast end would fire (copilot_web, `await_reply`): the signal seen
+    busy, then done without interruption for `confirm_ms`, with the reply as the provider
+    reads it unchanged for `confirm_ms` too."""
+    seen_busy, done_since, text_since, previous = False, None, 0.0, object()
+    for s in samples:
+        state = fast_state(s, signal)
+        if state is False and s.turn:  # busy before the reply exists is not the reply's
+            seen_busy, done_since = True, None
+        elif state is False:
+            done_since = None
+        elif state is True and seen_busy and done_since is None:
+            done_since = s.t_ms
+        if s.reply_digest != previous:
+            previous, text_since = s.reply_digest, s.t_ms
+        if (s.reply_digest is not None and s.has_text and done_since is not None
+                and s.t_ms - max(done_since, text_since) >= confirm_ms):
+            return s.t_ms
+    return None
+
+
+def analyse_fast(samples: list[Sample], locators: Locators, *, late_digest: str | None = None,
+                 mode: str = "auto") -> dict:
+    """Each fast-end rule against the truth of this change: the marker is in the reply and the
+    reply, as the provider reads it, never changes again (anything appended later counts,
+    unlike the truth of `measure`).
+
+    A rule is early (review 2026-11-28, 1c and 1d) when it fired before that truth, when its
+    signal went busy again at any time after it fired, or when the reply it would have
+    returned differs from the reply read LATE_READ_S later (`late_digest`)."""
+    last = samples[-1] if samples else None
+    truth = stable_since(samples, "reply_digest") if last and last.has_marker else None
+    late_changed = late_digest is not None and last is not None and late_digest != last.reply_digest
+    rules = {}
+    for signal in STRUCTURAL:
+        if not applicable(signal, locators):
+            continue
+        for confirm in CONFIRM_WINDOWS_MS:
+            fired = fast_fire(samples, signal, confirm)
+            met = fired is not None and truth is not None
+            early = met and (
+                fired < truth
+                or any(fast_state(s, signal) is False for s in samples if s.t_ms > fired)
+                or (late_digest is not None
+                    and next(s.reply_digest for s in samples if s.t_ms == fired) != late_digest))
+            rules[f"{signal}+{confirm}"] = {
+                "met": met, "early": early,
+                "delay_ms": round(fired - truth) if met else None,
+            }
+    return {"truth_ms": round(truth) if truth is not None else None, "rules": rules,
+            "resubmitted": bool(last and last.resubmitted), "late_changed": late_changed,
+            "mode": mode}
+
+
+def summarise_fast(sends: list[dict], planned: int) -> dict:
+    names = sorted({name for send in sends for name in send["rules"]})
+    summary = {}
+    for name in names:
+        results = [send["rules"].get(name, {"met": False, "early": False, "delay_ms": None})
+                   for send in sends]
+        delays = [r["delay_ms"] for r in results if r["met"] and not r["early"]]
+        met, early = sum(r["met"] for r in results), sum(r["early"] for r in results)
+        summary[name] = {"met": met, "early": early, "sends": len(results),
+                         "valid": len(results) == planned and met == planned and early == 0,
+                         "mean_delay_ms": round(statistics.fmean(delays)) if delays else None}
+    return summary
+
+
+def choose_fast(summary: dict, preferred: str | None = None) -> dict | None:
+    """The valid rule that ends soonest after the truth; on a tie the shorter window, then
+    the signal `measure` already chose (`preferred`)."""
+    valid = [name for name, s in summary.items() if s["valid"]]
+    if not valid:
+        return None
+    best = min(valid, key=lambda n: (summary[n]["mean_delay_ms"] or 0, int(n.split("+")[1]),
+                                     n.split("+")[0] != preferred))
+    signal, confirm = best.split("+")
+    return {"signal": signal, "confirm_ms": int(confirm)}
+
+
+class _ArmEvents:
+    """What the provider reports during one arm question: counts and the identifier only."""
+
+    def __init__(self) -> None:
+        self.bound_id: str | None = None
+        self.warnings = 0
+        self.cut = False
+
+    def bound(self, remote_ref: str) -> None:
+        self.bound_id = remote_ref
+
+    def warn(self, text: str) -> None:
+        self.warnings += 1
+
+    def truncated(self) -> None:
+        self.cut = True
+
+
+async def run_arm(probe: Probe, speed: TurnSpeed, questions: int, *,
+                  headless: bool = False) -> list[dict]:
+    """`questions` fixed prompts in one new conversation through the provider, held as a
+    conversation does, with a window or without one. The reply is checked for its marker in
+    memory and dropped: only the phases, the path, the end and counts are kept. Stops at the
+    first question that is not answered whole: nothing is ever sent again."""
+    profile = probe.settings.edge_profile or probe.settings.data_dir / "edge-profile"
+    launcher = EdgeLauncher(probe.settings.data_dir, profile,
+                            headless=headless or probe.settings.browser_headless)
+    provider = CopilotWebProvider(probe.settings, launcher, speed=speed)
+    rows: list[dict] = []
+    session_id, remote, completed = uuid.uuid4(), None, 0
+    await provider.open_resources()
+    try:
+        for number in range(questions):
+            index = number % len(PROMPTS)
+            events, sent = _ArmEvents(), []
+            request = LLMRequest(request_id=uuid.uuid4(), session_id=session_id,
+                                 prompt=PROMPTS[index], timeout_s=probe.settings.request_timeout_s,
+                                 remote_ref=remote, completed_turns=completed)
+            say(f"  question {number + 1}/{questions}")
+            error, whole = None, False
+            try:
+                async with asyncio.timeout(request.timeout_s + 10):
+                    text = await provider.ask(request, lambda: sent.append(True), events=events)
+                whole = marker_of(index) in text and not events.cut
+                del text  # never kept
+            except (HarnessError, ProviderError, PlaywrightError, TimeoutError) as exc:
+                error = type(exc).__name__
+            timings = provider.last_timings
+            rows.append({
+                "question": number + 1, "prompt": index + 1, "error": error, "whole": whole,
+                "outcome": timings.outcome if timings else "failed",
+                "path": timings.path if timings else None,
+                "declined": timings.declined if timings else None,
+                "end": timings.end if timings else None,
+                "phases_ms": dict(timings.phases_ms) if timings else {},
+                "total_ms": timings.total_ms if timings else None,
+                "sends": len(sent), "warnings": events.warnings,
+                "early_endings": timings.early_endings if timings else 0,
+                "same_conversation": remote is None or events.bound_id in (None, remote),
+            })
+            if error is not None or not whole:
+                break
+            remote = remote or events.bound_id
+            completed += 1
+    finally:
+        await provider.close_resources()
+    return rows
+
+
+async def confirm_sends(planned: int) -> bool:
+    """Ask the person before anything is sent (review 2026-11-28, 1d): True on Enter, False
+    when the input is closed. Nothing is read but the key press."""
+    say(f"speed will send at most {planned} fixed prompts to Copilot. Press Enter to start, "
+        "or Ctrl+C to stop without sending anything.")
+    line = await asyncio.to_thread(sys.stdin.readline)
+    return line != ""
+
+
+async def end_sends(page: Page, probe: Probe, locators: Locators, prompts: tuple[int, ...],
+                    result: dict, *, label: str, mode: str = "auto",
+                    measurement: UiMeasurement | None = None) -> bool:
+    """The fixed prompts `prompts` (indices of SPEED_PROMPTS) in one new conversation, each
+    sampled and read again LATE_READ_S later. In `deep` the measured selector chooses that mode
+    first; False when it cannot be confirmed (nothing is sent then)."""
+    say(f"end signals, {label}")
+    await page.goto(probe.url)
+    await wait_ready(page, locators, probe)
+    await settle_page(page, probe.copilot_host, probe.settings.copilot_ready_timeout_s)
+    await wait_ready(page, locators, probe)
+    if await locators.user_turn.resolve(page).count():
+        raise ProbeFailure("the new-chat address showed an existing conversation; "
+                           "nothing was sent in it")
+    if mode == "deep":
+        assert measurement is not None and measurement.response_mode is not None
+        others = tuple(s for s in (locators.composer, locators.send, locators.stop,
+                                   locators.new_conversation) if s is not None)
+        selector = _ModeSelector(page, measurement.response_mode, others)
+        try:
+            shown = await selector.select(ResponseMode.DEEP)
+        except HarnessError:
+            shown = None
+        if shown is not ResponseMode.DEEP:
+            say("  deep could not be confirmed: nothing is sent in deep")
+            return False
+    for number, index in enumerate(prompts):
+        say(f"  send {number + 1}/{len(prompts)}")
+        samples = await sample_send(page, locators, SPEED_PROMPTS[index], marker_of(index),
+                                    provider_text=True, late_s=LATE_READ_S)
+        result["end_sends"].append(analyse_fast(samples, locators, mode=mode,
+                                                late_digest=samples[-1].late_digest))
+    return True
+
+
+async def step_speed(probe: Probe, result: dict) -> None:
+    """End signals with the fixed prompts, then `questions` fixed prompts with the
+    optimisations off and as many with them on, through the provider (D5 of the change).
+    The number of sends is said, and the person presses Enter, before anything is sent."""
+    measurement = load_measurement(probe.settings.data_dir)  # complete, or it says what is missing
+    locators = measurement.locators
+    questions = probe.questions
+    deep = deep_measured(measurement)
+    result["locators"] = locators.model_dump(mode="json", exclude_none=True)
+    result["questions"] = questions
+    result["rounds"] = probe.rounds
+    result["skip_headless"] = probe.skip_headless
+    result["sends_planned"] = speed_sends(questions, rounds=probe.rounds,
+                                          headless=not probe.skip_headless, deep=deep)
+    result["end_sends_planned"] = probe.rounds * len(SPEED_PROMPTS) + (len(DEEP_PROMPTS) if deep else 0)
+    say(f"speed: {result['sends_planned']} fixed sends in all: {result['end_sends_planned']} for "
+        f"the end signals ({probe.rounds} x {len(SPEED_PROMPTS)}"
+        + (f" + {len(DEEP_PROMPTS)} in deep" if deep else "") + f"), {questions} per variant")
+    if not await confirm_sends(result["sends_planned"]):
+        raise ProbeFailure("not confirmed: nothing was sent")
+    async with probe.launcher().open() as context:
+        result.setdefault("edge_version", edge_version(context))
+        page = first_page(context)
+        everything = tuple(range(len(SPEED_PROMPTS)))
+        for number in range(probe.rounds):
+            await end_sends(page, probe, locators, everything, result,
+                            label=f"conversation {number + 1}/{probe.rounds}")
+        if deep and not await end_sends(page, probe, locators, DEEP_PROMPTS, result,
+                                        label="in deep", mode="deep", measurement=measurement):
+            result["end_sends_planned"] -= len(DEEP_PROMPTS)
+            result["deep"] = "not confirmed"
+    summary = summarise_fast(result["end_sends"], result["end_sends_planned"])
+    result["fast_rules"] = summary
+    chosen = choose_fast(summary, measurement.end_signal.name if measurement.end_signal else None)
+    fast = None
+    if chosen is not None:
+        chosen["modes"] = sorted({send["mode"] for send in result["end_sends"]})
+        fast = FastEnd(**chosen, sends=len(result["end_sends"]), measured_at=now_iso())
+    result["fast_end_candidate"] = chosen
+    on = TurnSpeed(reuse_tab=True, fast_end=fast)
+    arms = [arm for arm in ARMS if not (arm == "headless" and probe.skip_headless)]
+    for arm, speed in zip(arms, (TurnSpeed(), on, on), strict=False):
+        say(f"questions: {arm}" + (" (optimisations on, without a window)" if arm == "headless" else ""))
+        result["arms"][arm] = await run_arm(probe, speed, questions, headless=arm == "headless")
+        if not whole_arm(result["arms"][arm], questions):
+            break  # the page misbehaves: no further arm is run
+
+
+def whole_arm(rows: list[dict], questions: int) -> bool:
+    return len(rows) == questions and all(
+        r["error"] is None and r["whole"] and r["outcome"] == "answered" and r["sends"] == 1
+        and r["same_conversation"] for r in rows)
+
+
+def finish_speed(result: dict) -> None:
+    """What the run measured, and what of it goes into ui.json: a fast end only if its rule
+    was never early and every answer of both arms came whole; tab reuse only if every
+    follow-up question of the second arm took it and came whole."""
+    questions = result.get("questions") or SPEED_QUESTIONS
+    arms = result.get("arms") or {}
+    off, on = arms.get("off") or [], arms.get("on") or []
+    both = whole_arm(off, questions) and whole_arm(on, questions)
+    ends = len(result.get("end_sends") or [])
+    headless = arms.get("headless") or []
+    result["sends_used"] = ends + sum(r["sends"] for r in off + on + headless)
+    # Without a window: a time only when every question came whole, as with one. Otherwise
+    # the page behaved differently (a sign-in or verification page, never ready, another
+    # structure): the provider refused, and the run says so instead of a time.
+    if result.get("skip_headless"):
+        result["headless"] = "skipped (--skip-headless)"
+    elif not both:
+        result["headless"] = "not run"
+    elif whole_arm(headless, questions):
+        result["headless"] = "usable"
+    else:
+        reasons = sorted({r["error"] or r["outcome"] for r in headless if not r["whole"]})
+        result["headless"] = "not usable (" + (", ".join(reasons) or "not run") + ")"
+    write: dict = {}
+    # A fast end the provider itself found early in a question of the arms is not written
+    # either (review 2026-11-28, 1c).
+    early = sum(r.get("early_endings", 0) for r in on + headless)
+    result["early_endings"] = early
+    if both and early == 0 and result.get("fast_end_candidate") \
+            and ends == result.get("end_sends_planned"):
+        write["fast_end"] = result["fast_end_candidate"] | {"sends": ends, "measured_at": result["measured_at"]}
+    if both and questions >= 2 and all(r["path"] == "reuse" for r in on[1:]):
+        write["tab_reuse"] = {"questions": questions - 1, "measured_at": result["measured_at"]}
+    result["write"] = write
+    missing = []
+    if ends < (result.get("end_sends_planned") or 0):
+        missing.append("end_sends")
+    if not both:
+        missing.append("questions")
+    result["missing"] = missing
+    result["complete"] = not missing
+
+
+def add_turn_speed(out_dir: Path, data_dir: Path, result: dict) -> str:
+    """Write what `speed` measured into ui.json, the old one kept dated. A rule or a reuse the
+    run did not confirm is removed: the provider then takes the old path."""
+    target = measurement_path(data_dir)
+    if not target.is_file():
+        return "no ui.json yet: measure first"
+    data = json.loads(target.read_text(encoding="utf-8"))
+    current = UiMeasurement.model_validate(data).locators.model_dump(mode="json", exclude_none=True)
+    if current != result.get("locators"):
+        return "not written: ui.json changed its locators during the run"
+    write = result.get("write") or {}
+    data["fast_end"] = write.get("fast_end")
+    data["tab_reuse"] = write.get("tab_reuse")
+    final = UiMeasurement.model_validate(data)
+    dated = datetime.fromtimestamp(target.stat().st_mtime, UTC).strftime("%Y%m%dT%H%M%SZ")
+    target.replace(out_dir / f"ui-{dated}.json")
+    write_json(out_dir, MEASUREMENT_FILE, final.model_dump(mode="json"))
+    names = [name for name in ("fast_end", "tab_reuse") if write.get(name)]
+    return "written (" + (", ".join(names) or "neither optimisation confirmed") + ")"
+
+
+def turn_speed_of(out_dir: Path, locators: dict) -> dict:
+    """The entries of the latest complete `speed` step, if it measured these very locators."""
+    found = latest(out_dir, "speed")
+    if not found or not found.get("complete") or found.get("locators") != locators:
+        return {}
+    write = found.get("write") or {}
+    return {name: write[name] for name in ("fast_end", "tab_reuse") if write.get(name)}
+
+
+def median_or_none(values: list[int]) -> int | None:
+    return round(statistics.median(values)) if values else None
+
+
+def speed_lines(result: dict) -> list[str]:
+    """The phase table of both arms (medians of the follow-up questions) and the counts."""
+    lines = [f"sends: {result.get('sends_used')} used of {result.get('sends_planned')} planned "
+             f"({result.get('end_sends_planned')} for the end signals, {result.get('questions')} "
+             "questions per arm)",
+             f"early endings in the questions (fast end found early, reply kept whole): "
+             f"{result.get('early_endings', 0)}",
+             "end-signal sends whose reply changed after it settled (read again "
+             f"{LATE_READ_S:.0f} s later): "
+             f"{sum(bool(s.get('late_changed')) for s in result.get('end_sends') or [])}"]
+    for name, s in (result.get("fast_rules") or {}).items():
+        lines.append(f"  fast end {name} ms: {'VALID' if s['valid'] else 'not valid'} (met "
+                     f"{s['met']}/{s['sends']}, early {s['early']}, mean delay {s['mean_delay_ms']} ms)")
+    chosen = result.get("fast_end_candidate")
+    lines.append("fast end chosen: " + (f"{chosen['signal']} + {chosen['confirm_ms']} ms" if chosen
+                                        else "none (the stability window stays)"))
+    arms = result.get("arms") or {}
+    follow = {arm: rows[1:] for arm, rows in arms.items()}
+    usable = result.get("headless") == "usable"
+    lines.append(f"{'phase (ms, median of questions 2..N)':<40}{'off':>8}{'on':>8}{'headless':>10}")
+    for phase in (*PHASES, "total"):
+        cells = []
+        for arm in ARMS:
+            if arm == "headless" and not usable:
+                cells.append("n/a")
+                continue
+            rows = follow.get(arm) or []
+            values = [r["total_ms"] if phase == "total" else r["phases_ms"][phase]
+                      for r in rows if r.get("total_ms") is not None
+                      and (phase == "total" or phase in r["phases_ms"])]
+            value = median_or_none(values)
+            cells.append("-" if value is None else str(value))
+        if cells[:2] != ["-", "-"] or phase == "total":
+            lines.append(f"  {phase:<38}{cells[0]:>8}{cells[1]:>8}{cells[2]:>10}")
+    lines.append(f"headless: {result.get('headless')}")
+    for arm in ARMS:
+        rows = arms.get(arm) or []
+        if arm == "headless" and not usable:
+            continue  # no time for a variant that did not work: the line above says why
+        firsts = rows[0]["total_ms"] if rows else None
+        lines.append(
+            f"{arm}: answered whole {sum(1 for r in rows if r['whole'])}/{result.get('questions')}"
+            f"  first question {firsts} ms  paths {[r['path'] for r in rows]}"
+            f"  ends {[r['end'] for r in rows]}  declined {[r['declined'] for r in rows]}")
+    write = result.get("write") or {}
+    lines.append("to ui.json: " + (", ".join(sorted(write)) or "nothing"))
+    return lines
+
+
 # -- results ------------------------------------------------------------------------------------
 
 
@@ -1489,7 +1941,7 @@ def assemble(out_dir: Path) -> tuple[UiMeasurement | None, str]:
         "longest_response_ms": measure.get("longest_response_ms"),
         "recommended_timeout_s": measure.get("recommended_timeout_s"),
         "login": login.model_dump(mode="json") if login else None,
-    } | response_mode_of(out_dir)
+    } | response_mode_of(out_dir) | turn_speed_of(out_dir, measure["locators"])
     draft = UiMeasurement.model_validate(data)
     missing = draft.missing_parts()
     if missing:
@@ -1653,6 +2105,8 @@ def print_summary(step: str, result: dict, ui_status: str | None) -> None:
                      f"structure lines: {result.get('structure_lines')}")
         counts = result.get("counts") or {}
         lines.append("visible: " + ", ".join(f"{k} {v}" for k, v in counts.items()))
+    if step == "speed":
+        lines += speed_lines(result)
     if ui_status is not None:
         lines.append(f"ui.json: {ui_status}")
     lines.append("---- end of summary ----")
@@ -1670,6 +2124,7 @@ STEPS: dict[str, Callable] = {
     "sizes": step_sizes,
     "code-language": step_code_language,
     "response-mode": step_response_mode,
+    "speed": step_speed,
 }
 
 
@@ -1692,7 +2147,29 @@ def build_parser() -> argparse.ArgumentParser:
     steps.add_parser(
         "response-mode",
         help="the response-mode selector, with the person; chooses modes, sends nothing")
+    speed_help = (
+        "end signals, then the questions with the optimisations off and on, with and without "
+        f"a window ({speed_sends(SPEED_QUESTIONS)} fixed sends by default, "
+        f"{speed_sends(SPEED_QUESTIONS, deep=True)} with deep measured; the smallest run that "
+        "still writes the rules: --rounds 1 --questions 2 --skip-headless, "
+        f"{speed_sends(2, rounds=1, headless=False)} sends, "
+        f"{speed_sends(2, rounds=1, headless=False, deep=True)} with deep). The number of sends "
+        "is said, and Enter awaited, before anything is sent")
+    speed = steps.add_parser("speed", help=speed_help, description=speed_help)
+    speed.add_argument("--questions", type=questions_arg, default=SPEED_QUESTIONS,
+                       help=f"questions per variant, 2 to {SPEED_QUESTIONS} (default {SPEED_QUESTIONS})")
+    speed.add_argument("--rounds", type=int, choices=(1, 2), default=SPEED_CONVERSATIONS,
+                       help=f"new conversations with the {len(SPEED_PROMPTS)} fixed end-signal "
+                            f"prompts (default {SPEED_CONVERSATIONS})")
+    speed.add_argument("--skip-headless", action="store_true",
+                       help="leave out the variant without a window (it never writes to ui.json)")
     return parser
+
+
+def questions_arg(raw: str) -> int:
+    if not raw.isdigit() or not 2 <= int(raw) <= SPEED_QUESTIONS:
+        raise argparse.ArgumentTypeError(f"a whole number from 2 to {SPEED_QUESTIONS}")
+    return int(raw)
 
 
 def new_result(step: str) -> dict:
@@ -1700,6 +2177,8 @@ def new_result(step: str) -> dict:
     result |= environment()
     if step == "measure":
         result |= {"sends": [], "startup_ms": [], "turns_visible_after_reopen": [], "sizes": []}
+    if step == "speed":
+        result |= {"end_sends": [], "arms": {}}
     return result
 
 
@@ -1710,7 +2189,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         settings = Settings.from_env(os.environ)
         probe = Probe(settings, settings.require_copilot_url(), settings.data_dir / MEASUREMENT_DIR,
-                      session=getattr(args, "session", None))
+                      session=getattr(args, "session", None),
+                      questions=getattr(args, "questions", SPEED_QUESTIONS),
+                      rounds=getattr(args, "rounds", SPEED_CONVERSATIONS),
+                      skip_headless=getattr(args, "skip_headless", False))
         ensure_unversionable(probe.out_dir)
     except HarnessError as exc:
         say(f"probe: error: {exc}")
@@ -1754,6 +2236,8 @@ def main(argv: list[str] | None = None) -> int:
     elif args.step == "response-mode":
         result["complete"] = bool(result.get("response_mode"))
         result["missing"] = [] if result["complete"] else ["response_mode"]
+    elif args.step == "speed":
+        finish_speed(result)
     else:
         result["complete"] = result.get("controllable") is True and bool(result.get("confirmed_by_person"))
         result["missing"] = [] if result["complete"] else ["login"]
@@ -1765,6 +2249,8 @@ def main(argv: list[str] | None = None) -> int:
         ui_status = add_code_language(probe.out_dir, probe.settings.data_dir, result["code_language"])
     elif args.step == "response-mode" and result["complete"]:
         ui_status = add_response_mode(probe.out_dir, probe.settings.data_dir, result["response_mode"])
+    elif args.step == "speed" and code == EXIT_OK:
+        ui_status = add_turn_speed(probe.out_dir, probe.settings.data_dir, result)
     print_summary(args.step, result, ui_status)
     if code == EXIT_OK and not result["complete"]:
         code = EXIT_ERROR

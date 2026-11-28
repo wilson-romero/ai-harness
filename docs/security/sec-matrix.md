@@ -131,6 +131,7 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `openspec/changes/skill-engine/specs/human-approval/spec.md` · Propuesta con hash canónico
 - `openspec/changes/architecture-skills-llm/specs/architecture-memory/spec.md` · Proyecto y destino los decide el harness
 - `openspec/changes/architecture-skills-llm/specs/decision-notes/spec.md` · Aprobación ligada al vault de la ejecución
+- `openspec/changes/copilot-turn-speed/specs/copilot-turn-speed/spec.md` · Pestaña de confianza
 **Tests:**
 - `tests/security/test_session_isolation.py::test_history_does_not_mix_sessions`
 - `tests/security/test_session_isolation.py::test_cross_session_message_is_rejected_by_storage`
@@ -142,8 +143,10 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `tests/integration/test_architecture_memory.py::test_model_source_and_memory_text_never_approve_nor_choose_the_target`
 - `tests/integration/test_architecture_memory.py::test_an_approval_for_one_vault_is_never_written_into_another`
 - `tests/unit/test_notes.py::test_a_project_named_inside_another_is_not_that_project`
-**Control negativo:** `session-core` 2.4 (archivado); `skill-engine` 5.4; `architecture-skills-llm` 7.3; mutación SEC-02 de la tabla.
-**Windows:** código y SQL sin ramas por plataforma; los tests de esta fila pasaron en la ejecución de `57c413d`, salvo `tests/unit/test_notes.py::test_a_project_named_inside_another_is_not_that_project`, que se añadió en `feature/hardening` y pasó en la ejecución de `a9c51fe`.
+- `tests/browser/test_copilot_turn_speed.py::test_reuse_refuses_a_tab_another_session_used`
+- `tests/browser/test_copilot_turn_speed.py::test_reuse_refuses_a_tab_moved_to_another_address`
+**Control negativo:** `session-core` 2.4 (archivado); `skill-engine` 5.4; `architecture-skills-llm` 7.3; mutación SEC-02 de la tabla; `copilot-turn-speed` 7.1 (M1: confiar en cualquier pestaña ya usada hace fallar la prueba de la pestaña movida).
+**Windows:** código y SQL sin ramas por plataforma; los tests de esta fila pasaron en la ejecución de `57c413d`, salvo `tests/unit/test_notes.py::test_a_project_named_inside_another_is_not_that_project`, que se añadió en `feature/hardening` y pasó en la ejecución de `a9c51fe`. Las pruebas de `copilot-turn-speed` de esta fila son posteriores a esa ejecución: NOT RUN en Windows.
 **Límites:** es aislamiento lógico dentro de una cuenta del sistema y una base SQLite: cualquier proceso con la misma cuenta lee todas las sesiones. No hay clientes externos (SEC-09), así que no se prueba el aislamiento a través de MCP.
 
 ## SEC-03 · Prompt injection en memoria, EA o tool result
@@ -286,14 +289,18 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 **Requisitos:**
 - `openspec/changes/copilot-web-provider/specs/copilot-web-provider/spec.md` · Login vencido pide intervención humana
 - `openspec/changes/copilot-web-provider/specs/dedicated-edge-browser/spec.md` · Login manual
+- `openspec/changes/copilot-turn-speed/specs/copilot-turn-speed/spec.md` · Sin ventana solo si se pide
 **Tests:**
 - `tests/unit/test_provider_states.py::test_authentication_required_before_sending`
 - `tests/unit/test_provider_states.py::test_authentication_required_after_sending_is_uncertain`
 - `tests/browser/test_copilot_provider.py::test_expired_login_asks_for_a_person_and_touches_nothing`
 - `tests/browser/test_copilot_provider.py::test_back_to_active_after_signing_in_by_hand`
 - `tests/browser/test_copilot_login.py::test_no_field_touched_during_login`
-**Control negativo:** `copilot-web-provider` 4.3 (sin la guardia de host, el test de login vencido falla).
-**Windows:** los dos tests de `tests/unit/` pasaron en la ejecución de `57c413d`. Los tests de `tests/browser/` (marca `edge`) usan Edge contra el chat sintético local y se omiten donde Edge no se puede lanzar; en Windows se ejecutaron por primera vez sobre `a9c51fe` y pasaron, salvo un caso de `response-mode` que no es de esta fila (ver arriba).
+- `tests/browser/test_copilot_turn_speed.py::test_reuse_refuses_a_page_that_signed_out`
+- `tests/browser/test_copilot_turn_speed.py::test_a_page_that_differs_without_a_window_is_refused`
+- `tests/browser/test_copilot_turn_speed.py::test_signing_in_always_uses_a_window`
+**Control negativo:** `copilot-web-provider` 4.3 (sin la guardia de host, el test de login vencido falla); `copilot-turn-speed` 7.1 (M4 sin la comprobación del estado de la pestaña, M10 con el login sin ventana).
+**Windows:** los dos tests de `tests/unit/` pasaron en la ejecución de `57c413d`. Los tests de `tests/browser/` (marca `edge`) usan Edge contra el chat sintético local y se omiten donde Edge no se puede lanzar; en Windows se ejecutaron por primera vez sobre `a9c51fe` y pasaron, salvo un caso de `response-mode` que no es de esta fila (ver arriba). Las pruebas de `copilot-turn-speed` de esta fila son posteriores a esa ejecución: NOT RUN en Windows.
 **Límites:** probado contra el chat sintético, que imita una página de login; contra la página real de Copilot solo a mano en macOS (recibos de `copilot-web-provider`). Un MFA real no se prueba: el harness solo espera a que la persona termine en la ventana de Edge.
 
 ## SEC-07 · Timeout tras envío/escritura
@@ -310,6 +317,7 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `openspec/changes/copilot-web-provider/specs/copilot-web-provider/spec.md` · Plazo vencido tras el envío sin reenvío
 - `openspec/changes/code-mode/specs/code-mode/spec.md` · Un plan nunca se reenvía ni se repite solo
 - `openspec/changes/code-mode/specs/code-mode/spec.md` · Una respuesta incierta o truncada nunca se analiza
+- `openspec/changes/copilot-turn-speed/specs/copilot-turn-speed/spec.md` · Fin por señal positiva
 - `openspec/changes/code-mode/specs/code-mode/spec.md` · Fin del bucle
 - `openspec/changes/code-mode/specs/code-mode/spec.md` · Registro del bucle
 **Tests:**
@@ -326,14 +334,19 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `tests/unit/test_mcp_plan_reply.py::test_a_reply_that_did_not_complete_is_refused_even_with_a_valid_text`
 - `tests/unit/test_mcp_plan_reply.py::test_a_truncated_reply_is_refused_even_with_a_valid_text`
 - `tests/unit/test_mcp_plan_run.py::test_interrupted_after_its_first_step_it_never_runs_again`
+- `tests/browser/test_copilot_turn_speed.py::test_a_trusted_tab_is_asked_again_without_reloading`
+- `tests/browser/test_copilot_turn_speed.py::test_a_block_appended_after_the_signal_is_waited_for`
+- `tests/browser/test_copilot_turn_speed.py::test_a_signal_that_flickers_does_not_end_the_reply`
+- `tests/browser/test_copilot_turn_speed.py::test_an_idle_gap_between_two_phases_does_not_cut_the_reply`
+- `tests/browser/test_copilot_turn_speed.py::test_a_late_block_after_an_idle_moment_is_kept`
 - `tests/unit/test_shell_agent.py::test_a_reply_that_did_not_complete_whole_stops_the_loop_unread`
 - `tests/unit/test_shell_agent.py::test_ctrl_c_during_a_turn_stops_the_loop_and_sends_nothing_more`
 - `tests/unit/test_shell_agent.py::test_ctrl_c_while_a_step_runs_stops_the_loop`
 - `tests/unit/test_shell_agent.py::test_a_reply_not_completed_is_never_read_even_with_a_valid_plan_in_it`
 - `tests/unit/test_shell_agent.py::test_a_loop_left_running_is_marked_interrupted_and_never_resumed`
 - `tests/unit/test_shell_agent.py::test_a_loop_left_running_is_marked_interrupted_when_the_conversation_opens`
-**Control negativo:** `skill-engine` 4.3 y 8.1; `architecture-skills-llm` 4.4; mutaciones SEC-07 de la tabla. (`copilot-web-provider` 5.3 tiene recibo pero no anota un control negativo.) Code mode, tramo 2: `code-mode` 4.5b y 4.6 (una respuesta incierta, fallida o truncada no se lee; un plan interrumpido no vuelve a ejecutarse).
-**Windows:** los tests de proceso muerto matan un subproceso real; los tests sin marca `edge` de esta fila pasaron en la ejecución de `57c413d`. Los tests de `tests/browser/` (marca `edge`) usan Edge contra el chat sintético local y se omiten donde Edge no se puede lanzar; en Windows se ejecutaron por primera vez sobre `a9c51fe` y pasaron, salvo un caso de `response-mode` que no es de esta fila (ver arriba). Los tests de `code-mode` 4.x pasaron en la ejecución de `a9c51fe`, salvo un test de plazo del plan (ver arriba).
+**Control negativo:** `copilot-turn-speed` 7.1 (M5–M7: sin ver la página ocupada, sin reiniciar ante un parpadeo o sin mirar el texto, la respuesta sale cortada) y 9.1 (R1–R5: sin la comprobación tras un fin rápido, o con ella a medias, una pausa entre fases o un bloque tardío salen cortados); `skill-engine` 4.3 y 8.1; `architecture-skills-llm` 4.4; mutaciones SEC-07 de la tabla. (`copilot-web-provider` 5.3 tiene recibo pero no anota un control negativo.) Code mode, tramo 2: `code-mode` 4.5b y 4.6 (una respuesta incierta, fallida o truncada no se lee; un plan interrumpido no vuelve a ejecutarse).
+**Windows:** los tests de proceso muerto matan un subproceso real; los tests sin marca `edge` de esta fila pasaron en la ejecución de `57c413d`. Los tests de `tests/browser/` (marca `edge`) usan Edge contra el chat sintético local y se omiten donde Edge no se puede lanzar; en Windows se ejecutaron por primera vez sobre `a9c51fe` y pasaron, salvo un caso de `response-mode` que no es de esta fila (ver arriba). Los tests de `code-mode` 4.x pasaron en la ejecución de `a9c51fe`, salvo un test de plazo del plan (ver arriba). Las pruebas de `copilot-turn-speed` de esta fila son posteriores a esa ejecución: NOT RUN en Windows.
 **Límites:** Copilot, solo contra el chat sintético en la batería; la página real, a mano en macOS. Las llamadas MCP no se reintentan, pero hoy solo se permiten herramientas de lectura. `skill resume --retry-step` repite una pregunta por decisión explícita de la persona (puede duplicarla en la conversación). Sin `fsync` del directorio tras publicar la nota: tras un corte de luz en ese instante la nota puede faltar y `skill resume` pediría aprobarla otra vez (límite 3 del README).
 
 ## SEC-08 · Reinicio

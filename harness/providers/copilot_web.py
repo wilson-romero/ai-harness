@@ -22,6 +22,11 @@ Rules this module keeps:
 - Page text is untrusted: the reply is read with a size cap, cleaned of control, escape and
   invisible characters, and only returned. No message of this module carries page text, a URL
   of the page or an exception's text: they are fixed sentences with counts.
+- Speed (change copilot-turn-speed), only where the probe measured it and the switch is on:
+  a held tab that still shows this session's conversation exactly as it was left after the
+  last answer is asked again without reloading (D2), and a reply ends on a measured positive
+  signal confirmed by a short quiet window (D3). Every other case takes the old path. Each
+  question's phases are timed, durations only (D1).
 """
 
 from __future__ import annotations
@@ -62,8 +67,10 @@ from harness.providers.base import (
     ProviderUncertain,
     RemoteConversationLost,
 )
+from harness.providers.copilot_timings import TurnTimings, record as record_timings
 from harness.providers.copilot_ui import (
     ConversationRef,
+    FastEnd,
     Locators,
     LocatorSpec,
     MeasurementError,
@@ -94,6 +101,10 @@ MODE_CONFIRM_S = 5.0  # after choosing a mode, how long the page may take to sho
 MODE_OPEN_S = 3.0  # after clicking the selector, how long its list may take to appear
 MODE_CLOSE_S = 1.0  # after Escape, how long the list may take to go away
 MODE_REREAD_S = 5.0  # bound on reading the mode again after the answer
+# A held tab is asked again without reloading only within this time of its last answer
+# (change copilot-turn-speed, D2): the back-and-forth of a conversation. After a longer pause a
+# reload costs little next to the pause, and the page may have changed in ways it does not show.
+REUSE_MAX_IDLE_S = 120.0
 
 # Characters in the editor: a field's value, else the text content. Zero-width characters do
 # not count (a rich editor keeps some as cursor anchors) and neither do line breaks, which a
@@ -519,6 +530,38 @@ class _Plan:
     limit: int
 
 
+@dataclass(frozen=True)
+class TurnSpeed:
+    """Which optimisations of change copilot-turn-speed a question may use. Off, a question
+    takes exactly the old path."""
+
+    reuse_tab: bool = False
+    fast_end: FastEnd | None = None
+
+
+def speed_for(settings: Settings, measurement: UiMeasurement) -> TurnSpeed:
+    """Each optimisation only when the probe measured it and its switch is on (D4)."""
+    return TurnSpeed(
+        reuse_tab=settings.copilot_reuse_tab and measurement.tab_reuse is not None,
+        fast_end=measurement.fast_end if settings.copilot_fast_end else None,
+    )
+
+
+@dataclass
+class _TabMemory:
+    """What a held tab showed right after it answered (D2): whose conversation, its turns,
+    and the elements of the last question and its answer."""
+
+    page: Page
+    session_id: object
+    remote_ref: str
+    users: int
+    assistants: int
+    last_user: ElementHandle
+    answer: ElementHandle
+    at: float
+
+
 class _Held:
     """The browser a conversation keeps open between its questions (design D3, revised
     2026-11-26). The `browser` lock is held as long as this lives."""
@@ -531,6 +574,8 @@ class _Held:
         # Ctrl+C): the tab may still be typing, sending or rendering, so it is not used again.
         self.untrusted = False
         self.gone = False
+        # What the tab showed after its last answer, when the next question may reuse it.
+        self.memory: _TabMemory | None = None
         context.on("close", lambda _context: self._lost())
 
     def _lost(self) -> None:
@@ -543,6 +588,7 @@ class _Held:
         every question does."""
         old = self.page
         if old is None or old.is_closed() or self.untrusted:
+            self.memory = None  # a memory belongs to its tab
             self.page = await self.context.new_page()
             self.untrusted = False
             if old is not None and not old.is_closed():
@@ -555,10 +601,20 @@ class CopilotWebProvider:
     name = PROVIDER_NAME
     synthetic_content = False  # D11: nothing of what is asked or answered is stored
 
-    def __init__(self, settings: Settings, launcher: EdgeLauncher | None = None) -> None:
+    def __init__(self, settings: Settings, launcher: EdgeLauncher | None = None, *,
+                 speed: TurnSpeed | None = None) -> None:
         self._settings = settings
         self._launcher = launcher
         self._held: _Held | None = None
+        # None: decided per question from the switches and the measurement (`speed_for`). The
+        # probe's `speed` step passes one to compare the two paths on the real page.
+        self._speed = speed
+        # Public and stable (the agent loop on develop reads it; keep its name and type): the
+        # timings of the last question that ended, whatever its outcome, set before `ask`
+        # returns or raises. None before the first question. Durations, fixed words and
+        # counts only (`TurnTimings`: path, declined, end, attempts, outcome, phases_ms,
+        # total_ms, early_endings); never text, URL or names.
+        self.last_timings: TurnTimings | None = None
 
     # -- resources for a conversation (interactive-shell D5; this change's D3) --------------
 
@@ -644,14 +700,49 @@ class CopilotWebProvider:
         events: ProviderEvents | None = None,
         on_mode: Callable[[ResponseMode], None] | None = None,
     ) -> str:
+        timings = TurnTimings(str(request.request_id), str(request.session_id))
+        events = events or _NoEvents()
+        started = time.monotonic()
+        try:
+            text = await self._ask(request, on_sent, events, on_mode, timings)
+            timings.outcome = "answered"
+            return text
+        except ProviderUncertain:
+            timings.outcome = "uncertain"
+            raise
+        except asyncio.CancelledError:
+            timings.outcome = "cancelled"
+            raise
+        finally:
+            timings.total_ms = round((time.monotonic() - started) * 1000)
+            self.last_timings = timings
+            # Recording never changes how the question ended (review 2026-11-28, finding 2):
+            # only an Exception is caught, and only around the recording, so a cancellation or
+            # Ctrl+C still goes through and nothing of the request itself is hidden.
+            try:
+                record_timings(self._settings.data_dir, timings)
+                if self._settings.copilot_timings:
+                    events.warn(timings.line())
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _ask(
+        self,
+        request: LLMRequest,
+        on_sent: Callable[[], None],
+        events: ProviderEvents,
+        on_mode: Callable[[ResponseMode], None] | None,
+        timings: TurnTimings,
+    ) -> str:
         plan = self._plan()
         if len(request.prompt) > plan.limit:  # the service checked; never type an over-long one
             raise PromptTooLong(f"the prompt is longer than {plan.limit} characters")
         held = self._held is not None
         reserve = min(HELD_RESERVE_S if held else CLOSE_RESERVE_S, request.timeout_s * 0.25)
         deadline = time.monotonic() + request.timeout_s - reserve
-        turn = _Turn(self._settings, plan, request, on_sent, events or _NoEvents(), deadline,
-                     on_mode or (lambda mode: None))
+        speed = self._speed or speed_for(self._settings, plan.measurement)
+        turn = _Turn(self._settings, plan, request, on_sent, events, deadline,
+                     on_mode or (lambda mode: None), speed=speed, timings=timings)
         try:
             if held:
                 return await self._ask_held(turn, deadline)
@@ -694,12 +785,22 @@ class CopilotWebProvider:
         """One question in the conversation's browser. Only a question that ends with an
         answer leaves its tab trusted; any other end (an error, a deadline, Ctrl+C, which
         arrives here as a cancellation) marks it, and the next question gets a new tab."""
+        held = self._held
+        memory, held.memory = (held.memory, None) if held is not None else (None, None)
         for attempt in (1, 2):
             page = await self._held_page(deadline)
             answered = False
+            # The tab is asked again without reloading only on the first attempt, only when
+            # reuse is measured and on, and only with the memory of this very tab (D2).
+            turn.reuse = memory if attempt == 1 and turn.speed.reuse_tab else None
+            turn.keep_memory = True
+            if attempt == 1 and turn.speed.reuse_tab and memory is None:
+                turn.timings.declined = "new tab"
             try:
                 text = await turn.run(page)
                 answered = True
+                if self._held is not None and turn.speed.reuse_tab:
+                    self._held.memory = turn.memory_after
                 return text
             except (_TabGone, PlaywrightError) as exc:
                 # Seen once on the real page (2026-11-26, not reproduced): the first question
@@ -729,8 +830,20 @@ class _Turn:
         events: ProviderEvents,
         deadline: float,
         on_mode: Callable[[ResponseMode], None],
+        *,
+        speed: TurnSpeed | None = None,
+        timings: TurnTimings | None = None,
     ) -> None:
         self.settings = settings
+        self.speed = speed or TurnSpeed()
+        self.timings = timings or TurnTimings(str(request.request_id), str(request.session_id))
+        # Set before `run` by a held conversation: what this tab showed after its last answer.
+        self.reuse: _TabMemory | None = None
+        # After an answer: what the tab shows now, for the next question (D2).
+        self.memory_after: _TabMemory | None = None
+        self.keep_memory = False  # only a held conversation keeps its tab between questions
+        self._new_user: ElementHandle | None = None
+        self._answer_index: int | None = None
         self.on_mode = on_mode
         self.confirmed_mode: ResponseMode | None = None
         self.plan = plan
@@ -747,7 +860,17 @@ class _Turn:
         self.assistants_at_send = 0
         self.sent = False
         self.bound = request.remote_ref is not None
+        self.bound_id: str | None = None
         self.stage = "before sending"
+        # The fast end of this question (D3): only in a mode it was measured in (review
+        # 2026-11-28, finding 1a), and never again in this question once it was early (1b).
+        fast = self.speed.fast_end
+        self.fast: FastEnd | None = (
+            fast if fast is not None and request.mode.value in fast.modes else None)
+        self._fired: tuple[float, str] | None = None  # when the fast end fired, and the digest
+        # When the prompt went out and the reply's first text came: kept across an early end,
+        # so `reply_start` and `reply_end` still measure the whole reply.
+        self._clock: tuple[float, float | None] | None = None
 
     def uncertain_reason(self, exc: BaseException | None = None) -> str:
         kind = f" ({type(exc).__name__})" if exc is not None else ""
@@ -762,8 +885,24 @@ class _Turn:
         # One attempt: a mode confirmed in an earlier tab says nothing about this one
         # (review 2026-11-27, finding 5).
         self.confirmed_mode = None
-        await self.open_conversation(page)
-        await self.apply_mode(page)
+        self.memory_after = None
+        self._clock = self._fired = None
+        self.gave_up = None  # a reason from an earlier attempt never travels with this one
+        timings = self.timings
+        timings.attempts += 1
+        timings.path = "reload"
+        if self.reuse is not None:
+            with timings.phase("reuse_check"):
+                timings.declined = await self.reuse_refusal(page, self.reuse)
+            if timings.declined is None:
+                timings.path = "reuse"
+        if timings.path == "reuse":
+            with timings.phase("guard"):
+                await self.guard(page)  # the checks of the old path still run, all of them
+        else:
+            await self.open_conversation(page)
+        with timings.phase("mode"):
+            await self.apply_mode(page)
         users = self.locators.user_turn.resolve(page)
         assistants = self.locators.assistant_turn.resolve(page)
         users_before = await users.count()
@@ -775,14 +914,33 @@ class _Turn:
         self.assistants_at_send = await assistants.count()
         composer = self.locators.composer.resolve(page).first
         expected = editor_length(self.request.prompt)
-        await self.put_prompt(page, composer, expected)
-        await self.send(composer)
-        self.stage = "while waiting for the answer"
-        text, cut = await self.await_reply(page, composer, users, last_user, assistants)
-        self.stage = "while waiting for the conversation identifier"
-        await self.await_identifier(page)
-        self.still_this_conversation(page)
-        await self.reread_mode(page)
+        with timings.phase("type"):
+            await self.put_prompt(page, composer, expected)
+        with timings.phase("send"):
+            await self.send(composer)
+        while True:
+            self.stage = "while waiting for the answer"
+            text, cut = await self.await_reply(page, composer, users, last_user, assistants)
+            self.stage = "while waiting for the conversation identifier"
+            with timings.phase("identifier"):
+                await self.await_identifier(page)
+            with timings.phase("post"):
+                self.still_this_conversation(page)
+                await self.reread_mode(page)
+            if timings.end != "signal":
+                break
+            with timings.phase("recheck"):
+                early = await self.early_end(page, composer, assistants)
+            if not early:
+                break
+            # The reply went on after the fast end: never the shorter text. Back to waiting,
+            # by the old rule only, and the attempt says so (review 2026-11-28, 1b and 1c).
+            timings.early_endings += 1
+            self.fast = None
+            for name in ("reply_end", "read"):  # measured again when the reply really ends
+                timings.phases_ms.pop(name, None)
+        if self.speed.reuse_tab and self.keep_memory:
+            self.memory_after = await self.remember(page, users, assistants)
         if cut:
             self.events.truncated()
             self.events.warn(
@@ -922,16 +1080,79 @@ class _Turn:
         target = self.plan.url if remote is None else ref.url_for(self.plan.url, remote)
         assert target is not None
         ready_by = min(self.deadline, time.monotonic() + self.settings.copilot_ready_timeout_s)
+        timings = self.timings
         try:
-            await page.goto(target, wait_until="commit", timeout=_ms(ready_by - time.monotonic()))
+            with timings.phase("navigate"):
+                await page.goto(target, wait_until="commit",
+                                timeout=_ms(ready_by - time.monotonic()))
         except PlaywrightError as exc:
             if page.is_closed() or is_target_gone(exc):
                 raise
             # A slow or failed load is judged below, by what the page shows in time.
-        await self.wait_ready(page, ready_by)
-        await self.settle(page, ready_by)
-        await self.wait_history(page, ready_by)
-        await self.guard(page)
+        with timings.phase("ready"):
+            await self.wait_ready(page, ready_by)
+        with timings.phase("settle"):
+            await self.settle(page, ready_by)
+        with timings.phase("history"):
+            await self.wait_history(page, ready_by)
+        with timings.phase("guard"):
+            await self.guard(page)
+
+    # -- asking the held tab again without reloading (change copilot-turn-speed, D2) --------
+
+    async def reuse_refusal(self, page: Page, memory: _TabMemory) -> str | None:
+        """Why this tab must not be asked again without reloading; None when it may.
+
+        Trusted means, all of it, read without touching the page: the same tab that answered
+        this session's last question in this very conversation less than REUSE_MAX_IDLE_S
+        ago; the address names that conversation; the page is the ready chat on the
+        configured host; the turns are exactly those the tab showed after that answer (the
+        same number, the same last question and answer elements, still in the page); no reply
+        is in progress and the editor is empty. Any doubt, including any error of the page,
+        is a refusal: the question then reloads as before."""
+        remote = self.request.remote_ref
+        if memory.page is not page:
+            return "new tab"
+        if remote is None:
+            return "no conversation"
+        if memory.session_id != self.request.session_id or memory.remote_ref != remote:
+            return "other session"
+        if time.monotonic() - memory.at > REUSE_MAX_IDLE_S:
+            return "idle"
+        if self.plan.ref.identifier_in(page.url) != remote or host_of(page.url) != self.host:
+            return "address"
+        try:
+            if await classify(page, self.plan.measurement, self.host) is not PageState.READY:
+                return "page state"
+            users = self.locators.user_turn.resolve(page)
+            assistants = self.locators.assistant_turn.resolve(page)
+            if (await users.count(), await assistants.count()) != (memory.users, memory.assistants):
+                return "turns"
+            if not await users.evaluate_all(SAME_LAST_TURNS_JS, [memory.last_user, memory.answer]):
+                return "turns"
+            stop = self.locators.stop
+            if stop is not None and await stop.resolve(page).count() and \
+                    await stop.resolve(page).first.is_visible():
+                return "busy"
+            if await _editor_length(self.locators.composer.resolve(page).first) != 0:
+                return "busy"
+        except PlaywrightError as exc:
+            if page.is_closed() or is_target_gone(exc):
+                raise
+            return "error"
+        return None
+
+    async def remember(self, page: Page, users: Locator, assistants: Locator) -> _TabMemory | None:
+        """What the tab shows after this answer, for the next question of this session."""
+        remote = self.request.remote_ref or self.bound_id
+        if remote is None or self._new_user is None or self._answer_index is None:
+            return None
+        try:
+            answer = await assistants.nth(self._answer_index).element_handle()
+            return _TabMemory(page, self.request.session_id, remote, await users.count(),
+                              await assistants.count(), self._new_user, answer, time.monotonic())
+        except PlaywrightError:
+            return None
 
     async def wait_history(self, page: Page, ready_by: float) -> None:
         """When reopening, wait (at most HISTORY_WAIT_S) until the conversation shows the
@@ -1114,13 +1335,24 @@ class _Turn:
         """The new reply, once the measured signal holds and its text has not changed for the
         stability window (D8). The new reply is the first assistant turn after the new user
         turn, which is the last user turn and comes after `last_user` (the last one before
-        sending), in document order."""
+        sending), in document order.
+
+        With a measured fast end (change copilot-turn-speed, D3) the reply may end sooner: its
+        signal was seen busy after sending, has been done without interruption for the short
+        confirmation window, and the text has not changed for that window either. The old end
+        stays in the same loop, so a signal that never shows busy, flickers or stays busy
+        leaves the stability window to decide, as before."""
         signal = self.plan.measurement.end_signal
         assert signal is not None
         window_s = max(
             self.plan.measurement.stability_window_ms or 0, signal.window_ms or 0
         ) / 1000
-        sent_at = time.monotonic()
+        fast = self.fast
+        confirm_s = fast.confirm_ms / 1000 if fast is not None else 0.0
+        seen_busy = False
+        done_since: float | None = None  # the fast signal done without interruption since then
+        timings = self.timings
+        sent_at, first_text_at = self._clock or (time.monotonic(), None)
         confirmed = resubmitted = False
         expected = editor_length(self.request.prompt)
         digest, since = None, time.monotonic()
@@ -1132,6 +1364,19 @@ class _Turn:
             self.try_bind(page)
             new_user = await _new_user_turn(users, last_user)
             answer = await _answer_after(assistants, new_user) if new_user is not None else None
+            if fast is not None:
+                # The signal is read before the text: a reply only grows, so text read after
+                # the signal is at least as complete as it was when the signal was read.
+                turn_now = assistants.nth(answer) if answer is not None else None
+                done = await self.fast_signal_done(page, composer, turn_now, fast)
+                # Busy counts only once the reply exists: a signal already busy before
+                # sending (a leftover stop control) says nothing about it (finding 1e).
+                if done is False and turn_now is not None:
+                    seen_busy, done_since = True, None
+                elif done is False:
+                    done_since = None
+                elif done is True and seen_busy and done_since is None:
+                    done_since = time.monotonic()
             if not confirmed:
                 confirmed = new_user is not None or await _editor_length(composer) == 0
                 if (
@@ -1148,14 +1393,80 @@ class _Turn:
                     await self.submit(composer)
             if answer is not None:
                 turn = assistants.nth(answer)
+                read_at = time.monotonic()
                 text, cut = await read_reply(turn, self.code_label)
+                read_s = time.monotonic() - read_at
                 now = _digest(text)
                 if now != digest:
                     digest, since = now, time.monotonic()
+                if first_text_at is None and text.strip():
+                    first_text_at = read_at
+                    timings.add("reply_start", first_text_at - sent_at)
                 stable = time.monotonic() - since >= window_s
+                end = None
                 if text.strip() and stable and await self.signal_met(page, composer, turn):
+                    end = "window"
+                elif (text.strip() and done_since is not None
+                      and time.monotonic() - max(done_since, since) >= confirm_s):
+                    end = "signal"
+                if end is not None:
+                    timings.end = end
+                    self._fired = (time.monotonic(), now) if end == "signal" else None
+                    self._clock = (sent_at, first_text_at)
+                    timings.add("read", read_s)
+                    timings.add("reply_end", time.monotonic() - (first_text_at or sent_at))
+                    self._new_user = new_user
+                    self._answer_index = answer
                     return text, cut
             await asyncio.sleep(POLL_S)
+
+    async def early_end(self, page: Page, composer: Locator, assistants: Locator) -> bool:
+        """After a fast end and the checks that follow it (review 2026-11-28, finding 1b):
+        True when the reply grew or its signal went busy again, so the end was early.
+
+        It watches until `confirm_ms` has passed since the rule fired. The identifier and the
+        checks after the reply already ran in that time, so only what is left of it is
+        waited: about nothing when they took that long, at most `confirm_ms` when they took
+        nothing. A pause longer than twice `confirm_ms` is not seen here: the probe only
+        writes the rule when none of its timed sends had one (D3)."""
+        assert self._fired is not None and self.fast is not None and self._answer_index is not None
+        fired_at, digest = self._fired
+        until = fired_at + self.fast.confirm_ms / 1000
+        turn = assistants.nth(self._answer_index)
+        while True:
+            if await self.fast_signal_done(page, composer, turn, self.fast) is False:
+                return True
+            text, _ = await read_reply(turn, self.code_label)
+            if _digest(text) != digest:
+                return True
+            if time.monotonic() >= until or self.remaining() <= 0:
+                return False
+            await asyncio.sleep(POLL_S)
+
+    async def fast_signal_done(self, page: Page, composer: Locator, turn: Locator | None,
+                               fast: FastEnd) -> bool | None:
+        """The fast-end signal now: True done, False busy, None cannot tell yet (D3)."""
+        loc = self.locators
+        if fast.signal == "stop_hidden":
+            assert loc.stop is not None  # the schema requires it
+            stop = loc.stop.resolve(page)
+            return not (await stop.count() and await stop.first.is_visible())
+        if fast.signal == "done_control":
+            assert loc.response_done_control is not None
+            if turn is None:
+                return None
+            return await loc.response_done_control.resolve(turn).count() > 0
+        if fast.signal == "aria_busy":
+            if loc.busy_region is not None:
+                region = loc.busy_region.resolve(page)
+                if not await region.count():
+                    return None
+                return await region.last.get_attribute("aria-busy") != "true"
+            if turn is None:
+                return None
+            return await turn.get_attribute("aria-busy") != "true"
+        send_ok = loc.send is None or await loc.send.resolve(page).first.is_visible()
+        return bool(send_ok and await composer.is_editable())
 
     async def signal_met(self, page: Page, composer: Locator, turn: Locator) -> bool:
         signal = self.plan.measurement.end_signal
@@ -1181,6 +1492,7 @@ class _Turn:
         identifier = self.plan.ref.identifier_in(page.url)
         if identifier is not None:
             self.bound = True
+            self.bound_id = identifier
             self.events.bound(identifier)
 
     async def await_identifier(self, page: Page) -> None:
@@ -1220,6 +1532,11 @@ NEW_USER_JS = """(turns, previous) => {
   if (turns[last] === previous) return -1;
   return previous.compareDocumentPosition(turns[last]) & Node.DOCUMENT_POSITION_FOLLOWING ? last : -1;
 }"""
+# Whether the tab still ends with the question and answer it showed after its last answer:
+# both still in the page, the question the last user turn, the answer after it (D2).
+SAME_LAST_TURNS_JS = """(turns, [user, answer]) => user.isConnected && answer.isConnected
+  && turns[turns.length - 1] === user
+  && !!(user.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING)"""
 # Index of the first assistant turn after `user` in document order; -1 if none yet.
 ANSWER_AFTER_JS = """(turns, user) => turns.findIndex(
   (t) => user.compareDocumentPosition(t) & Node.DOCUMENT_POSITION_FOLLOWING)"""

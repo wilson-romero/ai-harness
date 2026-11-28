@@ -230,6 +230,36 @@ class EndSignal(_Strict):
         return self
 
 
+STRUCTURAL_SIGNALS = ("stop_hidden", "send_ready", "done_control", "aria_busy")
+FAST_CONFIRM_MIN_MS = 300  # a fast end never confirms in less (three polls of the provider)
+FAST_CONFIRM_MAX_MS = 2000
+
+
+class FastEnd(_Strict):
+    """A positive end of reply, measured by the probe's `speed` step (change
+    copilot-turn-speed, D3): the structural `signal` was seen busy after sending, then stayed
+    done for `confirm_ms` while the reply's text did not change for `confirm_ms` either. The
+    probe writes it only when that rule was never early in `sends` timed sends.
+
+    `modes` are the response modes it was measured in (review 2026-11-28, finding 1a): a
+    question in another mode ends by the old rule. `auto` covers a question without a mode."""
+
+    signal: Literal["stop_hidden", "send_ready", "done_control", "aria_busy"]
+    confirm_ms: int = Field(ge=FAST_CONFIRM_MIN_MS, le=FAST_CONFIRM_MAX_MS)
+    sends: int = Field(ge=1)
+    modes: list[Literal["auto", "quick", "deep"]] = Field(min_length=1, max_length=3)
+    measured_at: str
+
+
+class TabReuse(_Strict):
+    """The held tab can be asked again without reloading (change copilot-turn-speed, D2): the
+    probe's `speed` step asked `questions` follow-up questions that way, each answered whole
+    and in the same conversation."""
+
+    questions: int = Field(ge=1)
+    measured_at: str
+
+
 class LoginShape(_Strict):
     """How an expired login looks: host names of the login redirection and/or an indicator."""
 
@@ -265,6 +295,21 @@ class UiMeasurement(_Strict):
     login: LoginShape | None = None
     # Optional: without it only the automatic mode exists (response-mode D2).
     response_mode: ResponseModeControl | None = None
+    # Optional (change copilot-turn-speed): without them every question reloads its
+    # conversation and a reply ends only after the stability window, as before.
+    fast_end: FastEnd | None = None
+    tab_reuse: TabReuse | None = None
+
+    @model_validator(mode="after")
+    def _fast_end_has_its_control(self) -> Self:
+        """A fast end needs the control its signal looks at."""
+        fast, loc = self.fast_end, self.locators
+        if fast is not None and (
+            (fast.signal == "stop_hidden" and loc.stop is None)
+            or (fast.signal == "done_control" and loc.response_done_control is None)
+        ):
+            raise ValueError(f"fast_end {fast.signal} needs its locator")
+        return self
 
     @model_validator(mode="after")
     def _complete_means_complete(self) -> Self:
