@@ -86,3 +86,9 @@ def test_the_size_cap_is_exact():
 def test_a_bom_is_accepted_and_reported():
     decoded = decode_checked(b"\xef\xbb\xbfhi\n")
     assert decoded.bom and decoded.text == "hi\n"
+
+
+def test_a_nul_inside_the_sniff_window_is_binary_even_in_valid_utf8():
+    with pytest.raises(WorkspaceRefused) as caught:
+        decode_checked(b"plain text\x00more text\n")
+    assert caught.value.code == "binary"

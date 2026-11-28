@@ -175,3 +175,28 @@ def test_a_hard_link_made_between_the_walk_and_the_open_is_caught_on_the_descrip
 
     monkeypatch.setattr(paths_module, "before_open", second_name)
     assert code_of(root, "src/util.py") == "hard_link"
+
+
+def test_a_hard_link_is_refused_while_walking_before_any_open(built, root, monkeypatch):
+    if not built.hard_link:
+        pytest.skip("this file system has no hard links")
+
+    def must_not_open(path: Path) -> None:
+        raise AssertionError("a hard-linked file reached the open")
+
+    monkeypatch.setattr(paths_module, "before_open", must_not_open)
+    assert code_of(root, "notes.txt") == "hard_link"
+
+
+def test_the_open_itself_does_not_follow_a_final_link(root):
+    # Layered under the identity check: where the system has O_NOFOLLOW, opening a link fails
+    # by itself, so a swap is caught even before the descriptor is compared.
+    if not hasattr(os, "O_NOFOLLOW"):
+        pytest.skip("this system has no O_NOFOLLOW; the identity check alone applies")
+    link = root.path / "final-link"
+    try:
+        link.symlink_to(root.path / "src" / "app.py")
+    except OSError:
+        pytest.skip("cannot create symbolic links here")
+    with pytest.raises(OSError):
+        os.close(os.open(link, paths_module.READ_FLAGS))

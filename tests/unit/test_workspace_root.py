@@ -141,3 +141,29 @@ def test_containment_by_identity_when_names_differ(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(root_module, "_resolved", lambda path: path)
     assert refused(str(real), tmp_path / "alias" / "data") == "data_dir"
     assert refused(str(real / "data"), tmp_path / "alias") == "data_dir"
+
+
+def _refused(raw: Path, **kwargs) -> str:
+    with pytest.raises(WorkspaceRefused) as caught:
+        check_root(str(raw), **kwargs)
+    return caught.value.code
+
+
+def test_a_vault_that_does_not_exist_yet_is_still_protected_by_name(tmp_path: Path, monkeypatch):
+    # No identity to compare (the folder is not there, or the system gives none): the name
+    # rule alone must refuse a work folder that would contain the vault later.
+    monkeypatch.setattr(root_module, "_identity", lambda path: None)
+    parent = tmp_path / "projects"
+    parent.mkdir()
+    env = {"HARNESS_VAULT_ROOT": str(parent / "vault-later")}
+    assert _refused(parent, data_dir=tmp_path / "data", environ=env) == "vault"
+
+
+def test_the_name_rule_ignores_case(tmp_path: Path, monkeypatch):
+    # On a case-sensitive system `Projects` and `projects` are two folders and identity does
+    # not tie them; the name rule still refuses (a protected name is protected in every case).
+    monkeypatch.setattr(root_module, "_identity", lambda path: None)
+    folder = tmp_path / "projects"
+    folder.mkdir()
+    env = {"HARNESS_VAULT_ROOT": str(tmp_path / "PROJECTS" / "vault")}
+    assert _refused(folder, data_dir=tmp_path / "data", environ=env) == "vault"
