@@ -78,6 +78,7 @@ REPLY_MAX_NODES = 20_000  # and walk at most this many elements of it
 REPLY_MAX_DEPTH = 64  # and this many levels
 POLL_S = 0.1
 STATE_POLL_S = 0.25
+NOT_READY_READ_S = 1.0  # at most, for what the page showed when it was not ready in time
 STATE_PERSIST_S = 3.0  # a sign-in or guest page must stay that long (redirects pass through)
 SETTLE_S = 2.0  # the page's element count unchanged that long before typing
 RESUBMIT_AFTER_S = 4.0  # nothing left the editor and no turn was added: the key press was lost
@@ -996,14 +997,21 @@ class _Turn:
                  if ready_by >= self.deadline else "HARNESS_COPILOT_READY_TIMEOUT_S")
         timing = (f"waited {now - waited_since:.1f} s, {now - self.started:.1f} s since the "
                   f"request started, ended by {bound}")
+        # Bounded: an element removed between two reads makes Playwright wait for it, and a
+        # busy renderer holds even `count()` (review of windows-parity-3, finding 2). At most
+        # NOT_READY_READ_S and half of what is left before the request's own deadline, so the
+        # rest of the reserve still closes Edge; nothing here may raise instead of the timeout.
+        left = self.started + self.request.timeout_s - now
+        budget = min(NOT_READY_READ_S, max(0.0, left / 2))
         try:
-            editor = self.locators.composer.resolve(page)
-            matched = await editor.count()
-            visible = matched > 0 and await editor.first.is_visible()
-            enabled = visible and await editor.first.is_enabled()
-            users = await self.locators.user_turn.resolve(page).count()
+            async with asyncio.timeout(budget):
+                editor = self.locators.composer.resolve(page)
+                matched = await editor.count()
+                visible = matched > 0 and await editor.first.is_visible()
+                enabled = visible and await editor.first.is_enabled(timeout=budget * 1000)
+                users = await self.locators.user_turn.resolve(page).count()
             where = address(page.url)
-        except PlaywrightError:
+        except Exception:  # noqa: BLE001 - a diagnostic that fails says so and nothing more
             return f"{timing}; the page could not be read"
         shown = ("visible and enabled" if enabled else "visible, not enabled" if visible
                  else "not visible")
