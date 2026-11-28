@@ -93,6 +93,10 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `tests/unit/test_skill_checks.py::test_controls_and_credentials_are_cleaned`
 - `tests/integration/test_architecture_memory.py::test_a_token_in_the_model_output_is_masked_in_what_is_shown_and_written`
 - `tests/browser/test_copilot_provider.py::test_canaries_never_reach_storage`
+- `tests/unit/test_mcp_loop.py::test_a_credential_the_cut_reveals_is_masked_in_what_is_sent`
+- `tests/unit/test_mcp_loop.py::test_a_credential_split_by_the_cut_leaves_no_piece`
+- `tests/unit/test_mcp_loop.py::test_a_turn_the_screen_would_change_is_never_sent`
+- `tests/unit/test_shell_agent.py::test_a_credential_at_the_cut_is_masked_alike_on_screen_and_in_what_is_sent`
 **Control negativo:** `project-memory` 8.2 y 8.3 (archivado); `mcp-gateway` 1.3 y 6.4; `architecture-skills-llm` 4.2; `copilot-web-provider` 6.1; `hardening` 5.1, 5.2 y 5.3 (cada test nuevo visto fallar sobre el código sin corregir); mutación SEC-01 de la tabla.
 **Windows:** la redacción es código puro, el mismo en las dos plataformas; los tests sin marca `edge` de esta fila pasaron en la ejecución de `57c413d` (ver arriba), salvo los que comprueban `0600`/`0700`, que se omiten donde no hay bits de permiso POSIX: en Windows el harness no fija ni comprueba ACL. Los tests de `tests/browser/` (marca `edge`) usan Edge contra el chat sintético local y se omiten donde Edge no se puede lanzar; en Windows no se ejecutaron (NOT RUN). Los tests de `tests/security/test_audit_findings.py` son del 2026-11-27, posteriores a la ejecución en Windows: NOT RUN allí.
 **Límites:** **no cubre lo que escribe la persona:** el texto de `ask` llega al proveedor tal cual y, con el Mock, se guarda en `messages` (`history` y `ask` lo muestran ya redactado). Solo se reconocen formatos conocidos; una contraseña en prosa, una cadena de conexión o un token de formato desconocido pasan tal cual (lo dice el requisito «Límite declarado»); un token de GitLab de más de 300 caracteres de cuerpo tampoco se reconoce. En el log de stderr MCP se quitan las secuencias de escape antes de redactar, pero no otros caracteres invisibles: un carácter de formato metido dentro de una credencial la deja en claro allí (en el vault y en la terminal se quitan antes). Lo que no cubre la redacción del stderr lo enumera `SECURITY.md`. Ningún test comprueba la rotación a `.1`. SQLite no está cifrado y, con el Mock, guarda prompts y respuestas (sintéticos por definición).
@@ -140,7 +144,14 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `openspec/changes/mcp-gateway/specs/tool-policy/spec.md` · Resultados como datos no confiables
 - `openspec/changes/mcp-gateway/specs/tool-policy/spec.md` · Lo que dice el servidor no amplía la política
 - `openspec/changes/code-mode/specs/code-mode/spec.md` · El resultado es para la persona
+- `openspec/changes/code-mode/specs/code-mode/spec.md` · Los resultados vuelven como datos
+- `openspec/changes/code-mode/specs/tool-policy/spec.md` · El bucle de code mode no es recursión
 **Tests:**
+- `tests/unit/test_shell_agent.py::test_a_hostile_result_stays_inside_its_block`
+- `tests/unit/test_shell_agent.py::test_a_plan_inside_a_result_is_never_the_model_s`
+- `tests/unit/test_shell_agent.py::test_a_nonce_injected_by_a_result_is_refused`
+- `tests/unit/test_mcp_loop.py::test_a_hostile_result_cannot_close_the_block_or_pass_for_the_harness`
+- `tests/unit/test_mcp_loop.py::test_the_marker_must_never_appear_inside_the_block`
 - `tests/security/test_note_instructions.py::test_note_with_orders_to_the_harness`
 - `tests/security/test_note_instructions.py::test_note_with_orders_that_reaches_the_limit`
 - `tests/unit/test_memory_context.py::test_forged_marker_in_a_note`
@@ -203,6 +214,7 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `openspec/changes/mcp-gateway/specs/tool-policy/spec.md` · Escrituras denegadas sin aprobación
 - `openspec/changes/mcp-gateway/specs/tool-policy/spec.md` · Lo que dice el servidor no amplía la política
 - `openspec/changes/code-mode/specs/tool-policy/spec.md` · Llamadas de un plan aprobado
+- `openspec/changes/code-mode/specs/code-mode/spec.md` · La lista se ata al leer el plan
 **Tests:**
 - `tests/unit/test_mcp_policy.py::test_each_reason_in_its_order`
 - `tests/integration/test_mcp_cli.py::test_denied_calls_start_no_process`
@@ -212,6 +224,12 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `tests/unit/test_mcp_policy.py::test_undeclared_argument_is_named_in_the_detail`
 - `tests/unit/test_shell_plan.py::test_a_refused_plan_opens_no_box_and_starts_nothing`
 - `tests/unit/test_shell_plan.py::test_the_policy_is_decided_again_when_the_plan_runs`
+- `tests/unit/test_mcp_auto_read.py::test_auto_read_is_valid_only_as_a_boolean_on_a_read`
+- `tests/unit/test_mcp_auto_read.py::test_a_list_changed_after_the_plan_was_read_refuses_the_step`
+- `tests/unit/test_mcp_auto_read.py::test_a_step_after_the_first_is_refused_when_its_entry_changed`
+- `tests/unit/test_mcp_auto_read.py::test_an_argument_is_bounded_only_by_its_declared_type`
+- `tests/unit/test_shell_agent.py::test_a_read_by_rule_with_a_free_text_argument_asks_the_box_in_a_loop`
+- `tests/unit/test_shell_agent.py::test_after_results_were_sent_the_session_says_so_and_plan_needs_bounded_args`
 **Control negativo:** `mcp-gateway` 2.3 (29 fallos con `deny` devolviendo `allowed`) y 2.4; mutaciones SEC-05 de la tabla (cada caso de `test_each_reason_in_its_order` que mata una). Code mode, tramo 2: `code-mode` 4.5 (un plan con una herramienta `write`, no listada o de otro servidor: ninguna caja y `starts.log` vacío).
 **Windows:** los tests de esta fila pasaron en la ejecución de `57c413d` (desde `0.2.1` la clave HMAC ya no se daña y `tests/unit/test_mcp_policy.py` se recoge). La comprobación de que la lista local no la pueden escribir otros es solo POSIX: en Windows no se comprueban ACL. Los tests de `code-mode` 4.x (2026-11-27) son posteriores a la última ejecución en Windows: NOT RUN allí.
 **Límites:** solo con servidores sintéticos de los tests. El servidor MCP propio del harness no existe todavía (`harness-mcp-server`, planificado).
@@ -252,6 +270,8 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `openspec/changes/code-mode/specs/code-mode/spec.md` · Un plan nunca se reenvía ni se repite solo
 - `openspec/changes/code-mode/specs/code-mode/spec.md` · Una respuesta incierta o truncada nunca se analiza
 - `openspec/changes/copilot-turn-speed/specs/copilot-turn-speed/spec.md` · Fin por señal positiva
+- `openspec/changes/code-mode/specs/code-mode/spec.md` · Fin del bucle
+- `openspec/changes/code-mode/specs/code-mode/spec.md` · Registro del bucle
 **Tests:**
 - `tests/integration/test_recovery.py::test_interruption_after_send_leaves_the_request_uncertain`
 - `tests/integration/test_recovery.py::test_killed_process_leaves_the_request_uncertain`
@@ -271,6 +291,12 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `tests/browser/test_copilot_turn_speed.py::test_a_signal_that_flickers_does_not_end_the_reply`
 - `tests/browser/test_copilot_turn_speed.py::test_an_idle_gap_between_two_phases_does_not_cut_the_reply`
 - `tests/browser/test_copilot_turn_speed.py::test_a_late_block_after_an_idle_moment_is_kept`
+- `tests/unit/test_shell_agent.py::test_a_reply_that_did_not_complete_whole_stops_the_loop_unread`
+- `tests/unit/test_shell_agent.py::test_ctrl_c_during_a_turn_stops_the_loop_and_sends_nothing_more`
+- `tests/unit/test_shell_agent.py::test_ctrl_c_while_a_step_runs_stops_the_loop`
+- `tests/unit/test_shell_agent.py::test_a_reply_not_completed_is_never_read_even_with_a_valid_plan_in_it`
+- `tests/unit/test_shell_agent.py::test_a_loop_left_running_is_marked_interrupted_and_never_resumed`
+- `tests/unit/test_shell_agent.py::test_a_loop_left_running_is_marked_interrupted_when_the_conversation_opens`
 **Control negativo:** `copilot-turn-speed` 7.1 (M5–M7: sin ver la página ocupada, sin reiniciar ante un parpadeo o sin mirar el texto, la respuesta sale cortada) y 9.1 (R1–R5: sin la comprobación tras un fin rápido, o con ella a medias, una pausa entre fases o un bloque tardío salen cortados); `skill-engine` 4.3 y 8.1; `architecture-skills-llm` 4.4; mutaciones SEC-07 de la tabla. (`copilot-web-provider` 5.3 tiene recibo pero no anota un control negativo.) Code mode, tramo 2: `code-mode` 4.5b y 4.6 (una respuesta incierta, fallida o truncada no se lee; un plan interrumpido no vuelve a ejecutarse).
 **Windows:** los tests de proceso muerto matan un subproceso real; los tests sin marca `edge` de esta fila pasaron en la ejecución de `57c413d`. Los tests de `tests/browser/` (marca `edge`) usan Edge contra el chat sintético local y se omiten donde Edge no se puede lanzar; en Windows no se ejecutaron (NOT RUN). Los tests de `code-mode` 4.x (2026-11-27) son posteriores a la última ejecución en Windows: NOT RUN allí.
 **Límites:** Copilot, solo contra el chat sintético en la batería; la página real, a mano en macOS. Las llamadas MCP no se reintentan, pero hoy solo se permiten herramientas de lectura. `skill resume --retry-step` repite una pregunta por decisión explícita de la persona (puede duplicarla en la conversación). Sin `fsync` del directorio tras publicar la nota: tras un corte de luz en ese instante la nota puede faltar y `skill resume` pediría aprobarla otra vez (límite 3 del README).
@@ -367,6 +393,9 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `openspec/changes/mcp-gateway/specs/tool-policy/spec.md` · Escrituras denegadas sin aprobación
 - `openspec/changes/approval-buttons/specs/interactive-shell/spec.md` · Nada aprueba al abrirse la caja
 - `openspec/changes/code-mode/specs/code-mode/spec.md` · Aprobación del plan entero ligada a su hash
+- `openspec/changes/code-mode/specs/code-mode/spec.md` · Aprobación en cada turno
+- `openspec/changes/code-mode/specs/code-mode/spec.md` · Consentimiento del bucle
+- `openspec/changes/code-mode/specs/code-mode/spec.md` · Lecturas permitidas por regla
 **Tests:**
 - `tests/unit/test_skill_approval.py::test_approval_reused`
 - `tests/unit/test_skill_approval.py::test_output_changed_after_approving`
@@ -398,6 +427,17 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `tests/unit/test_plan_cli.py::test_ctrl_c_at_the_code_prompt_leaves_the_plan_undecided`
 - `tests/unit/test_mcp_plan_run.py::test_a_plan_whose_lock_is_held_elsewhere_runs_nothing`
 - `tests/unit/test_shell_plan.py::test_the_box_says_each_server_command_is_not_approved`
+- `tests/unit/test_mcp_auto_read.py::test_a_plan_with_one_read_not_by_rule_goes_to_the_box_whole`
+- `tests/unit/test_mcp_auto_read.py::test_harness_auto_read_off_asks_the_box_for_every_plan`
+- `tests/unit/test_mcp_auto_read.py::test_a_command_changed_while_the_box_is_open_refuses_the_plan`
+- `tests/unit/test_mcp_auto_read.py::test_a_plan_recorded_before_010_never_runs`
+- `tests/unit/test_shell_agent.py::test_a_plan_that_is_not_by_rule_asks_the_box_every_turn`
+- `tests/unit/test_shell_agent.py::test_a_plan_not_approved_stops_the_loop`
+- `tests/unit/test_shell_agent.py::test_box_sends_every_plan_of_the_loop_to_the_box`
+- `tests/unit/test_mcp_auto_read.py::test_box_turns_the_rule_off_for_one_question_only`
+- `tests/unit/test_shell_agent.py::test_a_provider_outside_the_machine_asks_once_with_the_exact_text`
+- `tests/unit/test_shell_agent.py::test_a_send_not_approved_sends_nothing_and_stops`
+- `tests/unit/test_shell_agent.py::test_a_send_approved_after_it_expired_sends_nothing`
 **Control negativo:** `skill-engine` 5.1, 5.3, 5.4 y 8.2; `hardening` 5.4 (el aviso de la CLI sin marca: el test falla); `approval-buttons` 7.1 (mutantes M1 a M4 del armado); mutaciones SEC-12 de la tabla (la caducidad en el momento de consumir y el hash de la propuesta, de la revisión independiente). Code mode, tramo 2: `code-mode` 4.5 (cambiar lo ejecutado, lo hasheado o lo mostrado; otra solicitud; dos usos; caducidad: cada uno deniega).
 **Windows:** código puro y SQL; los tests de esta fila pasaron en la ejecución de `57c413d`, salvo `tests/unit/test_skill_approval.py::test_granted_approval_that_expires_while_the_effect_is_busy_is_not_consumed`, añadido en `feature/hardening` (NOT RUN). Los tests de `tests/security/test_audit_findings.py` son del 2026-11-27, posteriores a la ejecución en Windows: NOT RUN allí. Sobre `develop` = `79cde60` (2026-11-27), `tests/unit/test_shell_tui_buttons.py::test_keys_typed_ahead_of_the_box_cannot_approve` falló en cada ejecución: el armado solo por reloj caducaba en esa máquina y un Tab y un Enter llegados después aprobaron (`approval-buttons` D9). Los tests de `tests/unit/test_shell_tui_arming.py`, que reproducen esa traza y una parada del bucle sin Windows, son de `bugfix/windows-parity-2`: NOT RUN allí. Los tests de `code-mode` 4.x (2026-11-27) son posteriores a la última ejecución en Windows: NOT RUN allí.
 **Límites:** unas teclas que el terminal o una sesión remota retengan más de medio segundo y entreguen tras un silencio llegan como teclas nuevas (`approval-buttons` D9). No prueba que haya una persona delante (límite aceptado por Wilson el 2026-11-24; ver la deuda conocida): un programa que maneje la terminal de la persona puede escribir el código, y en la pantalla completa pulsar el botón de aprobación (en `develop` desde `1b460ea`) igual que ella. El aviso puede engañar sobre qué se aprueba solo dentro del contenido marcado: lo aprobado es siempre el hash mostrado. Los tests inyectan una terminal falsa: el camino real con `isatty()` e `input()` no lo ejercita ningún test (no hay `pty` en Windows); lo cubren la demo de Wilson (`skill-engine` 7.7, abierta) y el test por subproceso de que sin terminal se espera (código 3).
@@ -457,6 +497,7 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `openspec/changes/mcp-gateway/specs/mcp-client/spec.md` · Límites de tamaño
 - `openspec/changes/mcp-gateway/specs/mcp-client/spec.md` · Plazos duros
 - `openspec/changes/code-mode/specs/code-mode/spec.md` · Ejecución paso a paso por la pasarela
+- `openspec/changes/code-mode/specs/code-mode/spec.md` · Topes de lo que se envía
 **Tests:**
 - `tests/unit/test_skill_limits.py::test_response_too_large`
 - `tests/unit/test_skill_limits.py::test_run_time_limit`
@@ -482,6 +523,11 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `tests/unit/test_shell_plan.py::test_a_single_hung_step_ends_as_its_own_timeout`
 - `tests/unit/test_shell_plan.py::test_ctrl_c_while_a_step_runs_stops_the_plan_and_its_tree`
 - `tests/unit/test_mcp_plan_prompt.py::test_too_many_tools_or_characters_are_refused`
+- `tests/unit/test_mcp_loop.py::test_the_largest_turn_fits_its_cap`
+- `tests/unit/test_mcp_loop.py::test_a_turn_over_its_cap_is_never_composed`
+- `tests/unit/test_mcp_loop.py::test_a_huge_result_is_cut_in_the_middle_with_a_mark`
+- `tests/unit/test_mcp_loop.py::test_any_other_cap_is_refused_before_anything_is_sent`
+- `tests/unit/test_shell_agent.py::test_the_cap_then_one_closing_turn_whose_reply_is_never_read`
 **Control negativo:** `skill-engine` 2.5 y 6.1; `mcp-gateway` 3.3 y 3.6; `copilot-web-provider` 4.4 (sin el límite de lectura, su test falla); `hardening` 5.5 y 5.7; mutaciones SEC-15 de la tabla. Code mode, tramo 2: `code-mode` 4.6 (primer fallo, plazo total e interrupción).
 **Windows:** los tests de plazos usan márgenes de tiempo: en la ejecución de `57c413d`, `tests/integration/test_mcp_cli.py::test_a_tool_that_never_ends` venció una vez con la máquina cargada y pasó 5 de 5 solo; el resto de los tests sin marca `edge` de esta fila pasaron. Los tests de `tests/browser/` (marca `edge`) usan Edge contra el chat sintético local y se omiten donde Edge no se puede lanzar; en Windows no se ejecutaron (NOT RUN). Los tests de `tests/security/test_audit_findings.py` son del 2026-11-27, posteriores a la ejecución en Windows: NOT RUN allí. Los tests de `code-mode` 4.x (2026-11-27) son posteriores a la última ejecución en Windows: NOT RUN allí.
 **Límites:** SQLite crece sin retención ni purga, y no hay rotación de logs salvo la de una generación (`.1`) de los logs de stderr MCP, que ningún test comprueba (aplazado, proyecto educativo). Con el Mock, la respuesta de `ask` no tiene tope propio (la del Mock es sintética); con Copilot, se leen como mucho 200 000 caracteres, comprobado en la página y otra vez en Python. `memory maintain --dry-run` compara como mucho 100 000 pares de nombres por pasada y avisa al pararse; la búsqueda de encabezados de un paso `validate` sigue siendo cuadrática en el peor caso (deuda conocida 13).

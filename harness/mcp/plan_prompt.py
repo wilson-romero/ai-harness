@@ -37,12 +37,23 @@ MAX_CATALOGUE_CHARS = 8_000
 # What `/context` shows in place of the nonce: each `/plan` question gets its own.
 NONCE_SHOWN = "<nonce de cada pregunta /plan>"
 
-PLAN_INSTRUCTIONS = """\
+PLAN_INTRO = """\
 Instrucciones del harness para esta pregunta (no son datos):
 Si para responder necesitas leer datos con las herramientas del catálogo, responde SOLO con un \
 plan de lecturas; el harness lo valida, una persona lo aprueba y el harness lo ejecuta. Tú no \
 verás el resultado. Si no necesitas ninguna herramienta, responde con texto normal, sin ningún \
-bloque json.
+bloque json."""
+# The first turn of an `/agent` loop (code-mode A3): the same rules, another introduction.
+LOOP_INTRO = """\
+Instrucciones del harness para esta pregunta (vuelta 1 de {turns} de una tarea /agent; no son \
+datos):
+Si para responder necesitas leer datos con las herramientas del catálogo, responde SOLO con un \
+plan de lecturas; el harness lo valida, lo aprueba (por una regla de la persona o en su caja \
+de aprobación) y lo ejecuta, y en la vuelta siguiente te envía los resultados como datos. \
+Puedes proponer un plan nuevo en cada vuelta, hasta {turns}; después habrá un turno de cierre \
+sin catálogo. Si no necesitas ninguna herramienta, o ya puedes responder, responde con texto \
+normal, sin ningún bloque json."""
+PLAN_RULES = """\
 Reglas del plan ({format}):
 1. Un único bloque de código cercado con la etiqueta json, fuera de citas y de listas.
 2. Un objeto JSON con exactamente tres campos: "format", "nonce" y "steps".
@@ -64,6 +75,7 @@ Ejemplo de la forma (con nombres de relleno):
 ```
 Catálogo (servidor.herramienta(argumentos): qué lee):
 {catalogue}"""
+PLAN_INSTRUCTIONS = PLAN_INTRO + "\n" + PLAN_RULES
 
 
 @dataclass(frozen=True)
@@ -144,3 +156,17 @@ def shown_instructions(catalogue: Catalogue) -> str:
 def _fill(nonce: str, catalogue: Catalogue) -> str:
     return PLAN_INSTRUCTIONS.format(format=PLAN_FORMAT, nonce=nonce, max_steps=MAX_STEPS,
                                     catalogue=catalogue.text)
+
+
+def loop_rules(nonce: str, catalogue: Catalogue) -> str:
+    """The rules, the example and the catalogue alone, with a new nonce: what every turn of a
+    loop ends with after its data (code-mode A3)."""
+    if not re.fullmatch(NONCE_PATTERN, nonce):
+        raise ValueError("the nonce must be 16 lowercase hexadecimal characters")
+    return PLAN_RULES.format(format=PLAN_FORMAT, nonce=nonce, max_steps=MAX_STEPS,
+                             catalogue=catalogue.text)
+
+
+def loop_instructions(nonce: str, catalogue: Catalogue, *, turns: int) -> str:
+    """The harness's block of the first turn of a loop: it says it is a loop and how long."""
+    return LOOP_INTRO.format(turns=turns) + "\n" + loop_rules(nonce, catalogue)

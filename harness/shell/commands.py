@@ -52,6 +52,11 @@ class CommandSpec:
         return self.most is None or self.most > 0
 
 
+# code-mode A2: for this one question, every plan goes to the approval box, even one of reads
+# the local list allows by rule (`auto_read`). Only as the first word after the command.
+BOX = Option("--box", TEXT, "every plan of this question asks the box, even reads by rule")
+
+
 TABLE: tuple[CommandSpec, ...] = (
     CommandSpec("help", 0, 0, "/help", "this list"),
     CommandSpec("status", 0, 0, "/status", "session, project, provider and last request"),
@@ -77,9 +82,14 @@ TABLE: tuple[CommandSpec, ...] = (
     CommandSpec("file", 1, 1, "/file PATH",
                 "attach a text file to the next question (it is never stored)",
                 positional=(PATH,)),
-    CommandSpec("plan", 1, None, "/plan QUESTION",
+    CommandSpec("plan", 1, None, "/plan [--box] QUESTION",
                 "ask for a plan of reads from the MCP list; you approve it, then it runs",
-                positional=(TEXT,), full_name_only=True),
+                positional=(TEXT,), options=(BOX,), full_name_only=True),
+    # code-mode A3: a loop that sends the results of each plan back to the provider; only
+    # when HARNESS_LOOP_PROVIDERS names it, and typed in full like /plan.
+    CommandSpec("agent", 1, None, "/agent [--box] QUESTION",
+                "like /plan, but each plan's results go back to the provider, turn by turn",
+                positional=(TEXT,), options=(BOX,), full_name_only=True),
     CommandSpec("mode", 0, 1, f"/mode [{'|'.join(MODES)}]",
                 "the response mode of this session (nothing is sent)", positional=(MODE,)),
     CommandSpec("exit", 0, 0, "/exit", "leave (end of input leaves too)"),
@@ -92,7 +102,8 @@ HELP_HEAD = ("Commands (a line that starts with / is never sent to the provider;
              "with // to ask\na question that begins with /):")
 HELP_TAIL = """\
 Short forms: the start of a command's name is enough when only one command starts so (/sk is
-/skill); the full command is shown (running: ...) before it runs. /plan has no short form.
+/skill); the full command is shown (running: ...) before it runs. /plan and /agent have no
+short form.
 In the full screen, / opens a list of the commands and their arguments: tab or the arrows and
 enter complete, esc closes it; nothing is sent until enter is pressed with the list closed.
 Ctrl+C interrupts a question in progress; it is never resent. Ctrl+C at the approval prompt

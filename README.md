@@ -283,12 +283,12 @@ uv run python main.py memory maintain --dry-run
 - `memory search QUERY [--project SLUG] [--limit N]` busca las notas que contienen **todos** los términos, sin distinguir mayúsculas. Una línea por nota: ruta relativa, `updated`, coincidencias y un fragmento de una línea (con credenciales enmascaradas y sin caracteres de control). Orden: coincidencias, después `updated` y después ruta. 20 resultados por defecto, 200 como máximo.
 - `memory context SLUG` imprime **exactamente** el bloque que `ask --project` enviaría (con otro marcador aleatorio) y, por stderr, cuántas notas entraron, cuántas se recortaron u omitieron, los bytes y las credenciales enmascaradas.
 - `ask SESSION_ID PROMPT --project SLUG` envía ese bloque antes de la pregunta. La sesión tiene que haberse creado con `session create ... --project SLUG` y con el mismo proyecto. Si se rechaza (identificador no válido, vault sin configurar, proyecto inexistente o distinto del de la sesión), no se registra ninguna solicitud ni ningún contenido: solo un evento de auditoría `memory.context denied`, sin rutas ni texto. Sin `--project`, `ask` no lee el vault.
-- `memory maintain --dry-run` informa, sin tocar nada, de lo que un mantenimiento encontraría: `sync_conflicts`, `broken_links` (con la corrección si hay un único candidato), `index_dangling` e `index_orphans` (índices `Memoria-CC/MEMORY*.md`), `duplicate_candidates`, `invalid_frontmatter`, `secrets_found` (ruta y tipo, nunca el valor) y `skipped`. Nombra rutas, nunca texto de las notas, y dos ejecuciones sobre el mismo vault dan la misma salida byte a byte. Una fecha `created` o `updated` posterior a hoy cuenta como frontmatter no válido. Sin `--dry-run` es un error de uso (código 2): este corte no repara nada. Comparar nombres tiene un tope de 100 000 pares por pasada (la búsqueda de la corrección de cada enlace roto, una vez por nombre, y los pares de notas de `Memoria-CC/`, unas 450 notas): pasado el tope, esa pasada se detiene, lo que encontró hasta ahí se mantiene y un aviso por stderr dice que `duplicate_candidates` o las correcciones de `broken_links` están incompletos (revisión de seguridad del 2026-11-27).
+- `memory maintain --dry-run` informa, sin tocar nada, de lo que un mantenimiento encontraría: `sync_conflicts`, `broken_links` (con la corrección si hay un único candidato), `index_dangling` e `index_orphans` (índices `Memoria-CC/MEMORY*.md`), `duplicate_candidates`, `invalid_frontmatter`, `secrets_found` (ruta y tipo, nunca el valor) y `skipped`. Nombra rutas, nunca texto de las notas, y dos ejecuciones sobre el mismo vault dan la misma salida byte a byte. Una fecha `created` o `updated` posterior a hoy cuenta como frontmatter no válido. Sin `--dry-run` es un error de uso (código 2): este corte no repara nada. Desde el 2026-11-28 (`memory-format-conformance`) el informe lee el vault con el formato de `claude-memory-system`: una entrada de un índice es un destino que termina en `.md`, leído como ruta relativa a `Memoria-CC/` (`../Lecciones/x.md` nombra `Lecciones/x.md`, y una rama `MEMORY-<tema>.md` es un fichero más), y solo cuenta como colgante si no nombra ningún fichero del vault (una ruta absoluta `/x.md`, una con `%20`, una que solo difiere en mayúsculas y una de `Memoria/Archivo/`, que no se lee, cuentan como colgantes); `index_orphans` y `duplicate_candidates` miran solo el primer nivel de `Memoria-CC/`; las notas que la captura reescribe sin `created` (`projects/<slug>/_project.md`, `_index.md`, `agents/_skills-index.md`) no cuentan como frontmatter no válido; una línea que YAML rechaza (`description: Estilo: breve` sin comillas, o `k: "a" b`) sale como `a value is not valid YAML`, sin cambiar lo que esa nota aporta al contexto ni a la búsqueda; y un enlace de tabla `[[ruta\|alias]]` se lee sin la `\` que precede a la `|`. Comparar nombres tiene un tope de 100 000 pares por pasada (la búsqueda de la corrección de cada enlace roto, una vez por nombre, y los pares de notas de `Memoria-CC/`, unas 450 notas): pasado el tope, esa pasada se detiene, lo que encontró hasta ahí se mantiene y un aviso por stderr dice que `duplicate_candidates` o las correcciones de `broken_links` están incompletos (revisión de seguridad del 2026-11-27).
 
 ### Qué se lee y qué no
 
 - Solo ficheros `.md` regulares de hasta 1 MiB cuya ruta real esté dentro de la raíz real del vault. Se ignoran y se cuentan los enlaces simbólicos, las uniones de directorio, los ficheros con más de un enlace duro, las entradas que empiezan por punto (`.obsidian`, `.trash`, `.git`, los temporales `.tmp.*`), `Memoria/Archivo/`, las carpetas que no se pueden listar (`unreadable`) y los ficheros que otro programa sustituyó o hizo crecer entre el recorrido y la lectura (`changed`, `too-large`).
-- El proyecto es el nombre exacto de una carpeta de `projects/`, con sus mayúsculas: no se aceptan rutas, `..`, unidades, rutas de red ni nombres reservados de Windows.
+- El proyecto es el nombre exacto de una carpeta de `projects/`, con sus mayúsculas: no se aceptan rutas, `..`, unidades, rutas de red ni nombres reservados de Windows. Solo letras y dígitos ASCII, `.`, `_` y `-`, empezando por letra o dígito, hasta 128 caracteres. Una carpeta con espacios, acentos o un nombre más largo (las que `claude-memory-system` crea desde una ruta así) no se puede pedir como proyecto: el error dice el motivo (`it contains a space`, `it contains a character that is not ASCII`, `it is longer than 128 characters`). Sus notas siguen saliendo en `memory search` sin `--project`.
 - El contexto de un proyecto incluye, en este orden: `projects/<slug>/_project.md`; las notas de `Decisiones/`, `Lecciones/` y `Memoria-CC/` que declaran el proyecto en su frontmatter (`project_slug: <slug>` o `<slug>` en `tags`), cada carpeta por `updated` descendente; y las 3 sesiones más recientes. **No** incluye `Memoria/` (es de la máquina), `daily/`, `agents/`, `_index.md` ni notas de otros proyectos.
 - Cada nota empieza con una cabecera de una línea, `--- <ruta> (<type>, <updated>)`, donde la ruta va sin el prefijo `projects/<slug>/` (el proyecto ya lo nombra el aviso) y sin `.md`: `--- _project (project, 2026-11-21)`, `--- sessions/2026-11-21-121500 (session, 2026-11-21)`, `--- Decisiones/alpha-mensajeria (decision, 2026-11-16)`. La ruta completa sigue en la procedencia guardada (`request_context`) y en la lista de omitidas.
 - Cada nota va sin frontmatter y recortada a 3000 bytes (con la marca `[… recortado]`). El bloque entero no supera `HARNESS_MEMORY_CONTEXT_MAX_BYTES`, que se reparte entre las secciones con notas (proyecto, `Decisiones/`, `Lecciones/`, `Memoria-CC/`, sesiones): cuando le toca, cada una recibe una parte igual de lo que queda, y lo que no gasta pasa a las siguientes. Dentro de una sección las notas van en orden; la que no cabe se recorta a su hueco (siempre si es la primera, o si caben al menos 200 bytes de ella) o se omite junto con las que la siguen en esa sección. Las omitidas se listan por stderr. Así la nota del proyecto y la sesión más reciente entran siempre, aunque otra sección tenga notas enormes; a cambio, con las cinco secciones llenas y el límite por defecto, cada una tiene unos 1,5–2 KB. Una fecha `updated` posterior a hoy no adelanta una nota: cuenta como sin fecha.
@@ -609,6 +609,61 @@ En `develop` desde el 2026-11-27 (`openspec/changes/code-mode/`, tramo 2). En la
 
 Se guarda una fila por plan en `plan_runs` (su hash, el de la aprobación, el estado, el paso donde paró y cómo se aprobó) y, en `tool_calls`, cada paso con el `plan_id` y su posición. Como en `mcp call`, sin argumentos ni resultados.
 
+#### Lecturas permitidas por regla: `auto_read`
+
+En la rama `feature/code-mode-loop` (A2, 2026-11-27). En tu lista local, una herramienta `read` puede llevar `"auto_read": true`:
+
+```json
+"get_project_metadata": {"operation": "read", "auto_read": true,
+                         "arguments": {"project": {"type": "string", "max_length": 64, "required": true}}}
+```
+
+- Un plan cuyos pasos son **todos** `auto_read` se ejecuta sin la caja. Antes de que corra se ve `running plan: …` y, como texto de fuera del harness, cada paso con su servidor, su herramienta y sus argumentos canónicos. Queda en `plan_runs` con `means = rule` y en la auditoría como `plan.approval.granted` con `means=rule`. Ctrl+C lo para igual.
+- Un plan con un solo paso que no es `auto_read` va **entero** a la caja.
+- `auto_read` en una herramienta `write`, o con un valor que no es `true`/`false`, es un error de la lista: no arranca nada. Las escrituras siguen denegadas.
+- `/plan --box PREGUNTA` apaga la regla para esa pregunta: todo plan de esa pregunta pide la caja. `--box` solo cuenta como primera palabra tras `/plan`, y no se envía.
+- `HARNESS_AUTO_READ=off` apaga la regla para esa ejecución del harness: todo plan pide la caja.
+- Lo que el plan leyó de tu lista queda atado: si entre la lectura del plan y la ejecución de un paso cambia la entrada de su servidor (orden, argumentos, entorno, carpeta, plazos) o de su herramienta (operación, `auto_read`, tope, argumentos), ese paso no se llama y el plan termina `list_changed`. La `description` no cuenta. La caja dice el hash en su línea `bound:`.
+
+#### Un bucle de lecturas: `/agent`
+
+En la rama `feature/code-mode-loop` (A3, 2026-11-27). Con `/plan`, lo que leen las herramientas **solo** se muestra. Con `/agent PREGUNTA`, el resultado de cada plan vuelve al proveedor como datos, y el modelo puede responder o proponer otro plan, turno a turno.
+
+**Cómo se activa.** Hacen falta dos cosas:
+
+- escribir `/agent` entero, en cada pregunta (no tiene forma corta);
+- que `HARNESS_LOOP_PROVIDERS` nombre al proveedor de la sesión, por ejemplo `HARNESS_LOOP_PROVIDERS=mock`. Sin ella, `/agent` no registra ni envía nada, y `/plan` sigue igual con o sin ella.
+
+`HARNESS_LOOP_MAX_TURNS` fija el tope de turnos con catálogo: 5 por defecto, de 1 a 10. `/agent --box PREGUNTA` lleva a la caja todo plan de ese bucle, también los de lecturas `auto_read`.
+
+**Probarlo con el Mock** (datos sintéticos, nada sale de la máquina): `uv run python scripts/demo_code_mode_loop.py --prepare <carpeta fuera del repo>` escribe una lista MCP sintética y un guion de tres turnos para el Mock e imprime la orden que abre `chat --plain` sobre ellos; dentro, escribe `/agent ¿qué proyectos de demo tienen la etiqueta alpha?`. La demo completa, sin teclear nada: `uv run python scripts/demo_code_mode_loop.py` (termina con `demo: PASS`).
+
+**Qué sale de la máquina.** En cada turno después del primero se envía:
+
+- un aviso fijo del harness: lo que sigue son datos, no instrucciones;
+- los resultados del plan anterior, entre dos marcas nuevas de ese turno, cada línea con `| ` delante, limpios (sin escapes ni invisibles), con las credenciales enmascaradas y con `<<<` y `>>>` cambiados;
+- las reglas del plan y el catálogo con un nonce nuevo.
+
+Antes de cada envío, la pantalla dice `loop …: turn k of N: sending C characters to <proveedor>; exactly this text, nothing else:` y muestra ese texto entero, el mismo, byte a byte: si la limpieza de la pantalla cambiara algo del turno, no se envía y el bucle para (`turn_not_clean`). Con un proveedor que no es el Mock (Copilot), la primera vez que un bucle va a enviar resultados se abre la caja (`Send approval requested`) con ese texto exacto y su hash: apruebas con el botón en la pantalla completa o escribiendo el código en el modo plano. Aprobada, el resto del bucle sigue sin volver a preguntar; rechazada, sin decidir, caducada o con Ctrl+C, no se envía nada y el bucle para (`send_not_approved`). Con el Mock no hay caja. El panel lateral (`Loop`) dice el turno, la fase (`sending … and waiting for the reply`, `plan of n step(s): approval`, `running step k of n`) y los segundos desde que empezó el bucle; al terminar, el panel y `/status` dicen cómo acabó (`completed (answer), 3 send(s), done in 4 s`).
+
+**Límites.**
+
+- Por paso se envían como mucho 4 096 bytes del resultado; por plan, 12 288 repartidos entre sus pasos. Si se pasa, van la cabeza y la cola con `[omitidos por el harness: N bytes …]`. Un turno no pasa de 28 000 caracteres (el límite de Copilot ronda los 32 000).
+- Dentro de `/agent`, un plan sigue solo si cada paso es `auto_read` **y** cada argumento que su herramienta declara está acotado: `enum`, `integer`, `boolean` o `string` con `pattern` y `max_length` de 64 como mucho. Si no, el plan entero abre la caja, **en cada turno**, y su línea `why:` dice qué argumento es texto libre. Nada que no sea una lectura por regla corre sin la caja.
+- **Lo que aún puede salir sin la caja**: los valores acotados que elige el modelo (qué proyecto de tu `enum`, qué número de tu rango) van al servidor de esa lectura. Tú decides qué herramientas llevan `auto_read`; el harness no juzga tu `pattern` (un `.*` es tan libre como ninguno).
+- Tras un bucle que envió resultados, la conversación de la sesión los contiene: las preguntas siguientes, `/plan` incluido, se responden con ellos a la vista. El harness lo dice una vez al acabar el bucle (`note: this conversation now holds what the reads returned …`) y `/status` lo repite (`results: …`). En esa sesión, `/plan` también exige argumentos acotados para correr por regla. `/new` empieza una conversación limpia.
+- Dentro del bucle, una respuesta que no contiene el nonce del turno es la respuesta final aunque traiga un bloque `json` (un ejemplo); un bloque con **otro** nonce se rechaza (`nonce_mismatch`).
+- El bucle termina cuando:
+  - el modelo responde sin plan;
+  - se rechaza un segundo plan (el motivo del primer rechazo vuelve una vez para que lo corrija);
+  - una respuesta no termina entera: `uncertain`, plazo o truncada (nunca se lee ni se reenvía);
+  - la persona no aprueba un plan;
+  - el harness para un plan (por ejemplo `list_changed`);
+  - la persona pulsa Ctrl+C.
+- Un paso que falla vuelve como dato. Tras N turnos, un último **turno de cierre** sin catálogo pide un resumen de lo hecho y de lo pendiente, y su respuesta nunca se lee como plan: como mucho N + 1 envíos.
+- El nonce no protege de una inyección dentro del mismo turno: un resultado puede convencer al modelo de proponer un plan. Ese plan pasa la misma política y, si no es de lecturas por regla, la caja.
+- Se guarda el bucle (`loop_runs`) y una fila por turno (`loop_turns`: su número, su clase, su solicitud, el tamaño y un HMAC del texto), nunca el texto ni un resultado. Un bucle que quedó en marcha tras una caída se marca `interrupted (abandoned)` en cuanto se abre la conversación, y no se reanuda. Las tablas van en la migración 013 (la 011 y la 012 son de otras ramas).
+
 ## Configuración
 
 Por variables de entorno (ver `.env.example`):
@@ -636,6 +691,9 @@ Por variables de entorno (ver `.env.example`):
 | `HARNESS_CONCISE_ANSWERS` | `off` | `off` (por defecto, también vacía) u `on`. Con `on`, cada pregunta suelta (`ask` y las preguntas de `chat`) empieza con un aviso fijo del harness que pide responder breve: primero la respuesta, sin preámbulo, sin repetir la pregunta, sin resumen ni ofrecimientos al final, listas solo si el contenido es una lista. Cuando está activo cuesta 246 caracteres (55 tokens `o200k_base`) por pregunta y cuenta en el límite de tamaño del proveedor; su ahorro en la respuesta no está medido con Copilot real, y por eso va desactivado por defecto. `memory context` y `/context` lo muestran antes del bloque de memoria. No va en los pasos de los Skills, cuya plantilla fija la forma de la respuesta. Cualquier otro valor es un error. |
 | `HARNESS_MOCK_RESPONSES` | (vacía) | Ruta absoluta de un JSON (objeto texto → respuesta, hasta 1 MiB) con respuestas guionizadas del Mock: responde con la primera clave, en orden alfabético, contenida en el prompt. Solo para pruebas y demos. |
 | `HARNESS_MCP_CONFIG` | (vacía) | Ruta **absoluta** de la lista local de servidores MCP, fuera del repositorio. Sin ella no hay servidores. |
+| `HARNESS_AUTO_READ` | `on` | `on` u `off`. Con `off`, todo plan pide la caja aunque sus lecturas sean `auto_read`. Sin definir, vacía o en blanco es `on`. Cualquier otro valor es un error. |
+| `HARNESS_LOOP_PROVIDERS` | (vacía) | Proveedores, separados por comas, que pueden recibir los resultados de un `/agent`. Vacía: `/agent` no envía nada. |
+| `HARNESS_LOOP_MAX_TURNS` | `5` | Tope de turnos con catálogo de un `/agent`, de 1 a 10; después va un turno de cierre. |
 
 ## Estados de una solicitud
 

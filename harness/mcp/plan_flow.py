@@ -13,7 +13,10 @@ The steps, in order, and what stops each:
 4. The plan's approval (D9): the box (buttons) on the full screen, the typed code elsewhere,
    with the harness's header and the steps written by the harness from the validated plan;
    the approval is bound to the plan's id, its hash (which covers the nonce), the session and
-   the question's request, and expires.
+   the question's request, and expires. A plan whose steps are all reads the local list
+   allows by rule (`auto_read`, code-mode A2) is approved by that rule instead, unless the
+   rule is switched off (`HARNESS_AUTO_READ=off`): no box, a `running plan:` line with every
+   step first, and `means = rule` in the record and the audit.
 5. The steps run in a worker thread (`plan_run.execute_plan`), which Ctrl+C stops through a
    `StopSignal`; each step's result is shown as text from outside the harness, under a line
    the harness writes. Nothing goes back to the provider: exactly one question per `/plan`.
@@ -35,12 +38,14 @@ from typing import Protocol
 from uuid import UUID
 
 from harness.core.contracts import RequestStatus
+from harness.core.errors import UsageError
 from harness.core.service import SessionService
 from harness.mcp.config import LoadedConfig
 from harness.mcp.plan import NoPlan, Plan, Refusal, read_plan_reply
 from harness.mcp.plan_prompt import build_catalogue, plan_instructions
 from harness.mcp.plan_run import (
     BUTTON_QUESTION,
+    RESULTS_SHOWN_ONLY,
     SHOWN_MAX_BYTES,
     ApprovedPlan,
     PlanReport,
@@ -51,6 +56,7 @@ from harness.mcp.plan_run import (
     new_plan_id,
     plan_proposal,
     record_plan,
+    record_rule,
     record_verdict,
 )
 from harness.memory.context import ProjectContext, new_nonce
@@ -114,6 +120,48 @@ class PlanSetting:
     ttl_s: int
     confirm_rejection: bool = True
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
+    # A2: reads the local list allows by rule run without the box; False (`HARNESS_AUTO_READ
+    # =off`) asks the box for every plan, as before A2.
+    auto_read: bool = True
+    # A3: the provider the results go back to, in a loop (`/agent`); None: they are only
+    # shown (`/plan`). It only words the box and the report: the loop sends them itself.
+    loop_to: str | None = None
+    # A3: told (k, n) in the conversation's thread just before step k of n is called; the
+    # progress of a loop for the side panel. It only observes.
+    progress: Callable[[int, int], None] | None = None
+    # A3-12 (owner decision of 2026-11-28): where reads by rule also need every argument
+    # bounded (`config.free_argument`), in the harness's words: inside `/agent`, or in a
+    # session whose conversation already holds tool results (A3-13). None: `/plan` as in A2.
+    bounded_only: str | None = None
+
+
+AUTO_READ_ENV = "HARNESS_AUTO_READ"
+
+
+def auto_read_setting(environ: Mapping[str, str]) -> bool:
+    """`HARNESS_AUTO_READ`: `on` (the default, also when unset, empty or blank) lets the
+    reads the local list marks `auto_read` run by rule; `off` asks the box for every plan, for
+    this whole run of the harness. Anything else (`On`, `0`, `no`) is refused before anything
+    is sent."""
+    raw = (environ.get(AUTO_READ_ENV) or "").strip()
+    if not raw:  # unset, empty or blank: the default, said so (review of fa6b6d1, finding 8)
+        return True
+    if raw not in ("on", "off"):
+        raise UsageError(f"{AUTO_READ_ENV} must be on or off; nothing was sent")
+    return raw == "on"
+
+
+BOX_OPTION = "--box"
+
+
+def box_option(words: tuple[str, ...]) -> tuple[bool, tuple[str, ...]]:
+    """`/plan --box QUESTION` (A2-4): whether the first word asks the box for every plan of
+    this one question, and the words of the question. `--box` alone is no question."""
+    if words and words[0] == BOX_OPTION:
+        if len(words) == 1:
+            raise UsageError(f"{BOX_OPTION} needs a question after it; nothing was sent")
+        return True, words[1:]
+    return False, words
 
 
 async def run_plan(request: PlanRequest, *, service: SessionService, conn, view: PlanView,
@@ -149,14 +197,31 @@ async def run_plan(request: PlanRequest, *, service: SessionService, conn, view:
         view.say(f"warning: plan refused: {reading.reason}{step}: {reading.detail}; nothing "
                  "was run, and nothing is asked again")
         return PlanOutcome("refused")
-    return await _approve_and_run(reading, request, response.request_id, config, service, conn,
-                                  view, terminal, setting)
+    return await approve_and_run(reading, request, response.request_id, config, conn, view,
+                                 terminal, setting)
 
 
-async def _approve_and_run(plan: Plan, request: PlanRequest, request_id: UUID,
-                           config: LoadedConfig, service: SessionService, conn,
-                           view: PlanView, terminal: Terminal,
-                           setting: PlanSetting) -> PlanOutcome:
+RULE_HEADER = ("running plan: {plan_id}, {steps} step(s), every one a read your local MCP list "
+               "allows by rule (auto_read){bounded}; no approval is asked (--box, or "
+               "HARNESS_AUTO_READ=off, asks for every plan). Ctrl+C stops it")
+BOUNDED_RULE = " and whose every argument is bounded (an enum, a number, a yes/no or a pattern)"
+
+
+def free_text_reason(plan: Plan, where: str) -> str | None:
+    """Why a plan of reads by rule goes to the box all the same (A3-12), or None."""
+    step = plan.first_free
+    if step is None:
+        return None
+    position = plan.steps.index(step) + 1
+    return (f"step {position} ({step.server}.{step.tool}) takes free text in argument "
+            f"{step.free_argument}; {where}, a read runs by rule only when every argument is "
+            "bounded, so this whole plan asks you")
+
+
+async def approve_and_run(plan: Plan, request: PlanRequest, request_id: UUID,
+                          config: LoadedConfig, conn, view: PlanView, terminal: Terminal,
+                          setting: PlanSetting) -> PlanOutcome:
+    """Approve one validated plan (by the rule, or by the person in the box) and run it."""
     plan_id = new_plan_id()
     deadline = deadline_s(plan, config)
     proposal = plan_proposal(plan, session_id=request.session_id, request_id=request_id,
@@ -165,7 +230,27 @@ async def _approve_and_run(plan: Plan, request: PlanRequest, request_id: UUID,
     expires = record_plan(conn, plan_id=plan_id, session_id=request.session_id,
                           request_id=request_id, plan=plan, approval_hash=approval_hash,
                           deadline=deadline, now=setting.clock(), ttl_s=setting.ttl_s)
-    header = approval_header(proposal, plan, approval_hash, expires, deadline)
+    by_rule = setting.auto_read and plan.by_rule
+    why = (free_text_reason(plan, setting.bounded_only)
+           if by_rule and setting.bounded_only is not None else None)
+    if why is not None:
+        by_rule = False  # the box's header says why (its `why:` line)
+    if by_rule:
+        # Every step was `auto_read` when the plan was read; the executor checks it again
+        # against the list as it is when it runs (A2).
+        if record_rule(conn, plan_id=plan_id, plan=plan, now=setting.clock()) != "granted":
+            # Its row was no longer pending: nothing is run on a rule that did not hold.
+            view.say(f"plan: {plan_id} could not be approved by rule; nothing was run")
+            return PlanOutcome("not_approved")
+        bounded = BOUNDED_RULE if setting.bounded_only is not None else ""
+        view.result(RULE_HEADER.format(plan_id=plan_id, steps=len(plan.steps), bounded=bounded),
+                    proposal.content)
+        return await _run(plan, plan_id, request, request_id, approval_hash, deadline, view,
+                          setting)
+    results = (RESULTS_SHOWN_ONLY if setting.loop_to is None else
+               f"sent back to {setting.loop_to} as data in the next turn of this /agent loop; "
+               "the exact text is shown before it goes")
+    header = approval_header(proposal, plan, approval_hash, expires, deadline, results, why)
     # The box shows the very content that was hashed, line by line (D7).
     shown = view.approval(header, proposal.content.split("\n"))
     if terminal.is_interactive():
@@ -174,7 +259,7 @@ async def _approve_and_run(plan: Plan, request: PlanRequest, request_id: UUID,
                          button_question=BUTTON_QUESTION)
     else:
         verdict = Verdict("undecided")
-    interrupted = _withdraw_pending_interrupt()
+    interrupted = withdraw_pending_interrupt()
     if interrupted:
         verdict = Verdict("undecided")  # whatever was typed after the Ctrl+C grants nothing
     state = record_verdict(conn, plan_id=plan_id, verdict=verdict,
@@ -194,16 +279,30 @@ async def _approve_and_run(plan: Plan, request: PlanRequest, request_id: UUID,
         return PlanOutcome("not_approved")
     view.say(f"plan: {plan_id} approved; running {len(plan.steps)} step(s) in order, "
              f"{deadline} s at most (Ctrl+C stops it)")
+    return await _run(plan, plan_id, request, request_id, approval_hash, deadline, view,
+                      setting)
+
+
+async def _run(plan: Plan, plan_id: str, request: PlanRequest, request_id: UUID,
+               approval_hash: str, deadline: int, view: PlanView,
+               setting: PlanSetting) -> PlanOutcome:
     approved = ApprovedPlan(plan, plan_id, request.session_id, request_id, approval_hash)
+    on_step = None
+    if setting.progress is not None:
+        here, progress = asyncio.get_running_loop(), setting.progress
+
+        def on_step(position: int, total: int) -> None:  # in the worker thread
+            here.call_soon_threadsafe(progress, position, total)
+
     report = await run_in_thread(functools.partial(
         execute_plan, setting.data_dir, approved, setting.load_config, setting.environ,
-        clock=setting.clock,
+        clock=setting.clock, on_step=on_step,
     ))
-    show_report(view, report, len(plan.steps), deadline)
+    show_report(view, report, len(plan.steps), deadline, loop_to=setting.loop_to)
     return PlanOutcome("ran", report)
 
 
-def _withdraw_pending_interrupt() -> bool:
+def withdraw_pending_interrupt() -> bool:
     """True if this task was cancelled while the code prompt blocked it (Ctrl+C under
     `asyncio.run` only marks the task: `input()` keeps waiting). The cancellation is withdrawn
     so that the caller's cleanup (closing the provider) is not cut by it on its first await;
@@ -246,7 +345,8 @@ def step_header(result: StepResult, total: int) -> str:
     return f"{word}: {where} {result.status}: {result.detail}"
 
 
-def show_report(view: PlanView, report: PlanReport, total: int, deadline: int) -> None:
+def show_report(view: PlanView, report: PlanReport, total: int, deadline: int, *,
+                loop_to: str | None = None) -> None:
     for result in report.steps:
         header = step_header(result, total)
         if result.text:
@@ -258,7 +358,10 @@ def show_report(view: PlanView, report: PlanReport, total: int, deadline: int) -
                      "shown]")
     where = f"plan {report.plan_id}"
     run = sum(r.status != "not_run" for r in report.steps)
-    if report.status == "completed":
+    if report.status == "completed" and loop_to is not None:
+        view.say(f"plan: {report.plan_id} completed: {run} of {total} step(s); the results go "
+                 f"back to {loop_to} in the next turn, as shown before it is sent")
+    elif report.status == "completed":
         view.say(f"plan: {report.plan_id} completed: {run} of {total} step(s); the results "
                  "are only on this screen, nothing was sent to the provider")
     elif report.status == "interrupted":
