@@ -176,19 +176,21 @@ def test_note_truncated(context, vault):
 
 
 def test_note_headers_are_short_and_keep_path_type_and_date(vault):
-    # prompt-economy D2 (2026-11-26): 527 -> 384 characters for these seven headers.
+    # prompt-economy D2 (2026-11-26): 527 -> 384 characters for these seven headers; 383 since
+    # memory-format-conformance (2026-11-28): the fixture's lesson has the real type `lesson`,
+    # one letter shorter than the `leccion` it had.
     block = build_context(vault.resolve(), "demo-alpha", 8192, nonce=FIXED_NONCE).text
     headers = [line for line in block.split("\n") if line.startswith("--- ")]
     assert headers == [
         "--- _project (project, 2026-11-21)",
         "--- Decisiones/alpha-mensajeria (decision, 2026-11-16)",
-        "--- Lecciones/2026-11-10-reintentos-idempotentes (leccion, 2026-11-10)",
+        "--- Lecciones/2026-11-10-reintentos-idempotentes (lesson, 2026-11-10)",
         "--- Memoria-CC/project_alpha-integraciones (project, 2026-11-15)",
         "--- sessions/2026-11-21-121500 (session, 2026-11-21)",
         "--- sessions/2026-11-20-111500 (session, 2026-11-20)",
         "--- sessions/2026-11-19-101500 (session, 2026-11-19)",
     ]
-    assert len("\n".join(headers)) == 384
+    assert len("\n".join(headers)) == 383
     # The shown path maps back to the vault path exactly (the stored provenance).
     included = build_context(vault.resolve(), "demo-alpha", 8192).included
     assert header_paths(block) == [note.relative for note in included]
@@ -353,6 +355,11 @@ def test_leftover_budget_lengthens_a_truncated_note(vault):
     write_note(vault, "projects/demo-alpha/_project.md", "p" * 2500, type="project")
     write_note(vault, "Decisiones/alpha-grande.md", "d" * 2900, project_slug="demo-alpha",
                updated="2026-11-22")
+    # The premise is sessions that leave budget unused. Since memory-format-conformance the
+    # fixture's sessions have the capture's real layout (about 1 KB each), so the test writes
+    # three short ones itself instead of relying on the fixture's size (2026-11-28).
+    for name in ("2026-11-19-101500", "2026-11-20-111500", "2026-11-21-121500"):
+        write_note(vault, f"projects/demo-alpha/sessions/{name}.md", "s", type="session")
     limit = 4096
     context_obj = build_context(vault.resolve(), "demo-alpha", limit)
     assert len(context_obj.text.encode("utf-8")) > limit - 16  # nothing left on the table
