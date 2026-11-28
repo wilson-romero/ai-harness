@@ -1,0 +1,14 @@
+{
+  "trigger": {"css": "#synthetic-mode-trigger"},
+  "options": {
+    "auto": {"role": "menuitemradio", "name": "Synthetic automatic", "exact": true},
+    "quick": {"role": "menuitemradio", "name": "Synthetic brisk", "exact": true},
+    "deep": {"role": "menuitemradio", "name": "Synthetic pondering", "exact": true}
+  },
+  "labels": {
+    "auto": "Synthetic automatic",
+    "quick": "Synthetic brisk",
+    "deep": "Synthetic pondering"
+  },
+  "readback": "checked_option"
+}

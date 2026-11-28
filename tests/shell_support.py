@@ -157,6 +157,7 @@ def make_conversation(
     environ: Mapping[str, str] | None = None,  # `/plan`: the MCP servers' environment
     mcp_config=None,  # `/plan`: a callable giving the allowlist
     clock=None,  # `/plan`: the approval's clock
+    deep_timeout_s: float | None = None,  # response-mode D6: a `deep` question's deadline
 ) -> tuple[Conversation, SessionService, object]:
     provider = provider if provider is not None else CountingProvider()
 
@@ -166,7 +167,7 @@ def make_conversation(
         return provider
 
     service = SessionService(conn, data_dir, factory, "mock", timeout_s,
-                             answer_notice=answer_notice)
+                             answer_notice=answer_notice, deep_timeout_s=deep_timeout_s)
 
     def memory() -> MemorySettings:
         if vault is None:

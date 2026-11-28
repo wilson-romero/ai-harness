@@ -29,6 +29,7 @@ HARNESS_VARS = [
     "HARNESS_DATA_DIR",
     "HARNESS_PROVIDER",
     "HARNESS_REQUEST_TIMEOUT_S",
+    "HARNESS_DEEP_REQUEST_TIMEOUT_S",
     "HARNESS_MOCK_BEHAVIOR",
     "HARNESS_MOCK_DELAY_MS",
     # Never inherit a real Copilot URL or the real dedicated profile into a test.

@@ -340,6 +340,36 @@ Comprobaciones tras las correcciones (macOS arm64, `caffeinate -i`):
 - La tanda `-m edge` **no se ejecutó** para estas correcciones, como pidió la revisión: ninguna toca el proveedor de Copilot ni Edge. El último recibo de Edge es el de `15ea6b0` (arriba).
 - `openspec validate --all --strict`: 27 passed, 0 failed. `check_public_safety.py`: `PASS (483 file(s))`. `check_sec_matrix.py`: `PASS (15 rows, 169 tests)`. `scripts/demo_code_mode.py`: código 0, `demo: PASS`.
 
+### Merge de `develop` = `0b04f94` (`response-mode`, 2026-11-27)
+
+Hubo conflictos en 7 ficheros; en todos se conservaron las dos conductas:
+- `harness/core/service.py`: `_ask_locked` lleva `notice_name` y `set_mode`. El tamaño se comprueba con la parte de cada aviso, luego `check_mode`, y el modo se fija solo después de las comprobaciones que rechazan antes de registrar.
+- `harness/providers/mock.py`: `{{plan_nonce}}` en las respuestas guionizadas y la marca del modo en las genéricas.
+- `harness/shell/commands.py`: `/plan` (`full_name_only`) y `/mode` (0 o 1 argumento, valores completados).
+- Las guardas de los tests:
+  - `test_shell_input.py`: las plantillas `/mode {}` y `/plan {}`;
+  - `test_shell_parser.py`: las dos órdenes;
+  - `test_shell_tui_completion.py`: 13 entradas;
+  - `test_storage.py`: versiones `[1..9]` y `migrate(conn) == [7, 8, 9]`.
+
+Tests nuevos:
+- `test_storage.py::test_a_database_at_008_upgrades_to_009_and_keeps_its_rows`;
+- `test_shell_parser.py::test_with_mode_and_plan_their_prefixes_run_nothing` (`/p`, `/pl`, `/pla` y `/m`);
+- `test_shell_plan.py::test_plan_after_mode_deep_asks_in_deep_and_runs_the_plan_as_ever`: el Mock tarda 0,6 s, más que el plazo normal de 0,3 s. El modo llega al Mock, hay una sola llamada, los dos modos quedan registrados y el plazo del plan es aparte;
+- `test_shell_plan.py::test_mode_alone_never_plans`.
+
+`tests/shell_support.py::make_conversation` gana `deep_timeout_s`, opcional y aditivo.
+
+Mutantes:
+- M38, `ask_plan` con el plazo normal: lo mata el test de `deep` (la pregunta queda `uncertain`);
+- M39, `ask_plan` forzado a `auto`: lo mata el mismo test (el Mock recibe `auto`).
+
+Comprobaciones (macOS arm64, `caffeinate -i`):
+- Tanda `-m "not edge and not copilot"`: código 0, 2366 passed, 191 deselected en 404,30 s (segunda ejecución).
+  - La primera ejecución dio un fallo: `test_response_mode.py::test_a_database_of_migration_007_opens_unchanged` esperaba `migrate(conn) == [8]` y ahora se aplican 008 y 009. Era una guarda de versiones de `develop`: pasa a `[8, 9]`, con una nota, y las demás aserciones del test no cambian.
+- La tanda `-m edge` **no se ejecutó**: esta rama no cambia el código del proveedor que trae el merge. El coordinador la ejecuta en `develop`.
+- `openspec validate --all --strict`: 28 passed. `check_public_safety.py`: `PASS (511 file(s))`. `check_sec_matrix.py`: `PASS (15 rows, 169 tests)`. `scripts/demo_code_mode.py`: código 0, `demo: PASS`.
+
 ## 5. Tramo 3 · Sonda y medición con Copilot real (unos 12 envíos del presupuesto de 100)
 
 - [ ] 5.1 Sonda sin herramientas: un bloque `json` sintético de 80 líneas, comparado byte a byte. 1–2 envíos.

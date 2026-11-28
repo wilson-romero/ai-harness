@@ -426,7 +426,7 @@ Decisiones tomadas al construir `/plan`. Completan D8 a D12; donde cambian algo,
 - **Por qué.** `approvals` exige un `run_id` de `skill_runs`, y un plan no es un Skill. Una tabla propia evita una clave falsa.
 - **Alternativas rechazadas.**
   - Reutilizar `approvals` con un `skill_run` ficticio: mezcla dos máquinas de estados.
-- **Impacto.** `tests/unit/test_storage.py` espera la tabla y la versión 9. Al mergear `response-mode` quedan 1–9 sin hueco.
+- **Impacto.** `tests/unit/test_storage.py` espera la tabla y la versión 9. Al mergear `response-mode` quedan 1–9 sin hueco (hecho el 2026-11-27; un test sube una base en 008 a 009).
 
 ### T2-5. El ejecutor: su hilo, su conexión, su bloqueo
 
@@ -460,7 +460,7 @@ Decisiones tomadas al construir `/plan`. Completan D8 a D12; donde cambian algo,
 
 ### T2-7. `/plan` se escribe entero
 
-- **Qué.** `CommandSpec.full_name_only`. `resolve_name` nunca resuelve un prefijo a una orden así, y el parser dice «`/pla` is not a command; `/plan` is typed in full». La ayuda y el autocompletado la ofrecen igual. `/mode` no existe en esta rama. Cuando llegue será otra orden: no llama a `read_plan`.
+- **Qué.** `CommandSpec.full_name_only`. `resolve_name` nunca resuelve un prefijo a una orden así, y el parser dice «`/pla` is not a command; `/plan` is typed in full». La ayuda y el autocompletado la ofrecen igual. `/mode` no existía en esta rama al construirla. Desde el merge de `response-mode` (T2-10) es otra orden: no llama a `read_plan`.
 - **Por qué.** D9: un plan solo se pide cuando la persona escribe `/plan`.
 - **Impacto.** `harness/shell/commands.py`, `harness/shell/parser.py`.
 
@@ -479,6 +479,16 @@ Decisiones tomadas al construir `/plan`. Completan D8 a D12; donde cambian algo,
 - **Las etiquetas del plazo.** El plazo era exactamente la suma de los presupuestos, así que un paso que gastaba el suyo competía con él y terminaba como `deadline` del plan (tres de tres ejecuciones). Con 10 s de gracia termina como `timeout` de ese paso. Bajo el tope de 300 s las etiquetas aún pueden diferir: un plan cuyos presupuestos suman más de 300 s termina `deadline` aunque la culpa sea de un paso.
 - **La orden de arranque no se aprueba.** La caja muestra una línea del harness por servidor distinto: «`<server>` is started by the command in your local MCP list; that command is not part of this approval». Va en la cabecera, fuera de lo hasheado.
   - Se eligió frente a un hash corto de la entrada: el ejecutor no lo comprobaría, y la caja sugeriría una atadura que no existe hasta A2.
+
+### T2-10. `/plan` y el modo de respuesta (merge de `develop` = `0b04f94`, 2026-11-27)
+
+- **Qué.** La pregunta de `/plan` es una pregunta más de la sesión:
+  - usa su modo (`auto`, `quick` o `deep`) y registra en su solicitud el modo pedido y el confirmado;
+  - en `deep` toma el plazo de las preguntas en `deep` (`HARNESS_DEEP_REQUEST_TIMEOUT_S`).
+  - El plazo del plan es aparte: la suma de los presupuestos de sus pasos más la gracia.
+  - `ask_plan` no pasa ni `timeout_s` ni `set_mode`. `/mode` no envía nada ni pide un plan.
+- **Prefijos con las dos órdenes.** `/p`, `/pl` y `/pla` no ejecutan nada y dicen que `/plan` se escribe entero. `/m` es ambiguo y nombra `/memory` y `/mode`. `/mo` es `/mode`.
+- **Impacto.** Ninguno en el código de `/plan`: el merge conserva `notice_name` junto a `set_mode` en `_ask_locked`. El Mock conserva el `{{plan_nonce}}` de las respuestas guionizadas junto a la marca del modo en las genéricas.
 
 ### Requisitos para los tramos siguientes (revisión independiente, 2026-11-27)
 

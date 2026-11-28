@@ -21,6 +21,8 @@ from pathlib import Path
 from harness.shell.commands import (
     BY_NAME,
     INPUT_PATH,
+    MODE,
+    MODES,
     PATH,
     PROJECT,
     PROJECT_OR_NAME,
@@ -44,8 +46,8 @@ MAX_PROJECTS = 500
 MAX_SKILLS = 100
 MAX_SESSIONS = 100
 
-COMMAND, OPTION, PROJECT_ITEM, SESSION_ITEM, SKILL_ITEM, INPUT_ITEM = (
-    "command", "option", "project", "session", "skill", "input")
+COMMAND, OPTION, PROJECT_ITEM, SESSION_ITEM, SKILL_ITEM, INPUT_ITEM, MODE_ITEM = (
+    "command", "option", "project", "session", "skill", "input", "mode")
 FOLDER, FILE, LINK = "folder", "file", "link"
 
 
@@ -276,6 +278,11 @@ def _for(takes: str | None, spec: CommandSpec, start: int, word: str, args: list
         return Suggestions(start, word, ranked, path=word if one_input else None)
     if takes == PATH:
         return Suggestions(start, word, (), path=word)
+    if takes == MODE:
+        if args:
+            return NONE  # /mode takes one value at most
+        items = [Item(mode, "response mode", MODE_ITEM) for mode in MODES]
+        return Suggestions(start, word, tuple(rank(word, items)))
     return NONE
 
 

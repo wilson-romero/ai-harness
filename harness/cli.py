@@ -13,6 +13,7 @@ from pathlib import Path
 from harness.config import Settings
 from harness.core.answer_style import with_notice
 from harness.core.contracts import RequestStatus, Session
+from harness.core.response_mode import ResponseMode, describe_mode
 from harness.core.errors import (
     HarnessError,
     MemoryNotConfigured,
@@ -69,6 +70,10 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("prompt")
     ask.add_argument(
         "--project", default=None, help="send the memory of this project with the question"
+    )
+    ask.add_argument(
+        "--mode", default=None, choices=[mode.value for mode in ResponseMode],
+        help="set the session's response mode (kept for its next questions) and ask",
     )
 
     history = commands.add_parser("history", help="show the history of a session")
@@ -169,6 +174,7 @@ def _run(args: argparse.Namespace) -> int:
             settings.provider,
             settings.request_timeout_s,
             answer_notice=settings.answer_notice,
+            deep_timeout_s=settings.deep_request_timeout_s,
         )
         service.recover()
         recover_runs(conn, settings.data_dir)
@@ -191,9 +197,9 @@ def _run(args: argparse.Namespace) -> int:
                 service.deny_project_question(args.session_id)
                 raise
             _context_summary(context)
-            return _ask(service, args.session_id, args.prompt, context)
+            return _ask(service, args.session_id, args.prompt, context, mode=args.mode)
         if args.command == "ask":
-            return _ask(service, args.session_id, args.prompt)
+            return _ask(service, args.session_id, args.prompt, mode=args.mode)
         return _history(service, args.session_id)
     finally:
         conn.close()
@@ -215,13 +221,16 @@ def _ask(
     session_id: str,
     prompt: str,
     context: ProjectContext | None = None,
+    *,
+    mode: str | None = None,
 ) -> int:
-    # Last-resort bound on the whole question: the deadline, then the browser's own cleanup
-    # time, then a margin. It fires even if the event loop is blocked (harness/core/watchdog.py).
-    limit_s = service.timeout_s + BROWSER_SHUTDOWN_S + WATCHDOG_MARGIN_S
+    # Last-resort bound on the whole question: the deadline (that of `deep`, the longest),
+    # then the browser's own cleanup time, then a margin. It fires even if the event loop is
+    # blocked (harness/core/watchdog.py).
+    limit_s = service.longest_timeout_s + BROWSER_SHUTDOWN_S + WATCHDOG_MARGIN_S
     with Watchdog(limit_s, "the question"):
         try:
-            response = asyncio.run(_ask_quietly(service, session_id, prompt, context))
+            response = asyncio.run(_ask_quietly(service, session_id, prompt, context, mode))
         finally:
             gc.collect()  # unreferenced browser futures report now, to the quiet handler
     for warning in response.warnings:
@@ -239,14 +248,18 @@ def _ask(
 
 
 async def _ask_quietly(
-    service: SessionService, session_id: str, prompt: str, context: ProjectContext | None
+    service: SessionService,
+    session_id: str,
+    prompt: str,
+    context: ProjectContext | None,
+    mode: str | None = None,
 ):
     """`service.ask` with the browser runner's handler: an error Playwright leaves behind after
     the browser went away is not printed after the result (harness/browser/runner.py)."""
     from harness.browser.runner import quiet_handler
 
     asyncio.get_running_loop().set_exception_handler(quiet_handler)
-    return await service.ask(session_id, prompt, context)
+    return await service.ask(session_id, prompt, context, mode=mode)
 
 
 def _history(service: SessionService, session_id: str) -> int:
@@ -262,7 +275,9 @@ def _history(service: SessionService, session_id: str) -> int:
             content = "(content not stored)"
         else:
             content = safe_foreign_text(entry.content).text  # as `ask` prints it (F-03)
-        print(f"[{entry.request_status}] {entry.role}: {content}")
+        mode = describe_mode(entry.requested_mode, entry.confirmed_mode)
+        state = entry.request_status if mode is None else f"{entry.request_status}, {mode}"
+        print(f"[{state}] {entry.role}: {content}")
     return EXIT_OK
 
 
@@ -272,10 +287,12 @@ def _history_without_content(service: SessionService, session: Session) -> int:
     print(f"session {session.session_id} ({session.provider}, {session.status})")
     print(f"remote conversation: {session.remote_ref or '(none yet)'}")
     requests = service.requests(session)
+    modes = service.request_modes(session)
     if not requests:
         print("No requests.")
     for request_id, status, started_at in requests:
-        print(f"[{status}] {request_id} {started_at}")
+        mode = describe_mode(*modes.get(request_id, (None, None)))
+        print(f"[{status}] {request_id} {started_at}" + (f" {mode}" if mode else ""))
     return EXIT_OK
 
 

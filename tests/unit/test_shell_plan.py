@@ -254,6 +254,34 @@ def test_read_plan_is_called_only_for_the_reply_to_plan(conn, data_dir, mcp, mon
     assert _plans(conn) == [("not_run", "undecided", None, "undecided", None)]
 
 
+def test_plan_after_mode_deep_asks_in_deep_and_runs_the_plan_as_ever(conn, data_dir, mcp):
+    """Merge of response-mode (2026-11-27): a `/plan` question is a question of the session,
+    in its mode. `/mode deep` sends nothing and plans nothing; the `/plan` that follows asks
+    once, in `deep` (the mode reaches the Mock and both modes are recorded), and takes the
+    deep deadline: the Mock answers after 0.6 s, past the plain 0.3 s. The plan's own deadline
+    is separate, and the flow is unchanged."""
+    from harness.core.contracts import ResponseMode
+
+    provider = scripted_mock(plan_reply(ALPHA, BETA), delay_ms=600)
+    terminal, _ = _run(conn, data_dir, mcp, provider, ["/mode deep", PLAN_LINE], [CODE],
+                       timeout_s=0.3, deep_timeout_s=10)
+    assert provider.calls == 1 and provider.modes == [ResponseMode.DEEP]
+    assert rows(conn, "SELECT status, requested_mode, confirmed_mode FROM requests") == [
+        ("completed", "deep", "deep")]
+    assert len(terminal.questions) == 1  # one approval, for the /plan only
+    assert mcp.calls() == ["call get_project_metadata"] * 2
+    assert _plans(conn) == [("completed", "consumed", "code", None, None)]
+    (deadline,) = rows(conn, "SELECT deadline_s FROM plan_runs")[0]
+    assert deadline == 2 * (5 + 5) + 10  # the steps' budgets and the grace, not the 10 s
+
+
+def test_mode_alone_never_plans(conn, data_dir, mcp):
+    provider = scripted_mock(plan_reply(ALPHA))
+    terminal, _ = _run(conn, data_dir, mcp, provider, ["/mode deep", "/mode"])
+    assert provider.calls == 0 and terminal.questions == [] and mcp.starts() == 0
+    assert _plans(conn) == [] and rows(conn, "SELECT COUNT(*) FROM requests") == [(0,)]
+
+
 def test_plan_has_no_short_form(conn, data_dir, mcp):
     provider = scripted_mock(plan_reply(ALPHA))
     terminal, _ = _run(conn, data_dir, mcp, provider,

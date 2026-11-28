@@ -9,6 +9,11 @@ from harness.core.contracts import LLMRequest
 from harness.core.errors import InvalidInput
 
 
+class ModeUnavailable(InvalidInput):
+    """The provider cannot set this response mode now (response-mode D1). Nothing was sent,
+    and nothing is recorded: the message says why and what to do."""
+
+
 class ProviderError(Exception):
     """The provider reported that it could not process the request.
 
@@ -75,6 +80,12 @@ class LLMProvider(Protocol):
         A provider may also accept a keyword argument `events` (a `ProviderEvents`) and a
         method `check(prompt)`, a validation without effects that the service calls before
         anything is recorded. Both are optional: the Mock has neither.
+
+        Response modes (response-mode D1), also optional: a method `check_mode(mode)`, without
+        effects, that raises `ModeUnavailable` when the provider cannot set that mode (without
+        it only `auto` is accepted), and a keyword argument `on_mode(mode)` with which `ask`
+        reports the mode it confirmed for `request.mode`: before sending, and again if the
+        provider sees it change during the answer.
         """
         ...
 
