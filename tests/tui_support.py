@@ -14,7 +14,7 @@ from pathlib import Path
 
 from textual.widgets import Static
 
-from harness.shell.tui import HarnessApp, TuiTerminal
+from harness.shell.tui import ApprovalScreen, HarnessApp, TuiTerminal
 from harness.storage.database import open_database
 from tests.shell_support import CountingProvider, make_conversation
 
@@ -75,6 +75,18 @@ class Tui:
                 await pilot.pause(0.02)
             else:  # the app is leaving: Pilot cannot pause it any more
                 await asyncio.sleep(0.02)
+
+    async def approval_box(self, pilot, timeout: float = 10.0) -> ApprovalScreen:
+        """The approval box, once it has been painted (`shown`): its widgets are mounted.
+
+        The screen is the box as soon as it is pushed, before its children are composed; a
+        query on it then raises NoMatches (seen on a loaded Windows machine, 2026-11-27)."""
+        def shown() -> bool:
+            screen = self.app.screen
+            return isinstance(screen, ApprovalScreen) and screen.shown
+
+        await self.until(pilot, shown, timeout)
+        return self.app.screen  # type: ignore[return-value]
 
     async def ready(self, pilot) -> None:
         await self.until(pilot, self.terminal.waiting_for_line)

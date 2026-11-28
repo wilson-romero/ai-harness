@@ -126,11 +126,71 @@
     - `openspec validate --all --strict`: 22 de 22;
     - public-safety: PASS en cada commit (hook).
 
-## 7. Demo
+## 7. Segunda ejecución en Windows (2026-11-27, `develop` = `79cde60` y `34eb55d`) (D9)
 
-- [ ] 7.1 Demo (Wilson, macOS): con el Mock, `/skill architecture-memory` en la pantalla completa (pasos en el informe del change).
+Wilson ejecutó `develop` en Windows 11. Dos hallazgos son de esta caja: `test_keys_typed_ahead_of_the_box_cannot_approve` fallaba en cada ejecución, y los casos `[120x40]`, `[100x30]` y, sobre `34eb55d`, `[80x24]` de `tests/unit/test_shell_tui_grid.py` fallaban con `NoMatches '#reject'` / `'#approval-confirm'` bajo carga (pasan solos). Rama `bugfix/windows-parity-2`.
+
+- [x] 7.1 Armado que no depende de la velocidad de la máquina (D9). Hecho: los botones se habilitan tras `ARM_S` sin entrada contado desde el primer pintado, cada entrada sin armar reinicia la cuenta, y una entrada leída antes del armado nunca actúa. Cambios en `tui.py` solo en `ProposalArea`, `ApprovalButton` y `ApprovalScreen`.
+  - Oráculo: `tests/unit/test_shell_tui_arming.py` (24 casos, reloj de prueba en `ApprovalScreen.clock`, eventos con su hora de lectura entregados por `App.post_message` como hace el driver):
+    - la traza de Windows reproducida (tres ejecuciones y la combinación «teclas hasta +601 ms, Tab +530, Enter +602»): pendiente;
+    - silencio y luego Tab+Enter a 0,6 y 2 s, en una ráfaga y una a una: aprueba una vez;
+    - teclas o clic leídos a 0 y 0,4 s y procesados tras armar a 0,6 s, en una ráfaga y uno a uno: pendiente; los mismos leídos después del armado: aprueban;
+    - una entrada sin armar retrasa el armado exactamente `ARM_S` desde ella;
+    - el reloj de la caja es el de los eventos.
+  - Recibo (2026-11-27, macOS arm64, Python 3.14.8). Antes del cambio, `test_keys_read_before_a_late_arming_never_act`, que solo usa la API anterior (`_arm()`), falla: la caja se cierra y aplica (`isinstance(Screen(id='_default'), ApprovalScreen)` es falso). Es el fallo de Windows, sin Windows. Con el cambio: `test_shell_tui_arming.py` 24 passed; `test_shell_tui_buttons.py` pasa sin tocar ninguna aserción (41 passed entre los dos ficheros).
+  - Controles por mutación (`harness/shell/tui.py` mutado, restaurado tras cada uno):
+    - M1, sin el corte por hora de lectura: 9 failed (los 8 casos «leído antes, procesado después» y la reproducción);
+    - M2, sin reiniciar el silencio: 6 failed (las 4 trazas de Windows y los 2 casos a 0,4 s);
+    - M3, un Click que no exige su MouseDown: 4 failed (los casos de clic);
+    - M4, el ratón sin juzgar en la caja: 4 failed (los casos de clic: Textual rehace el evento con hora nueva).
+- [x] 7.2 Los tests esperan a que la caja esté pintada. Causa: Textual pone la pantalla en la pila antes de componerla, y el hilo del núcleo la empuja mientras Pilot espera a la pantalla anterior; la comprobación `isinstance(app.screen, ApprovalScreen)` era cierta con la caja aún sin widgets.
+  - Hecho: `Tui.approval_box()` (`tests/tui_support.py`) espera a `shown`. Se usa en `_approval` (`test_shell_tui.py`, del que dependen `test_shell_tui_buttons.py` y la traza), en `_open` (`test_shell_tui_grid.py`, todos los tamaños), en `test_shell_tui_blocks.py` y en `test_keys_typed_ahead_of_the_box_cannot_approve`. Comprobado por grep: `test_shell_tui_replies.py` y `test_shell_tui_styles.py` no abren la caja.
+  - Oráculo: `test_the_box_is_waited_for_until_its_widgets_exist` (80×24, 100×30, 120×40). La caja tarda 0,3 s en componerse y se empuja como lo hace el núcleo (`open_approval`); justo después, la consulta da `NoMatches`, y `approval_box` espera hasta tener `#reject` y `#approval-confirm`.
+  - Recibo (2026-11-27, macOS): 16 passed en `test_shell_tui_grid.py`. Control negativo: con `approval_box` reducido a la espera anterior (`isinstance` solo), 3 failed con `NoMatches '#reject'` y `NoMatches '#approval-confirm'`, los dos errores de Windows; restaurado, pasa.
+- [x] 7.4 Baterías de la rama, una vez cada una con `caffeinate -i`, sobre `934557e` (2026-11-27, macOS arm64, Python 3.14.8). Oráculo: código 0 en cada tanda.
+  - `-m "not edge and not copilot"`: 1949 passed en 332,13 s, código 0;
+  - `-m edge`: 156 passed en 1185,13 s, código 0, ninguno repetido;
+  - después, `openspec validate --all --strict` → 25 passed, 0 failed; `scripts/check_sec_matrix.py` → `sec-matrix: PASS (15 rows, 137 tests)`; `public-safety: PASS (452 file(s))`.
+  - Estas cifras valen también para `hardening` 8.1 y `copilot-web-provider` 9.1.
+- [x] 7.5 Revisión independiente de la rama (2026-11-27, sobre `65781e3` = `b4ee1ac` + `develop` `893694a`). H1, H3 y H4 se sostienen. Hallazgos en D9, corregidos con un test visto en rojo antes de cada arreglo, con el mismo reloj de prueba:
+  - (1) MEDIO. Con el bucle detenido, la caja se armaba mientras la persona seguía escribiendo. El temporizador corría primero con el silencio contado desde el pintado; las teclas leídas durante la parada se descartaban sin reiniciar la cuenta, y Tab y Enter leídos después aprobaban. Arreglo: una entrada leída antes del armado desarma la caja, y el silencio se cuenta desde la hora de lectura de la última entrada.
+    - Oráculo: `test_a_stall_then_a_burst_across_the_arming_approves_nothing` (8 casos: parada de 0,7 s y de 2 s, ráfaga que acaba antes o sigue después, teclas o ratón). Tras procesar las teclas la caja está desarmada, no se arma a «última lectura + 0,49 s» y sí a «+ 0,5 s», y la aprobación sigue pendiente.
+    - También `test_a_click_pressed_before_a_late_arming_never_presses_even_if_it_rearms`: el botón baja antes de la parada y sube después de rearmarse.
+  - (2) BAJO. La confirmación de Reject solo miraba la hora de proceso. Arreglo: la pregunta desarma y se arma con la misma regla; desaparece `confirm_opened`.
+    - Oráculo: `test_the_confirmation_ignores_input_read_just_after_it_appeared` (Tab y Enter leídos a +10 ms y procesados a +0,6 s: pendiente) y el control positivo `test_the_confirmation_accepts_input_after_its_silence`.
+  - (3) BAJO. Huecos de los tests:
+    - `test_a_paste_restarts_the_silence`;
+    - `test_each_widget_of_the_box_filters_input_read_before_the_arming`, para `#approve`, `#reject` y la propuesta: cada filtro, directamente;
+    - el reloj de prueba sella ahora todo mensaje de Textual (`textual.message._time`), así que el Click que fabrica la aplicación lleva hora de prueba, sea cual sea el tiempo de encendido de la máquina.
+  - (4) BAJO, del lanzador de Edge: ver `copilot-web-provider` 9.3.
+  - Recibo (2026-11-27, macOS arm64, Python 3.14.8):
+    - antes de los arreglos, 12 failed: los 8 casos de la parada, la confirmación y los 3 filtros por widget;
+    - después, `test_shell_tui_arming.py` + `test_shell_tui_buttons.py` + `test_shell_tui_grid.py` → 71 passed;
+    - todos los `tests/unit/test_shell_tui*.py`, `test_portability.py` y `test_edge_launch_errors.py` → 240 passed;
+    - de paso, un temporizador de Textual con intervalo 0 lanza `ZeroDivisionError` (`timer.py:120`): con espera 0 se usa `call_later`.
+  - Mutantes sobre `test_shell_tui_arming.py` (38 tests en ese momento):
+    - M1, sin corte por hora de lectura: 21 failed;
+    - M2, sin reiniciar el silencio: 15 failed;
+    - M4, el ratón sin juzgar en la caja: 4 failed;
+    - M5, descartar sin desarmar: 11 failed;
+    - M6, silencio desde la hora de proceso: 4 failed;
+    - M7, la pregunta sin desarmar: 1 failed;
+    - M8, Paste fuera de `_deciding`: 1 failed;
+    - M9, sin filtro en la propuesta: 1 failed;
+    - M10, sin filtro en los botones: 2 failed.
+    - M3, un Click sin exigir su MouseDown, sobrevivía: con el desarmado, un MouseUp leído antes también desarma y el Click encuentra el botón deshabilitado. Se añadió el caso en que el botón sube después de rearmarse: con M3, 1 failed; sin M3, pasa.
+  - Baterías sobre `7dd9894` (los arreglos, con `develop` `893694a` dentro), una vez cada una con `caffeinate -i`: `-m "not edge and not copilot"` 2070 passed en 377,92 s, código 0; `-m edge` 156 passed en 1563,70 s, código 0, ninguno repetido; `openspec validate --all --strict` 26 passed; `sec-matrix: PASS (15 rows, 138 tests)`; `public-safety: PASS (461 file(s))`.
+- [ ] 7.3 Confirmación en Windows (no es puerta). En PowerShell, en la rama:
+  - `uv run pytest tests/unit/test_shell_tui_arming.py tests/unit/test_shell_tui_buttons.py -v` → todo pasa, también con la máquina cargada;
+  - `uv run pytest tests/unit/test_shell_tui_grid.py tests/unit/test_shell_tui_blocks.py tests/unit/test_shell_tui.py -v`, tres veces, y la batería completa `uv run pytest -m "not edge and not copilot"` → ningún `NoMatches`;
+  - Estado: **NOT RUN**.
+
+## 8. Demo
+
+- [ ] 8.1 Demo (Wilson, macOS): con el Mock, `/skill architecture-memory` en la pantalla completa (pasos en el informe del change).
   - Qué comprobar:
     - Enter al abrir no hace nada;
+    - si se sigue escribiendo cuando la caja aparece, los botones no se habilitan hasta medio segundo después de la última tecla (D9);
     - con una propuesta larga, Approve espera al final;
     - Tab y Enter aprueban;
     - en otra ejecución, Reject → Back la deja pendiente;

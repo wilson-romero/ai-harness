@@ -148,7 +148,7 @@ async def test_keys_typed_ahead_of_the_box_cannot_approve(tmp_path):
         prompt = tui.app.query_one("#prompt", Input)
         prompt.value = SKILL_LINE
         await pilot.press("enter", "tab", "enter", "tab", "enter", "space", "enter")
-        await tui.until(pilot, lambda: isinstance(tui.app.screen, ApprovalScreen))
+        await tui.approval_box(pilot)
         await pilot.press("tab", "enter")
         await pilot.pause(0.2)
         box = _box(tui)

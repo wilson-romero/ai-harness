@@ -181,6 +181,46 @@ async def test_a_lock_error_that_is_not_busy_is_retried_then_raised_async(tmp_pa
     assert time.monotonic() - started >= 0.5
 
 
+def _windows_open(monkeypatch):
+    """`os.open` as Windows answers it (second Windows run, 2026-11-27): an existing
+    directory opened with O_CREAT | O_EXCL is 'permission denied', not 'exists'."""
+    import errno
+    import os
+
+    from harness.storage import private
+
+    real = os.open
+
+    def opened(path, flags, mode=0o777, *args, **kwargs):
+        if flags & os.O_EXCL and os.path.isdir(path):
+            raise PermissionError(errno.EACCES, "Permission denied", str(path))
+        return real(path, flags, mode, *args, **kwargs)
+
+    monkeypatch.setattr(private.os, "open", opened)
+
+
+def test_a_lock_error_that_is_not_busy_is_retried_then_raised_where_open_says_denied(
+        tmp_path, monkeypatch):
+    _windows_open(monkeypatch)
+    (tmp_path / "locks" / "broken.lock").mkdir(parents=True)
+    lock = NamedLock(tmp_path, "broken")
+    started = time.monotonic()
+    with pytest.raises(sqlite3.OperationalError):
+        lock.acquire(wait_s=0.6)
+    assert time.monotonic() - started >= 0.5
+
+
+async def test_a_lock_error_that_is_not_busy_is_retried_then_raised_where_open_says_denied_async(
+        tmp_path, monkeypatch):
+    _windows_open(monkeypatch)
+    (tmp_path / "locks" / "browser.lock").mkdir(parents=True)
+    lock = NamedLock(tmp_path, "browser")
+    started = time.monotonic()
+    with pytest.raises(sqlite3.OperationalError):
+        await lock.acquire_within(0.6, poll_s=0.1)
+    assert time.monotonic() - started >= 0.5
+
+
 def test_second_process_waits_for_the_named_lock_and_gets_it(tmp_path):
     holder = waiter = None
     try:

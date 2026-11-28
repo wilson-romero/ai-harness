@@ -735,7 +735,7 @@ async def test_a_box_or_the_palette_ends_browsing(tmp_path):
         assert prompt.browsing
         tui.app.open_approval(["hash: synthetic"], ["propuesta sintética"], "0" * 64,
                               "Approve?")
-        await tui.until(pilot, lambda: isinstance(tui.app.screen, ApprovalScreen))
+        await tui.approval_box(pilot)
         await pilot.pause(0.1)
         assert not prompt.browsing
         tui.app.close_approval()
