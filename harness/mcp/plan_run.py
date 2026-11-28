@@ -41,7 +41,7 @@ from uuid import UUID, uuid7
 
 from harness.core.errors import HarnessError
 from harness.mcp.audit import PlanLink, args_key, recover_stale
-from harness.mcp.config import LoadedConfig
+from harness.mcp.config import RESERVED_SERVER_NAMES, LoadedConfig
 from harness.mcp.gateway import COMPLETED, DENIED, TIMEOUT, CallReport, call_tool, server_log
 from harness.mcp.plan import PLAN_FORMAT, Plan, PlanStep, plan_hash
 from harness.mcp.policy import canonical_json, entry_sha256, parse_arguments
@@ -147,7 +147,10 @@ def approval_header(proposal: Proposal, plan: Plan, approval_hash: str, expires_
         f"  request:  {proposal.step} (the /plan question)",
         f"  plan:     {proposal.run_id}, {len(plan.steps)} step(s), every one a read of the "
         "local MCP list",
-        *(f"  server:   {server} is started by the command in your local MCP list; that "
+        *(f"  server:   {server} is the harness's own work folder of this session; nothing "
+          "is started, and the folder is bound with the entries below" if server in
+          RESERVED_SERVER_NAMES else
+          f"  server:   {server} is started by the command in your local MCP list; that "
           "command is not part of this approval" for server in servers),
         f"  bound:    the list's entries of these steps as they are now (sha256 "
         f"{plan.entries_sha256[:16]}); if one changes before the run, nothing runs",

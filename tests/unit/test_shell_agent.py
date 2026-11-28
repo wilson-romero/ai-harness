@@ -672,6 +672,7 @@ def test_a_loop_left_running_is_marked_interrupted_and_never_resumed(conn, data_
                             ("completed", "answer", 1, 5, 0)]
     assert provider.calls == 1
     assert re.search(r"loop: completed \(answer\), 1 send\(s\), done in \d+ s\n"
+                     r"workspace: -\n"  # workspace-tools B2
                      r"memory: 0 note\(s\) in the last question\nattachment: -\n"
                      r"> <end of input>\nend of input: leaving the conversation$", terminal.text)
 

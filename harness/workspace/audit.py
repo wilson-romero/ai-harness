@@ -12,7 +12,7 @@ import hashlib
 import hmac
 import sqlite3
 
-from harness.mcp.audit import new_call_id
+from harness.mcp.audit import PlanLink, new_call_id
 from harness.storage.database import transaction, utc_now
 from harness.workspace.codes import CODES, OK, STRING_CODES
 
@@ -39,8 +39,10 @@ def record_call(
     result_bytes: int | None,
     duration_ms: int,
     root_refused: bool = False,
+    plan: PlanLink | None = None,
 ) -> str:
-    """Write the two rows of one call and return its id."""
+    """Write the two rows of one call and return its id. `plan` is the plan the call is a
+    step of (B2: `/plan` and `/agent`), None for the CLI."""
     assert code in CODES
     call_id = new_call_id()
     now = utc_now()
@@ -57,9 +59,12 @@ def record_call(
         conn.execute(
             "INSERT INTO tool_calls (call_id, server, tool, operation, decision, reason, "
             "args_hmac, args_bytes, status, error_code, result_bytes, duration_ms, "
-            "created_at, finished_at) VALUES (?, ?, ?, 'read', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "created_at, finished_at, plan_id, plan_step) "
+            "VALUES (?, ?, ?, 'read', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (call_id, SERVER, tool, decision, reason, args_hmac, len(canonical_args), status,
-             error, result_bytes, duration_ms, now, now),
+             error, result_bytes, duration_ms, now, now,
+             plan.plan_id if plan is not None else None,
+             plan.position if plan is not None else None),
         )
         conn.execute(
             "INSERT INTO workspace_events (call_id, code, path_hmac, created_at) "

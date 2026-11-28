@@ -1,10 +1,17 @@
-"""Demo of workspace-tools slice B1: the work folder, its confinement and `read`/`list` by CLI.
+"""Demo of workspace-tools slices B1 and B2: the work folder, its confinement, `read`/`list`
+by CLI (B1), and `/workspace` with its reads in `/plan` and `/agent` (B2).
 
 Usage: uv run python scripts/demo_workspace.py
+       uv run python scripts/demo_workspace.py --prepare DIR
 
-Standard library only; same code on every platform. The synthetic work folder is built in a
-temporary directory from `tests/fixtures/workspace/` (no real project content), with its own
-data directory; nothing outside them is read or written. Every refusal case must say NO.
+Same code on every platform. The synthetic work folder is built in a temporary directory from
+`tests/fixtures/workspace/` (no real project content), with its own data directory; nothing
+outside them is read or written. B1 runs `main.py workspace` as a subprocess; B2 drives the
+plain conversation in this process with the scripted Mock and the scripted terminal the tests
+use (a Mock marked not synthetic stands for a provider outside the machine: no real provider
+is contacted). Every refusal case must say NO. The second form runs nothing: it builds the
+synthetic folder and a Mock script in DIR (outside the repository) and prints the command
+that opens `chat` over them, to try `/workspace`, `/plan` and `/agent` by hand.
 """
 
 from __future__ import annotations
@@ -16,6 +23,8 @@ import tempfile
 from pathlib import Path
 
 from demo_common import ROOT, base_env, check, harness, header, run, step
+
+sys.path.insert(0, str(ROOT))
 
 BUILD = ROOT / "tests" / "fixtures" / "workspace" / "build.py"
 
@@ -123,8 +132,185 @@ def demo() -> list[str]:
               "the audit holds a path or file text")
         stored = b"".join(p.read_bytes() for p in data.rglob("*") if p.is_file())
         check(builder.SENTINEL.encode() not in stored, "file text was saved in the data dir")
+
+        demo_b2(base, built)
     return skipped
 
 
+# -- B2: /workspace, /plan and /agent with the scripted Mock -------------------------------------
+
+QUESTION = "¿qué hace el módulo de demo?"
+FINAL = "Respuesta final sintetica: greet saluda y add suma."
+
+
+def _step(sid: str, tool: str, **args) -> dict:
+    return {"id": sid, "server": "workspace", "tool": tool, "args": args}
+
+
+def _turn(k: int) -> str:
+    return f"vuelta {k} de"
+
+
+def demo_b2(base: Path, built) -> None:
+    import asyncio
+
+    from harness.mcp.config import LoadedConfig
+    from harness.providers.mock import MockProvider
+    from harness.storage.database import open_database
+    from tests.plan_support import plan_reply
+    from tests.shell_support import CODE, ScriptedTerminal, make_conversation
+
+    class Recording(MockProvider):
+        """The Mock, keeping every prompt (the oracle of what was sent)."""
+
+        def __init__(self, responses: dict, synthetic: bool = True) -> None:
+            super().__init__(responses=responses)
+            self.synthetic_content = synthetic
+            self.prompts: list[str] = []
+
+        async def ask(self, request, on_sent, *, on_mode=None) -> str:
+            self.prompts.append(request.prompt)
+            return await super().ask(request, on_sent, on_mode=on_mode)
+
+    data = base / "data-b2"
+    folder = str(built.root)
+
+    def converse(lines, responses, *, synthetic=True, approvals=()):
+        conn = open_database(data)
+        try:
+            provider = Recording(responses, synthetic)
+            terminal = ScriptedTerminal([f"/workspace {folder}", *lines], list(approvals))
+            conversation, _, _ = make_conversation(
+                conn, data, terminal, provider, columns=10_000,
+                environ={"HARNESS_LOOP_PROVIDERS": "mock"},
+                mcp_config=lambda: LoadedConfig(None))
+            asyncio.run(conversation.run())
+        finally:
+            conn.close()
+        print(terminal.text)
+        return terminal.text, provider
+
+    def query(sql: str) -> list[tuple]:
+        conn = sqlite3.connect(data / "harness.sqlite3")
+        try:
+            return conn.execute(sql).fetchall()
+        finally:
+            conn.close()
+
+    def last_loop() -> tuple:
+        return query("SELECT status, stop_reason, turns FROM loop_runs ORDER BY rowid DESC "
+                     "LIMIT 1")[0]
+
+    app, util = _step("a", "read", path="src/app.py"), _step("b", "read", path="src/util.py")
+
+    step("(B2-a) /workspace: set and shown; the repository and the data dir refused")
+    text, _ = converse(["/workspace", f"/workspace {ROOT}", f"/workspace {data}", "/status"], {})
+    check("/plan and /agent can now read it" in text and "/workspace refused: harness_repo"
+          in text and "/workspace refused: data_dir" in text,
+          "the folder was not set, or a protected folder was accepted")
+    check(text.count(f"workspace: {Path(folder).resolve()}") >= 2, "the folder is not shown")
+
+    step("(B2-b) /plan reads two files by rule, shown only here")
+    text, provider = converse([f"/plan {QUESTION}"], {QUESTION: plan_reply(app, util)})
+    check("running plan:" in text and "Plan approval requested" not in text,
+          "the reads did not run by rule")
+    check("def greet(name: str) -> str:" in text and "def add(a: int, b: int)" in text,
+          "the two files were not shown")
+    check(len(provider.prompts) == 1 and "workspace.read(" in provider.prompts[0]
+          and folder not in provider.prompts[0], "the catalogue named the path or more was sent")
+    check(query("SELECT COUNT(*) FROM tool_calls WHERE server = 'workspace' AND plan_id IS NOT "
+                "NULL AND status = 'completed'") == [(2,)], "not two audited plan reads")
+
+    step("(B2-c) /agent: list, then read, then the answer, in two turns with results")
+    text, provider = converse([f"/agent {QUESTION}"], {
+        _turn(1): plan_reply(_step("l", "list")), _turn(2): plan_reply(app), _turn(3): FINAL})
+    check(len(provider.prompts) == 3 and "| src/" in provider.prompts[1]
+          and "def greet(name: str) -> str:" in provider.prompts[2],
+          "the listing and the file did not go back turn by turn")
+    check("Plan approval requested" not in text and "every argument is bounded" in text,
+          "a bounded path should run by rule inside /agent")
+    check(all(prompt in text.replace("\n| ", "\n") for prompt in provider.prompts[1:]),
+          "a turn was not shown exactly as sent")
+    check(last_loop() == ("completed", "answer", 3), "the loop did not end answered")
+
+    refusals = [("(NO) .env", _step("e", "read", path=".env"), "refused: denied_name"),
+                ("(NO) .git/config", _step("g", "read", path=".git/config"),
+                 "refused: denied_component"),
+                ("(NO) a key file", _step("k", "read", path="deploy.pem"), "refused: denied_name"),
+                ("(NO) a case-variant name", _step("c", "read", path="src/App.py"),
+                 "refused: name_not_exact"),
+                ("(NO) a binary", _step("i", "read", path="image.bin"), "refused: binary"),
+                ("(NO) ../ outside", _step("o", "read", path="../outside/secret.txt"),
+                 "plan refused: argument_invalid"),
+                ("(NO) a path with a space", _step("s", "read", path="a b.txt"),
+                 "plan refused: argument_invalid")]
+    if built.links:
+        refusals.append(("(NO) a symlink out", _step("y", "read", path="src/escape.py"),
+                         "refused: link"))
+    for title, plan_step, said in refusals:
+        step(f"(B2) {title} in a /plan")
+        text, _ = converse([f"/plan {QUESTION}"], {QUESTION: plan_reply(plan_step)})
+        check(said in text and "secret" not in text.replace("../outside/secret.txt", ""),
+              f"{title} was not refused with {said}")
+
+    step("(B2-d) consent off: a provider outside the machine gets nothing of the folder")
+    text, provider = converse([f"/agent {QUESTION}"], {_turn(1): plan_reply(app),
+                                                       _turn(2): FINAL}, synthetic=False)
+    check("not sent: no consent for this folder" in text and len(provider.prompts) == 1,
+          "file content went without the folder's consent")
+    check(last_loop() == ("stopped", "send_not_approved", 1), "the loop did not stop")
+
+    step("(B2-e) consent on through the box, then the loop's own first-send box; then revoked")
+    text, provider = converse(["/workspace send on", f"/agent {QUESTION}"],
+                              {_turn(1): plan_reply(app), _turn(2): FINAL}, synthetic=False,
+                              approvals=[CODE, CODE])
+    check("Send consent requested" in text and text.count("Send approval requested") == 1
+          and len(provider.prompts) == 2 and "def greet" in provider.prompts[1],
+          "with consent the results did not go after the loop's box")
+    text, provider = converse(["/workspace send off", f"/agent {QUESTION}"],
+                              {_turn(1): plan_reply(app), _turn(2): FINAL}, synthetic=False)
+    check("not sent: no consent for this folder" in text and len(provider.prompts) == 1,
+          "a revoked consent still sent")
+
+    step("(B2-f) what is stored: no path and no file text")
+    values = [str(v) for table in ("tool_calls", "workspace_events", "workspace_consents",
+                                   "audit_events", "loop_turns")
+              for row in query(f"SELECT * FROM {table}")  # noqa: S608
+              for v in row]
+    check(not any(folder in v or "demo-alpha" in v or "greet" in v for v in values),
+          "a row holds the folder's path or a file's text")
+    print(f"workspace_consents: {query('SELECT provider, state FROM workspace_consents')}")
+
+
+def prepare(target: Path) -> int:
+    """Build the synthetic folder and a Mock script in `target` for `/workspace` by hand."""
+    import json
+    import shlex
+
+    from tests.plan_support import plan_reply
+
+    target = target.resolve()
+    if target == ROOT or ROOT in target.parents:
+        print("error: DIR must be outside the repository", file=sys.stderr)
+        return 2
+    target.mkdir(parents=True, exist_ok=True)
+    built = _builder().build(target / "base")
+    app, util = _step("a", "read", path="src/app.py"), _step("b", "read", path="src/util.py")
+    responses = target / "mock-responses.json"
+    responses.write_text(json.dumps({
+        QUESTION: plan_reply(app, util), _turn(1): plan_reply(_step("l", "list")),
+        _turn(2): plan_reply(app), _turn(3): FINAL}, ensure_ascii=False), encoding="utf-8")
+    env = {"HARNESS_DATA_DIR": target / "data", "HARNESS_PROVIDER": "mock",
+           "HARNESS_MOCK_RESPONSES": responses, "HARNESS_LOOP_PROVIDERS": "mock"}
+    print(" ".join(f"{name}={shlex.quote(str(value))}" for name, value in env.items())
+          + " uv run python main.py chat")
+    print(f"then type: /workspace {shlex.quote(str(built.root))}")
+    print(f"           /plan {QUESTION}")
+    print(f"           /agent dime {QUESTION}")
+    return 0
+
+
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--prepare":
+        sys.exit(prepare(Path(sys.argv[2])))
     sys.exit(run(demo))

@@ -23,3 +23,17 @@ CREATE TABLE workspace_events (
     path_hmac   TEXT CHECK (path_hmac IS NULL OR length(path_hmac) = 64),
     created_at  TEXT NOT NULL
 );
+
+-- B2 (design D14, B2-3): the consent to send what the work folder's reads return to a
+-- provider whose content is not synthetic, one row per folder and provider. The folder is a
+-- keyed hash of its resolved path and identity (`ai-harness/workspace-folder/v1`), never the
+-- path; a folder replaced by another one (another identity) has no consent. Off unless a row
+-- says `granted`; `/workspace send off` leaves it `revoked`.
+CREATE TABLE workspace_consents (
+    folder_hmac    TEXT NOT NULL CHECK (length(folder_hmac) = 64),
+    provider       TEXT NOT NULL CHECK (length(provider) BETWEEN 1 AND 64),
+    state          TEXT NOT NULL CHECK (state IN ('granted', 'revoked')),
+    approval_hash  TEXT CHECK (approval_hash IS NULL OR length(approval_hash) = 64),
+    decided_at     TEXT NOT NULL,
+    PRIMARY KEY (folder_hmac, provider)
+);

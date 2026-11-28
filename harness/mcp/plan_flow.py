@@ -133,6 +133,11 @@ class PlanSetting:
     # bounded (`config.free_argument`), in the harness's words: inside `/agent`, or in a
     # session whose conversation already holds tool results (A3-13). None: `/plan` as in A2.
     bounded_only: str | None = None
+    # workspace-tools B2 (D14): inside `/agent`, with a provider whose content is not
+    # synthetic, why a plan's results must not be sent (no consent for the work folder whose
+    # text they hold), or None. Asked before the turn is composed; a reason stops the loop
+    # and nothing is sent. None: nothing is withheld.
+    withhold: Callable[[PlanReport], str | None] | None = None
 
 
 AUTO_READ_ENV = "HARNESS_AUTO_READ"

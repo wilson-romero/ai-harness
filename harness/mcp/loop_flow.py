@@ -324,6 +324,7 @@ class _Loop:
         while True:
             response = await self._ask(turn, text)
             nxt = await self._next(turn, response)
+            self._withhold(nxt[1])  # a `_Stop` when the results may not leave: nothing is sent
             text = self._compose(nxt)
             if nxt[1] is not None and not self.synthetic and not self.consented:
                 self._consent(nxt[0], text)  # a `_Stop` when not approved: nothing is sent
@@ -336,6 +337,17 @@ class _Loop:
                              f"{len(text)} characters to {self.provider_name}; exactly this "
                              "text, nothing else:", text)
             turn = nxt[0]
+
+    def _withhold(self, report) -> None:
+        """workspace-tools D14: with a provider outside the machine, results that hold text of
+        a work folder without its consent are never sent; the loop stops before the turn is
+        composed. Checked again at every turn: the consent may be revoked between them."""
+        if report is None or self.synthetic or self.setting.withhold is None:
+            return
+        why = self.setting.withhold(report)
+        if why is not None:
+            self.view.say(f"{self.tag}: {why}; nothing was sent and the loop stops")
+            raise _Stop("stopped", "send_not_approved")
 
     def _consent(self, turn: _Turn, text: str) -> None:
         """The first turn of this loop that carries results, to a provider outside the

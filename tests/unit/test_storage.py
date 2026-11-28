@@ -37,7 +37,7 @@ def test_first_run_creates_the_schema(conn):
     session_core = {"sessions", "requests", "messages", "audit_events", "schema_migrations"}
     assert tables == session_core | {
         "request_context", "skill_runs", "skill_steps", "approvals", "tool_calls",
-        "effect_sources", "plan_runs", "loop_runs", "loop_turns", "workspace_events",
+        "effect_sources", "plan_runs", "loop_runs", "loop_turns", "workspace_events", "workspace_consents",
     }
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 

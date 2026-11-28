@@ -104,6 +104,8 @@ class PanelState:
     # code-mode A3: the turn of the `/agent` loop in course (`turn 2 of 5`), else how the
     # session's last loop ended, else "-"
     loop: str = "-"
+    # workspace-tools B2: the work folder of this session (its resolved path), else "-"
+    workspace: str = "-"
 
 
 @runtime_checkable
