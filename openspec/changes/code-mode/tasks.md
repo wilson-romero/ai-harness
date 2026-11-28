@@ -370,6 +370,72 @@ Comprobaciones (macOS arm64, `caffeinate -i`):
 - La tanda `-m edge` **no se ejecutó**: esta rama no cambia el código del proveedor que trae el merge. El coordinador la ejecuta en `develop`.
 - `openspec validate --all --strict`: 28 passed. `check_public_safety.py`: `PASS (511 file(s))`. `check_sec_matrix.py`: `PASS (15 rows, 169 tests)`. `scripts/demo_code_mode.py`: código 0, `demo: PASS`.
 
+## 10. A2 · Lecturas permitidas por regla (`feature/code-mode-loop`, 2026-11-27)
+
+Va aquí, tras el tramo 2, porque la hoja de ruta del dueño (design, «Fase A») la pone antes que la medición del tramo 3; se numera 10 para no renumerar las secciones 5 a 9. Desde `develop` = `a9c51fe`. Decisiones en design, «Lo que decidió A2» (A2-1 a A2-7). Cada garantía tiene un test y un mutante que lo mata (abajo); los tests se escribieron con el código, así que el «visto fallar» de cada uno es su mutante.
+
+- [x] 10.1 `auto_read` en `ToolEntry`, falso por defecto, solo con `operation: read` (A2-1).
+  - Oráculo: `test_mcp_auto_read.py::test_auto_read_is_valid_only_as_a_boolean_on_a_read` (escritura, `"true"`, `1`: `ConfigError` que nombra `tools.t`) y `::test_auto_read_is_false_unless_the_person_writes_it`.
+  - Control negativo: mutante A01.
+- [x] 10.2 Un plan de solo lecturas por regla corre sin la caja, con `running plan:` y los pasos antes, y `means = rule` (A2-5).
+  - Oráculo: `::test_a_plan_of_auto_reads_runs_without_the_box_and_says_so_first` (ninguna pregunta de aprobación, las líneas de los pasos antes que el primer resultado, `('completed', 'consumed', 'rule', 'rule:auto_read', None, None)`, una fila `plan.approval.granted` con `means=rule`, dos `tool_calls` del plan); en pantalla completa, `::test_the_full_screen_runs_a_plan_by_rule_without_the_box`; en la CLI, `::test_the_cli_runs_a_plan_by_rule_without_the_code`.
+  - Control negativo: mutantes A09, A14 y A17.
+- [x] 10.3 Un plan con un paso que no es por regla va entero a la caja; sin respuesta no corre nada.
+  - Oráculo: `::test_a_plan_with_one_read_not_by_rule_goes_to_the_box_whole` y `::test_a_plan_left_undecided_in_the_box_runs_nothing_even_if_one_step_is_by_rule` (`starts.log` vacío).
+  - Control negativo: mutantes A02 y A04.
+- [x] 10.4 El interruptor `HARNESS_AUTO_READ` (A2-4).
+  - Oráculo: `::test_harness_auto_read_off_asks_the_box_for_every_plan`, `::test_without_an_answer_and_the_rule_off_nothing_runs` y `::test_a_wrong_switch_sends_nothing` (`yes`, `ON`, `0`: 0 envíos, 0 solicitudes; sin variable, `on`).
+  - Control negativo: mutantes A03 y A13.
+- [x] 10.5 La lista atada al leer el plan y comprobada antes de cada paso (A2-2).
+  - Oráculo: `::test_a_list_changed_after_the_plan_was_read_refuses_the_step`, 7 casos (orden, entorno, plazo de llamada, plazo de arranque, tope de resultado, `auto_read` quitado, límites de un argumento): `starts.log` vacío, `('failed', …, 'list_changed', 1)`, 0 filas en `tool_calls`. Con la caja: `::test_a_command_changed_while_the_box_is_open_refuses_the_plan`. Con dos servidores: `::test_a_step_after_the_first_is_refused_when_its_entry_changed` (el paso 1 corre, el 2 no arranca, `stopped_at = 2`). Una fila sin atadura: `::test_a_plan_recorded_before_010_never_runs` (`plan_altered`).
+  - Controles: la misma lista escrita otra vez corre (`::test_control_the_same_list_written_again_runs`); una `description` nueva no cambia nada (`::test_control_a_new_description_changes_nothing_that_runs`); una herramienta quitada se sigue denegando en la pasarela (`test_shell_plan.py::test_the_policy_is_decided_again_when_the_plan_runs`, sin tocar).
+  - Control negativo: mutantes A05 a A08, A15 y A16.
+- [x] 10.6 La decisión que se muestra es la de la política (A2-6).
+  - Oráculo: `::test_the_decision_shown_is_the_policy_s_own`. Control negativo: mutante A10.
+- [x] 10.7 Migración 010 y las migraciones que reconstruyen con las claves apagadas (A2-3).
+  - Oráculo: `::test_a_database_at_009_upgrades_to_010_and_keeps_its_plans_and_their_calls` (mismas filas, `entries_sha256` NULL, `foreign_key_check` vacío, claves encendidas y cumplidas, `rule` y `list_changed` admitidos); `tests/unit/test_sql_literals.py` pasa.
+  - Control negativo: `::test_a_rebuilding_migration_that_would_break_a_reference_is_refused` (una 010 que borra la tabla referida: `MigrationError`, nada aplicado, versión 9, claves encendidas) y los mutantes A11 y A12.
+  - Premisa medida: los dos procedimientos con las claves encendidas fallan (design A2-3).
+  - Guardas de versión tocadas: `test_storage.py` (`[1..10]`, `[7, 8, 9, 10]`, `[9, 10]`) y `test_response_mode.py` (`[8, 9, 10]`).
+- [x] 10.8 Documentación: README «Lecturas permitidas por regla: `auto_read`», SECURITY «Planes de lectura» (desde A2), filas SEC-05 y SEC-12 de la matriz (tests y requisitos, sin cambio de estado).
+  - Oráculo: `scripts/check_sec_matrix.py` con código 0 (recibo en 10.10).
+- [x] 10.9 Sin código condicionado por plataforma: `tests/unit/test_portability.py` dentro de la tanda de 10.10.
+
+### Mutantes de A2
+
+17 mutantes (2026-11-27, macOS arm64), con `scripts` fuera del repo: cada uno se aplica con un ancla única, se ejecutan sus tests con `-x` y un `PYTHONPYCACHEPREFIX` nuevo, y se deshace.
+
+| # | Mutante | Lo mata |
+|---|---|---|
+| A01 | `auto_read` admitido en una escritura | `test_mcp_auto_read.py::test_auto_read_is_valid_only_as_a_boolean_on_a_read[entry0]` |
+| A02 | Cualquier plan corre por regla | `::test_a_plan_with_one_read_not_by_rule_goes_to_the_box_whole` |
+| A03 | El interruptor no se mira | `::test_harness_auto_read_off_asks_the_box_for_every_plan` |
+| A04 | Basta un paso por regla (`any`) | `::test_a_plan_with_one_read_not_by_rule_goes_to_the_box_whole` |
+| A05 | La entrada no se comprueba al ejecutar | `::test_a_list_changed_after_the_plan_was_read_refuses_the_step[argument limits]` |
+| A06 | La orden no entra en el hash | `::…refuses_the_step[command]` |
+| A07 | La entrada de la herramienta no entra en el hash | `::…refuses_the_step[argument limits]` |
+| A08 | No se compara la atadura de la fila | `::test_a_plan_recorded_before_010_never_runs` |
+| A09 | La regla queda como `code` | `::test_a_plan_of_auto_reads_runs_without_the_box_and_says_so_first` |
+| A10 | La decisión mostrada es una constante | `::test_the_decision_shown_is_the_policy_s_own` |
+| A11 | No se mira `foreign_key_check` tras reconstruir | `::test_a_rebuilding_migration_that_would_break_a_reference_is_refused` |
+| A12 | Las claves quedan apagadas tras reconstruir | `::test_a_database_at_009_upgrades_to_010_and_keeps_its_plans_and_their_calls` |
+| A13 | Cualquier valor del interruptor vale | `::test_a_wrong_switch_sends_nothing[yes]` |
+| A14 | Sin las líneas de `running plan:` | `::test_a_plan_of_auto_reads_runs_without_the_box_and_says_so_first` |
+| A15 | La `description` entra en el hash | `::test_control_a_new_description_changes_nothing_that_runs` |
+| A16 | Una herramienta quitada cuenta como «cambiada» | `test_shell_plan.py::test_the_policy_is_decided_again_when_the_plan_runs` |
+| A17 | Al leer el plan, todo paso se toma por regla | `::test_a_plan_with_one_read_not_by_rule_goes_to_the_box_whole` |
+
+Resultado: **17 de 17 muertos, 0 supervivientes**. Equivalente, sin mutar: quitar `auto_read` del hash de la herramienta. Lo repite a propósito `changed_entry` («un plan por regla exige que siga siendo `auto_read`»), así que ese mutante sobreviviría y quitar los dos lo mata A05.
+
+- [x] 10.10 Comprobaciones de A2 (macOS arm64, `caffeinate -i`, 2026-11-27, sobre `a9c51fe` con el cambio sin confirmar):
+  - `caffeinate -i uv run pytest -m "not edge and not copilot"`: **2398 passed, 191 deselected** en 412 s, código 0.
+  - `openspec validate --all --strict`: 28 passed, 0 failed, código 0.
+  - `scripts/check_public_safety.py`: PASS (497 ficheros), código 0.
+  - `scripts/check_sec_matrix.py`: PASS (15 filas, 176 tests), código 0.
+  - `scripts/demo_code_mode.py`: `demo: PASS`, código 0 (sin `auto_read` en su lista: corre igual que antes de A2).
+  - La tanda Edge no se ejecutó: A2 no toca `harness/providers/`, `harness/browser/` ni `tests/browser/`.
+  - Windows: NOT RUN (los tests de A2 son posteriores a la última ejecución allí; nada de A2 depende de la plataforma).
+
 ## 5. Tramo 3 · Sonda y medición con Copilot real (unos 12 envíos del presupuesto de 100)
 
 - [ ] 5.1 Sonda sin herramientas: un bloque `json` sintético de 80 líneas, comparado byte a byte. 1–2 envíos.

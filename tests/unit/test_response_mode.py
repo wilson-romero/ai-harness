@@ -150,7 +150,7 @@ def test_a_database_of_migration_007_opens_unchanged(data_dir, tmp_path):
         " ('0190a000-0000-7000-8000-000000000002', '0190a000-0000-7000-8000-000000000001',"
         " 'completed', '2026-11-01T00:00:01+00:00')")
     before = [tuple(r) for r in conn.execute("SELECT * FROM sessions")]
-    assert migrate(conn) == [8, 9]  # and 009 (code-mode), which touches no session
+    assert migrate(conn) == [8, 9, 10]  # and 009, 010 (code-mode), which touch no session
     after = conn.execute("SELECT * FROM sessions").fetchone()
     assert tuple(after)[: len(before[0])] == before[0]  # every old column keeps its value
     assert after["response_mode"] == "auto"

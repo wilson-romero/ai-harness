@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from harness.core.errors import HarnessError
 from harness.core.git_guard import VersionableFile, ensure_not_versionable
@@ -103,6 +103,15 @@ class ToolEntry(_Strict):
     # What the tool reads, in the person's words, for the catalogue of `/plan` (code-mode D8,
     # study decision 5 (a)). Never the server's description, which is untrusted.
     description: str | None = Field(default=None, min_length=1, max_length=DESCRIPTION_MAX)
+    # A read the person allows by rule (code-mode A2): a plan whose steps are all `auto_read`
+    # runs without the approval box, audited as approved by `rule`. Valid only for a read.
+    auto_read: bool = False
+
+    @model_validator(mode="after")
+    def _auto_read_is_a_read(self) -> "ToolEntry":
+        if self.auto_read and self.operation != "read":
+            raise ValueError("auto_read is valid only for a tool whose operation is read")
+        return self
 
     @field_validator("description")
     @classmethod

@@ -168,7 +168,7 @@ Un plan rechazado SHALL dar un motivo de una lista cerrada y un detalle corto y 
 - **THEN** el detalle nombra el argumento y no contiene su valor
 
 ### Requirement: Aprobación del plan entero ligada a su hash
-Antes de ejecutar nada, el harness SHALL mostrar el plan canónico entero con la decisión de la política para cada paso, y pedir una sola aprobación ligada a su hash: el botón en la pantalla completa y el código tecleado en el modo plano y en la CLI. El plan ejecutado SHALL ser byte a byte el aprobado.
+Antes de ejecutar nada, el harness SHALL mostrar el plan canónico entero con la decisión de la política para cada paso, y pedir una sola aprobación ligada a su hash: el botón en la pantalla completa y el código tecleado en el modo plano y en la CLI. El plan ejecutado SHALL ser byte a byte el aprobado. La única excepción es un plan cuyos pasos son todos lecturas permitidas por regla (requisito «Lecturas permitidas por regla»).
 
 #### Scenario: Aprobado con el botón
 - **WHEN** en la pantalla completa la persona pulsa aprobar tras ver el plan entero
@@ -177,6 +177,39 @@ Antes de ejecutar nada, el harness SHALL mostrar el plan canónico entero con la
 #### Scenario: Otro plan con la aprobación de uno
 - **WHEN** llega una aprobación para un hash distinto del plan mostrado
 - **THEN** no se ejecuta ningún paso
+
+### Requirement: auto_read solo en una lectura
+Una herramienta de la lista local SHALL poder llevar `auto_read: true` solo si su operación es `read`; en cualquier otra, o con un valor que no es booleano, la lista SHALL rechazarse sin arrancar nada.
+
+#### Scenario: auto_read en una escritura
+- **WHEN** la lista marca `auto_read: true` en una herramienta `write`
+- **THEN** la lista se rechaza con un error que nombra la herramienta
+
+### Requirement: Lecturas permitidas por regla
+Un plan cuyos pasos son todos `auto_read` SHALL ejecutarse sin la caja de aprobación, tras una línea `running plan:` con cada paso (servidor, herramienta y argumentos canónicos), y SHALL quedar auditado con el medio `rule`. Un plan con un paso que no es `auto_read` SHALL ir entero a la caja. Con `HARNESS_AUTO_READ=off` todo plan SHALL ir a la caja.
+
+#### Scenario: Plan solo de lecturas por regla
+- **WHEN** las dos herramientas del plan son `auto_read`
+- **THEN** no se pide aprobación, se ve `running plan:` con los dos pasos antes de que corran, el servidor recibe las dos llamadas y `plan_runs.means` es `rule`
+
+#### Scenario: Un paso sin regla
+- **WHEN** un plan tiene un paso `auto_read` y otro que no lo es
+- **THEN** se abre la caja con el plan entero, y sin respuesta no arranca ningún servidor
+
+#### Scenario: Regla apagada
+- **WHEN** `HARNESS_AUTO_READ` vale `off`
+- **THEN** un plan de lecturas `auto_read` pide la caja como cualquier otro
+
+### Requirement: La lista se ata al leer el plan
+Al leer un plan, el harness SHALL fijar un hash de la entrada de la lista de cada paso (orden y argumentos de arranque, entorno, carpeta, plazos, operación, `auto_read`, tope y argumentos declarados). Antes de cada paso, el ejecutor SHALL calcularlo otra vez con la lista que va a usar y SHALL rechazar el paso, sin arrancar nada, si difiere. La `description` de la herramienta SHALL NOT contar.
+
+#### Scenario: Orden cambiada antes de ejecutar
+- **WHEN** entre la lectura del plan y su ejecución la orden de arranque del servidor gana un argumento
+- **THEN** el plan termina `failed` con `list_changed` en el paso 1 y `starts.log` queda vacío
+
+#### Scenario: Solo cambia la descripción
+- **WHEN** entre la lectura y la ejecución solo cambia la `description` de la herramienta
+- **THEN** el plan corre
 
 ### Requirement: Ejecución paso a paso por la pasarela
 Cada paso de un plan aprobado SHALL ejecutarse por la misma pasarela que `mcp call`, con su política, su auditoría, su plazo y su tope de resultado. El primer paso que falla o se deniega SHALL detener el plan: los siguientes no se ejecutan y nada se reintenta.

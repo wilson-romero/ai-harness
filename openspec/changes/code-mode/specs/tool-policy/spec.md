@@ -3,7 +3,7 @@
 ## ADDED Requirements
 
 ### Requirement: Llamadas de un plan aprobado
-Además de la CLI, una llamada a herramienta SHALL poder pedirse como paso de un plan de code mode aprobado por una persona. Esa llamada SHALL pasar las mismas comprobaciones y dejar la misma auditoría que `mcp call`. Un plan SHALL NOT llamar a una herramienta `write` y SHALL NOT abrir ningún canal de escucha.
+Además de la CLI, una llamada a herramienta SHALL poder pedirse como paso de un plan de code mode aprobado por una persona, o por la regla `auto_read` que la persona escribió en su lista local para esa lectura. Esa llamada SHALL pasar las mismas comprobaciones y dejar la misma auditoría que `mcp call`. Un plan SHALL NOT llamar a una herramienta `write` y SHALL NOT abrir ningún canal de escucha.
 
 #### Scenario: Escritura en un plan
 - **WHEN** un plan nombra `set_project_metadata`

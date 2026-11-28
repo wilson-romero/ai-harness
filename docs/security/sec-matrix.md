@@ -200,6 +200,7 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `openspec/changes/mcp-gateway/specs/tool-policy/spec.md` · Escrituras denegadas sin aprobación
 - `openspec/changes/mcp-gateway/specs/tool-policy/spec.md` · Lo que dice el servidor no amplía la política
 - `openspec/changes/code-mode/specs/tool-policy/spec.md` · Llamadas de un plan aprobado
+- `openspec/changes/code-mode/specs/code-mode/spec.md` · La lista se ata al leer el plan
 **Tests:**
 - `tests/unit/test_mcp_policy.py::test_each_reason_in_its_order`
 - `tests/integration/test_mcp_cli.py::test_denied_calls_start_no_process`
@@ -209,6 +210,9 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `tests/unit/test_mcp_policy.py::test_undeclared_argument_is_named_in_the_detail`
 - `tests/unit/test_shell_plan.py::test_a_refused_plan_opens_no_box_and_starts_nothing`
 - `tests/unit/test_shell_plan.py::test_the_policy_is_decided_again_when_the_plan_runs`
+- `tests/unit/test_mcp_auto_read.py::test_auto_read_is_valid_only_as_a_boolean_on_a_read`
+- `tests/unit/test_mcp_auto_read.py::test_a_list_changed_after_the_plan_was_read_refuses_the_step`
+- `tests/unit/test_mcp_auto_read.py::test_a_step_after_the_first_is_refused_when_its_entry_changed`
 **Control negativo:** `mcp-gateway` 2.3 (29 fallos con `deny` devolviendo `allowed`) y 2.4; mutaciones SEC-05 de la tabla (cada caso de `test_each_reason_in_its_order` que mata una). Code mode, tramo 2: `code-mode` 4.5 (un plan con una herramienta `write`, no listada o de otro servidor: ninguna caja y `starts.log` vacío).
 **Windows:** los tests de esta fila pasaron en la ejecución de `57c413d` (desde `0.2.1` la clave HMAC ya no se daña y `tests/unit/test_mcp_policy.py` se recoge). La comprobación de que la lista local no la pueden escribir otros es solo POSIX: en Windows no se comprueban ACL. Los tests de `code-mode` 4.x (2026-11-27) son posteriores a la última ejecución en Windows: NOT RUN allí.
 **Límites:** solo con servidores sintéticos de los tests. El servidor MCP propio del harness no existe todavía (`harness-mcp-server`, planificado).
@@ -354,6 +358,7 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `openspec/changes/mcp-gateway/specs/tool-policy/spec.md` · Escrituras denegadas sin aprobación
 - `openspec/changes/approval-buttons/specs/interactive-shell/spec.md` · Nada aprueba al abrirse la caja
 - `openspec/changes/code-mode/specs/code-mode/spec.md` · Aprobación del plan entero ligada a su hash
+- `openspec/changes/code-mode/specs/code-mode/spec.md` · Lecturas permitidas por regla
 **Tests:**
 - `tests/unit/test_skill_approval.py::test_approval_reused`
 - `tests/unit/test_skill_approval.py::test_output_changed_after_approving`
@@ -385,6 +390,10 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `tests/unit/test_plan_cli.py::test_ctrl_c_at_the_code_prompt_leaves_the_plan_undecided`
 - `tests/unit/test_mcp_plan_run.py::test_a_plan_whose_lock_is_held_elsewhere_runs_nothing`
 - `tests/unit/test_shell_plan.py::test_the_box_says_each_server_command_is_not_approved`
+- `tests/unit/test_mcp_auto_read.py::test_a_plan_with_one_read_not_by_rule_goes_to_the_box_whole`
+- `tests/unit/test_mcp_auto_read.py::test_harness_auto_read_off_asks_the_box_for_every_plan`
+- `tests/unit/test_mcp_auto_read.py::test_a_command_changed_while_the_box_is_open_refuses_the_plan`
+- `tests/unit/test_mcp_auto_read.py::test_a_plan_recorded_before_010_never_runs`
 **Control negativo:** `skill-engine` 5.1, 5.3, 5.4 y 8.2; `hardening` 5.4 (el aviso de la CLI sin marca: el test falla); `approval-buttons` 7.1 (mutantes M1 a M4 del armado); mutaciones SEC-12 de la tabla (la caducidad en el momento de consumir y el hash de la propuesta, de la revisión independiente). Code mode, tramo 2: `code-mode` 4.5 (cambiar lo ejecutado, lo hasheado o lo mostrado; otra solicitud; dos usos; caducidad: cada uno deniega).
 **Windows:** código puro y SQL; los tests de esta fila pasaron en la ejecución de `57c413d`, salvo `tests/unit/test_skill_approval.py::test_granted_approval_that_expires_while_the_effect_is_busy_is_not_consumed`, añadido en `feature/hardening` (NOT RUN). Los tests de `tests/security/test_audit_findings.py` son del 2026-11-27, posteriores a la ejecución en Windows: NOT RUN allí. Sobre `develop` = `79cde60` (2026-11-27), `tests/unit/test_shell_tui_buttons.py::test_keys_typed_ahead_of_the_box_cannot_approve` falló en cada ejecución: el armado solo por reloj caducaba en esa máquina y un Tab y un Enter llegados después aprobaron (`approval-buttons` D9). Los tests de `tests/unit/test_shell_tui_arming.py`, que reproducen esa traza y una parada del bucle sin Windows, son de `bugfix/windows-parity-2`: NOT RUN allí. Los tests de `code-mode` 4.x (2026-11-27) son posteriores a la última ejecución en Windows: NOT RUN allí.
 **Límites:** unas teclas que el terminal o una sesión remota retengan más de medio segundo y entreguen tras un silencio llegan como teclas nuevas (`approval-buttons` D9). No prueba que haya una persona delante (límite aceptado por Wilson el 2026-11-24; ver la deuda conocida): un programa que maneje la terminal de la persona puede escribir el código, y en la pantalla completa pulsar el botón de aprobación (en `develop` desde `1b460ea`) igual que ella. El aviso puede engañar sobre qué se aprueba solo dentro del contenido marcado: lo aprobado es siempre el hash mostrado. Los tests inyectan una terminal falsa: el camino real con `isatty()` e `input()` no lo ejercita ningún test (no hay `pty` en Windows); lo cubren la demo de Wilson (`skill-engine` 7.7, abierta) y el test por subproceso de que sin terminal se espera (código 3).

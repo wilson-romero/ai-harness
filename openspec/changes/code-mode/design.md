@@ -506,6 +506,68 @@ Sin código en este tramo; son condiciones para aceptar A2 y A3.
 - Una aprobación por turno, salvo que A2 lo permita por regla: el nonce no protege contra una inyección dentro del mismo turno.
 - «Una llamada al proveedor por /plan» se redefine como un tope de turnos; un `uncertain` corta el bucle.
 
+## Lo que decidió A2: lecturas permitidas por regla (2026-11-27)
+
+Construido en `feature/code-mode-loop`, desde `develop` = `a9c51fe`. Cumple los tres requisitos de A2 de la revisión independiente (arriba).
+
+### A2-1. `auto_read` en la lista local, solo para una lectura
+
+- **Qué.** `ToolEntry.auto_read: bool = False`. Un `true` en una herramienta `write`, o un valor que no es booleano (`"true"`, `1`), es un error de la lista: no se arranca nada y el mensaje nombra la herramienta. Un plan cuyos pasos son **todos** `auto_read` se aprueba por la regla; con uno solo que no lo es, el plan entero va a la caja, como antes.
+- **Por qué.** La persona ya escribe en la lista qué se puede leer; marcar qué se puede leer sin preguntar es el mismo acto, en el mismo fichero que solo ella edita (`_check_writers`). Que solo valga en `read` mantiene la decisión del dueño: toda escritura o ejecución necesita su aprobación del cambio exacto.
+- **Alternativas rechazadas.**
+  - Una lista aparte de herramientas automáticas: dos ficheros que pueden divergir.
+  - Regla por servidor entero: una herramienta nueva de ese servidor quedaría permitida sin que la persona la mire.
+  - Partir el plan (lo automático corre, lo demás pide la caja): la persona aprobaría la mitad de algo que el modelo pensó entero (D6).
+- **Impacto.** `harness/mcp/config.py`. Spec «Lecturas permitidas por regla».
+
+### A2-2. La lista, atada al leer el plan y comprobada al ejecutar cada paso
+
+- **Qué.** Al leer el plan, cada paso guarda `entry_sha256` (`policy.entry_sha256`): el SHA-256, con dominio `ai-harness/mcp-entry/v1`, de la forma canónica de la entrada del servidor (orden y sus argumentos, nombres de entorno, `cwd`, plazos) y de la herramienta (operación, `auto_read`, tope de resultado, argumentos declarados). La `description` queda fuera: solo redacta el catálogo. La fila del plan guarda un hash de todos (`entries_sha256`, migración 010). El ejecutor:
+  - compara la fila con el plan antes de consumir la aprobación: una fila sin atadura (anterior a 010) o con otra es `plan_altered`;
+  - lee la lista una vez, y antes de **cada** paso vuelve a calcular su hash con esa lista. Si difiere, el paso se rechaza (`list_changed`, `stopped_at` = ese paso) sin arrancar nada, y los siguientes no se llaman. Un plan aprobado por regla exige además que la herramienta siga siendo `auto_read`.
+  - Una herramienta o un servidor que ya **no** está en la lista no es «cambio»: la pasarela lo deniega como siempre (`tool_not_allowed`), y `test_the_policy_is_decided_again_when_the_plan_runs` sigue igual.
+- **Por qué.** Lo exige la revisión: entre la decisión y la ejecución la persona (o quien pueda escribir su lista) podía cambiar la orden de arranque, y la caja decía que esa orden no se aprobaba. Comprobar paso a paso con la lista que se usa para llamar cierra el hueco sin un TOCTOU entre pasos: la lista comprobada es la que arranca el servidor.
+- **Alternativas rechazadas.**
+  - Meter el hash en la `Proposal`: cambiaría el contenido de la caja y el hash aprobado de todo `/plan`, y las pruebas de `/plan` (que no se tocan) lo verían.
+  - Rechazar el plan entero antes del primer paso: el resultado es el mismo con un solo servidor; con dos, el paso que sí estaba atado corre y el informe nombra el que cambió (`test_a_step_after_the_first_is_refused_when_its_entry_changed`).
+  - Tratar una herramienta quitada como «cambio»: cambiaría la conducta y la auditoría de `/plan` (fila `tool_not_allowed`).
+- **Impacto.** `harness/mcp/policy.py`, `plan.py` (`PlanStep.entry_sha256`, `Plan.entries_sha256`), `plan_run.py` (`changed_entry`). La caja gana una línea del harness, `bound:`, con los 16 primeros caracteres del hash. La línea «that command is not part of this approval» se conserva: sigue siendo cierto que la orden no entra en el hash aprobado, y su test no se toca (decisión para el dueño, abajo).
+
+### A2-3. El medio `rule` y la migración 010
+
+- **Qué.** `010_plan_rules.sql` reconstruye `plan_runs`: `means` admite `rule`, `error_code` admite `list_changed` y hay una columna `entries_sha256`. Una aprobación por regla deja `approval = granted → consumed`, `means = rule`, `identity = rule:auto_read`, y en `audit_events` `plan.approval.granted` con `means=rule`. Después corre como cualquier otra: el mismo ejecutor, la misma comparación de hashes y el mismo consumo de un solo uso.
+- **Por qué hay que reconstruir.** SQLite no cambia un `CHECK` en su sitio, y `tool_calls.plan_id` apunta a esta tabla. Medido aquí (2026-11-27, SQLite de CPython 3.14): con las claves foráneas activas, tanto «crear, copiar, borrar, renombrar» con `defer_foreign_keys` como «renombrar primero» con `legacy_alter_table` fallan con `FOREIGN KEY constraint failed`. El procedimiento documentado de SQLite exige las claves apagadas, y `PRAGMA foreign_keys` no hace nada dentro de una transacción. Por eso `migrate` reconoce una primera línea `-- migrate: foreign keys off`: apaga las claves antes de la transacción, aplica el fichero, exige que `PRAGMA foreign_key_check` no devuelva nada (si devuelve algo, `MigrationError` y no se aplica nada) y las vuelve a encender pase lo que pase.
+- **Alternativas rechazadas.**
+  - Una columna nueva `approved_by` con `means` NULL: dos columnas para lo mismo, y `error_code` seguiría sin `list_changed`.
+  - Reconstruir también `tool_calls`: más filas en juego para nada.
+- **Impacto.** `harness/storage/database.py` (`FOREIGN_KEYS_OFF`, `MigrationError`), las guardas de versión de `test_storage.py` y `test_response_mode.py` (`[…, 10]`). Pruebas: `test_a_database_at_009_upgrades_to_010_and_keeps_its_plans_and_their_calls` y su control negativo `test_a_rebuilding_migration_that_would_break_a_reference_is_refused`.
+
+### A2-4. Cómo se apaga la regla: `HARNESS_AUTO_READ=off`
+
+- **Qué.** Una variable de entorno, leída en cada `/plan` (y `/agent`, A3) y en `main.py plan`: `on` (por defecto) u `off`. Con `off` todo plan va a la caja, como antes de A2. Cualquier otro valor se rechaza antes de enviar nada.
+- **Por qué.** Vale para la conversación (plana y pantalla completa) y para la CLI con un solo mecanismo, y se decide antes de empezar, no a mitad de una pregunta.
+- **Alternativas rechazadas.**
+  - `/plan --ask PREGUNTA`: una opción dentro de una orden de texto libre se confunde con una pregunta que empiece por `--ask`, y la CLI necesitaría otra.
+  - Quitar `auto_read` de la lista: funciona, pero es editar el fichero cada vez.
+- **Impacto.** `plan_flow.auto_read_setting`; README.
+
+### A2-5. Lo que se ve antes de que corra un plan por regla
+
+- **Qué.** Una línea del harness, `running plan: <id>, N step(s), every one a read your local MCP list allows by rule (auto_read); no approval is asked (HARNESS_AUTO_READ=off asks for every plan). Ctrl+C stops it`, y debajo, como texto ajeno marcado (`|`), las mismas líneas que mostraría la caja: por paso, servidor, herramienta, operación, la decisión de la política con `auto_read`, los argumentos canónicos y qué lee. Ctrl+C lo para como a cualquier plan.
+- **Por qué.** Los argumentos los escribió el modelo: van marcados como ajenos aunque D5 ya rechazó saltos de línea e invisibles.
+- **Alternativas rechazadas.** Una línea del harness por paso con los argumentos dentro: mezclaría texto del modelo con el del harness.
+- **Impacto.** `plan_flow.RULE_HEADER`.
+
+### A2-6. La decisión que se muestra es la de la política
+
+- **Qué.** `PlanStep.decision` guarda `Decision.reason` tal como lo devolvió `decide_before_start` al leer el plan, y `step_lines` la escribe. Antes era la constante `allowed`.
+- **Impacto.** `test_the_decision_shown_is_the_policy_s_own` cambia la palabra de la decisión y la ve en la caja.
+
+### A2-7. Límites que no se arreglan aquí
+
+- La regla confía en el fichero de la persona: quien pueda escribirlo puede marcar `auto_read`. Es la misma frontera de siempre (`_check_writers` lo exige solo suyo; en Windows no se miran las ACL).
+- Una lectura automática saca datos de la máquina hacia ese servidor sin preguntar: es exactamente lo que la persona permite al escribir `auto_read`.
+
 ### Decisiones abiertas del tramo 2
 
 1. **Título de los bloques de resultado en la pantalla completa.**

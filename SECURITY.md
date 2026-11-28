@@ -122,7 +122,13 @@ Lo que el harness garantiza:
 - Ningún texto del modelo ni de una herramienta aprueba, cambia el plan o dibuja una línea del harness: llegan siempre como texto ajeno, marcado.
 - Una sola pregunta por `/plan`: los resultados no vuelven al proveedor.
 
-Lo que **no** garantiza: que un modelo real proponga el plan que la pregunta necesita, ni que una lectura permitida sea inocua para tus datos. Tampoco ata la orden que arranca cada servidor: sale de tu lista local al ejecutar y no entra en el hash; la caja lo dice con una línea por servidor (atarla es un requisito de A2, en `openspec/changes/code-mode/design.md`). El plan solo lee lo que tu lista permite; lo que el servidor haga con esa lectura es cosa del servidor.
+Lo que **no** garantiza: que un modelo real proponga el plan que la pregunta necesita, ni que una lectura permitida sea inocua para tus datos. La orden que arranca cada servidor no entra en el hash aprobado; la caja lo dice con una línea por servidor. El plan solo lee lo que tu lista permite; lo que el servidor haga con esa lectura es cosa del servidor.
+
+Desde A2 (rama `feature/code-mode-loop`):
+
+- Una lectura marcada `auto_read` en tu lista se ejecuta sin la caja cuando **todos** los pasos del plan lo son; se ve antes (`running plan:`) y queda auditada con el medio `rule`. Solo vale en herramientas `read`; las escrituras siguen denegadas por la pasarela. `HARNESS_AUTO_READ=off` la apaga.
+- Lo que la lista decía de cada paso al leer el plan (orden de arranque y sus argumentos, entorno, carpeta, plazos, operación, `auto_read`, tope y argumentos) queda atado por un hash. Si cambia antes de ese paso, el paso no se llama (`list_changed`). Probado con siete cambios distintos, con su control (la misma lista escrita otra vez corre).
+- Lo que **no** cubre: quien pueda escribir tu lista puede marcar `auto_read`. La lista tiene que ser solo tuya; en Windows el harness no mira sus ACL.
 
 ## Matriz SEC y deuda conocida
 

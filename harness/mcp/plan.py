@@ -62,6 +62,7 @@ from harness.mcp.policy import (
     MAX_ARGS_BYTES,
     canonical_json,
     decide_before_start,
+    entry_sha256,
     parse_arguments,
 )
 from harness.skills.approvals import is_invisible, normalise_content
@@ -71,6 +72,7 @@ from harness.text.safe_text import safe_foreign_line, terminal_safe
 
 PLAN_FORMAT = "ai-harness/plan/1"
 PLAN_HASH_DOMAIN = b"ai-harness/plan/v1\n"
+ENTRIES_HASH_DOMAIN = b"ai-harness/plan-entries/v1\n"
 MAX_REPLY_CHARS = 200_000  # the provider's own reading bound (`REPLY_MAX_CHARS`)
 MAX_PLAN_BYTES = 16 * 1024
 MAX_PLAN_DEPTH = 6  # plan, steps, step, args, value; one level left for a refused `$ref`
@@ -159,6 +161,14 @@ class PlanStep:
     operation: str  # what the allowlist declares: always "read" in a plan of version 1
     arguments: Mapping[str, Any]  # read-only; every value a JSON scalar
     canonical_arguments: bytes  # what the gateway would receive, byte for byte
+    # The policy's own decision when the plan was read (`Decision.reason`, "allowed"), what
+    # the approval content and the `running plan:` lines show (code-mode A2).
+    decision: str
+    # Whether the local list allowed this read by rule (`auto_read`) when the plan was read.
+    auto_read: bool
+    # `policy.entry_sha256` of the server's and the tool's entries when the plan was read: the
+    # executor computes it again from the list as it is then and refuses the plan if it differs.
+    entry_sha256: str
 
 
 @dataclass(frozen=True)
@@ -170,12 +180,26 @@ class Plan:
     canonical: bytes
     sha256: str
 
+    @property
+    def entries_sha256(self) -> str:
+        """One hash of every step's `entry_sha256`, in order: what the plan's row binds."""
+        return entries_hash(step.entry_sha256 for step in self.steps)
+
+    @property
+    def by_rule(self) -> bool:
+        """Every step is a read the local list allows by rule (`auto_read`)."""
+        return all(step.auto_read for step in self.steps)
+
 
 Reading = NoPlan | Refusal | Plan
 
 
 def plan_hash(canonical: bytes) -> str:
     return hashlib.sha256(PLAN_HASH_DOMAIN + canonical).hexdigest()
+
+
+def entries_hash(step_hashes) -> str:
+    return hashlib.sha256(ENTRIES_HASH_DOMAIN + "\n".join(step_hashes).encode()).hexdigest()
 
 
 # -- the closed schema ---------------------------------------------------------------------------
@@ -354,8 +378,12 @@ def _steps(model: _PlanModel, config: LoadedConfig) -> Plan | Refusal:
                                        parse_arguments(canonical.decode("utf-8")))
         if not decision.allowed:
             return Refusal(_POLICY_REASONS[decision.reason], _clean(decision.detail), item.id)
+        tool = config.servers[item.server].tools[item.tool]
+        entry = entry_sha256(config, item.server, item.tool)
+        assert entry is not None  # the policy allowed it: the server and the tool are listed
         steps.append(PlanStep(item.id, item.server, item.tool, str(decision.operation),
-                              MappingProxyType(dict(item.args)), canonical))
+                              MappingProxyType(dict(item.args)), canonical, decision.reason,
+                              tool.auto_read, entry))
     whole = canonical_json(model.model_dump(mode="python"))
     return Plan(model.nonce, tuple(steps), whole, plan_hash(whole))
 

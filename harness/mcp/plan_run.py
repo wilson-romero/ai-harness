@@ -43,8 +43,8 @@ from harness.core.errors import HarnessError
 from harness.mcp.audit import PlanLink, args_key, recover_stale
 from harness.mcp.config import LoadedConfig
 from harness.mcp.gateway import COMPLETED, DENIED, TIMEOUT, CallReport, call_tool, server_log
-from harness.mcp.plan import PLAN_FORMAT, Plan, plan_hash
-from harness.mcp.policy import canonical_json, parse_arguments
+from harness.mcp.plan import PLAN_FORMAT, Plan, PlanStep, plan_hash
+from harness.mcp.policy import canonical_json, entry_sha256, parse_arguments
 from harness.skills.approvals import Proposal, Verdict, normalise_content
 from harness.storage import repositories as repo
 from harness.storage.database import open_database, transaction
@@ -84,13 +84,16 @@ def deadline_s(plan: Plan, config: LoadedConfig) -> int:
 
 def step_lines(plan: Plan) -> list[str]:
     """The approval content: for each step its server, tool, canonical arguments and the
-    policy's decision (always `allowed`, or the plan would have been refused), then what it
-    reads in plain words. Written by the harness from the validated plan alone, so that the
-    executor can write it again from the plan it is handed."""
+    policy's decision as it was taken when the plan was read (`PlanStep.decision`; always
+    `allowed`, or the plan would have been refused) with `auto_read` when the list allows the
+    read by rule, then what it reads in plain words. Written by the harness from the
+    validated plan alone, so that the executor can write it again from the plan it is
+    handed."""
     lines: list[str] = []
     for position, step in enumerate(plan.steps, start=1):
+        rule = "  auto_read" if step.auto_read else ""
         lines.append(f"step {position} of {len(plan.steps)} ({step.id}): "
-                     f"{step.server}.{step.tool}  {step.operation}  allowed")
+                     f"{step.server}.{step.tool}  {step.operation}  {step.decision}{rule}")
         lines.append(f"  args: {step.canonical_arguments.decode('utf-8')}")
         lines.append(f"  reads: {_reads(step.server, step.tool, step.arguments)}")
     lines.append(f"plan sha256: {plan.sha256}")
@@ -124,12 +127,17 @@ def plan_proposal(plan: Plan, *, session_id: UUID | str, request_id: UUID | str,
     )
 
 
+RESULTS_SHOWN_ONLY = "shown here only; nothing is sent back to the provider"
+
+
 def approval_header(proposal: Proposal, plan: Plan, approval_hash: str, expires_at: str,
-                    deadline: int) -> list[str]:
+                    deadline: int, results: str = RESULTS_SHOWN_ONLY) -> list[str]:
     """The harness's lines above the plan in the box (D9): the statement, what the plan is,
-    the hash and the expiry, and for each distinct server that its launch command is not part
-    of what is approved (it comes from the person's local list; A2 binds it). None of them
-    comes from the reply."""
+    the hash and the expiry, for each distinct server that its launch command is not part of
+    what is approved (it comes from the person's local list), and that the list's entries of
+    the steps are bound as they were when the plan was read (A2): a change before the run
+    refuses the plan. `results` says where the results go (A3: back to the provider in a
+    loop). None of them comes from the reply."""
     servers = dict.fromkeys(step.server for step in plan.steps)  # in the plan's order
     return [
         "Plan approval requested",
@@ -139,8 +147,10 @@ def approval_header(proposal: Proposal, plan: Plan, approval_hash: str, expires_
         "local MCP list",
         *(f"  server:   {server} is started by the command in your local MCP list; that "
           "command is not part of this approval" for server in servers),
+        f"  bound:    the list's entries of these steps as they are now (sha256 "
+        f"{plan.entries_sha256[:16]}); if one changes before the run, nothing runs",
         f"  deadline: {deadline} s for the whole plan; the first step that fails stops it",
-        "  results:  shown here only; nothing is sent back to the provider",
+        f"  results:  {results}",
         f"  hash:     {approval_hash}",
         f"  expires:  {expires_at} (UTC)",
     ]
@@ -169,10 +179,12 @@ def record_plan(conn: sqlite3.Connection, *, plan_id: str, session_id: UUID, req
         )
         conn.execute(
             "INSERT INTO plan_runs (plan_id, session_id, request_id, plan_sha256, "
-            "approval_hash, steps, deadline_s, shown_max_bytes, approval, status, created_at, "
-            "expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'awaiting_approval', ?, ?)",
+            "approval_hash, entries_sha256, steps, deadline_s, shown_max_bytes, approval, "
+            "status, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'awaiting_approval', ?, ?)",
             (plan_id, str(session_id), str(request_id), plan.sha256, approval_hash,
-             len(plan.steps), deadline, SHOWN_MAX_BYTES, iso(now), expires),
+             plan.entries_sha256, len(plan.steps), deadline, SHOWN_MAX_BYTES, iso(now),
+             expires),
         )
         _audit(conn, "plan.approval.requested", "pending", session_id, request_id,
                f"plan={plan_id};hash={approval_hash};steps={len(plan.steps)}")
@@ -205,6 +217,33 @@ def record_verdict(conn: sqlite3.Connection, *, plan_id: str, verdict: Verdict,
         _audit(conn, f"plan.approval.{state}", state, UUID(row["session_id"]),
                UUID(row["request_id"]), detail)
     return state
+
+
+RULE_IDENTITY = "rule:auto_read"
+
+
+def record_rule(conn: sqlite3.Connection, *, plan_id: str, plan: Plan, now: datetime) -> str:
+    """A plan approved by the local list (A2): every step was `auto_read` when it was read.
+    No box is asked; the row says `means = rule` and the audit `plan.approval.granted` with
+    `means=rule`. Returns the approval state it leaves (`granted`). Refuses (programming
+    error) a plan that is not wholly by rule: nothing but such a plan is ever approved here."""
+    if not plan.by_rule:
+        raise HarnessError("only a plan whose steps are all auto_read is approved by rule")
+    row = conn.execute("SELECT session_id, request_id FROM plan_runs WHERE plan_id = ?",
+                       (plan_id,)).fetchone()
+    decided = iso(now)
+    with transaction(conn):
+        changed = conn.execute(
+            "UPDATE plan_runs SET approval = 'granted', means = 'rule', identity = ?, "
+            "decided_at = ? WHERE plan_id = ? AND approval = 'pending' "
+            "AND status = 'awaiting_approval'",
+            (RULE_IDENTITY, decided, plan_id),
+        ).rowcount
+        if changed != 1:
+            return "undecided"
+        _audit(conn, "plan.approval.granted", "granted", UUID(row["session_id"]),
+               UUID(row["request_id"]), f"plan={plan_id};means=rule")
+    return "granted"
 
 
 def _audit(conn: sqlite3.Connection, event: str, outcome: str, session_id: UUID | None,
@@ -352,6 +391,7 @@ def _execute(conn: sqlite3.Connection, data_dir: Path, approved: ApprovedPlan,
         or plan.sha256 != row["plan_sha256"]
         or claimed.approval_hash != row["approval_hash"]
         or [(s.id, s.server, s.tool, s.canonical_arguments) for s in plan.steps] != steps
+        or row["entries_sha256"] != plan.entries_sha256  # NULL before migration 010
     )
     if not altered:
         try:
@@ -388,13 +428,35 @@ def _execute(conn: sqlite3.Connection, data_dir: Path, approved: ApprovedPlan,
                               "the MCP list cannot be read now; nothing was run", now,
                               consumed=True)
     return _run_steps(conn, data_dir, approved, config, environ, stop, clocks, steps,
-                      int(row["deadline_s"]))
+                      int(row["deadline_s"]), by_rule=row["means"] == "rule")
+
+
+def changed_entry(step: PlanStep, config: LoadedConfig, *, by_rule: bool) -> bool:
+    """Whether the local list's entry of this step is not the one bound when the plan was
+    read (A2): its server's command, arguments, environment names, folder or deadlines, or
+    its tool's operation, `auto_read`, result limit or arguments. A step whose server or tool
+    is no longer listed is not "changed" here: the gateway denies it as it always did. A plan
+    approved by rule also needs the tool to be `auto_read` still."""
+    now = entry_sha256(config, step.server, step.tool)
+    if now is None:
+        return False
+    if now != step.entry_sha256:
+        return True
+    return by_rule and not config.servers[step.server].tools[step.tool].auto_read
+
+
+def _list_changed(step: PlanStep, position: int) -> StepResult:
+    detail = (f"the local MCP list's entry for {step.server}.{step.tool} changed after the "
+              "plan was read (command, environment, folder, deadlines, operation or limits); "
+              "it was not called")
+    return StepResult(position, step.id, step.server, step.tool, DENIED, "list_changed",
+                      detail)
 
 
 def _run_steps(conn: sqlite3.Connection, data_dir: Path, approved: ApprovedPlan,
                config: LoadedConfig, environ: Mapping[str, str], stop: object,
                clocks: _Clocks, steps: list[tuple[str, str, str, bytes]],
-               deadline: int) -> PlanReport:
+               deadline: int, *, by_rule: bool) -> PlanReport:
     from harness.mcp.client import StopSignal
 
     assert isinstance(stop, StopSignal)
@@ -413,6 +475,11 @@ def _run_steps(conn: sqlite3.Connection, data_dir: Path, approved: ApprovedPlan,
                 detail = "stopped before this step; it was not called"
                 results.append(StepResult(position, step_id, server, tool, "not_run", code,
                                           detail))
+                break
+            if changed_entry(approved.plan.steps[position - 1], config, by_rule=by_rule):
+                result = _list_changed(approved.plan.steps[position - 1], position)
+                results.append(result)
+                status, code, detail = "failed", "list_changed", result.detail
                 break
             parsed = parse_arguments(arguments.decode("utf-8"))
             try:

@@ -608,6 +608,21 @@ En la rama `feature/code-mode-plan` (sin merge, 2026-11-27; `openspec/changes/co
 
 Se guarda una fila por plan en `plan_runs` (su hash, el de la aprobación, el estado, el paso donde paró y cómo se aprobó) y, en `tool_calls`, cada paso con el `plan_id` y su posición. Como en `mcp call`, sin argumentos ni resultados.
 
+#### Lecturas permitidas por regla: `auto_read`
+
+En la rama `feature/code-mode-loop` (A2, 2026-11-27). En tu lista local, una herramienta `read` puede llevar `"auto_read": true`:
+
+```json
+"get_project_metadata": {"operation": "read", "auto_read": true,
+                         "arguments": {"project": {"type": "string", "max_length": 64, "required": true}}}
+```
+
+- Un plan cuyos pasos son **todos** `auto_read` se ejecuta sin la caja. Antes de que corra se ve `running plan: …` y, como texto de fuera del harness, cada paso con su servidor, su herramienta y sus argumentos canónicos. Queda en `plan_runs` con `means = rule` y en la auditoría como `plan.approval.granted` con `means=rule`. Ctrl+C lo para igual.
+- Un plan con un solo paso que no es `auto_read` va **entero** a la caja.
+- `auto_read` en una herramienta `write`, o con un valor que no es `true`/`false`, es un error de la lista: no arranca nada. Las escrituras siguen denegadas.
+- `HARNESS_AUTO_READ=off` apaga la regla para esa ejecución del harness: todo plan pide la caja.
+- Lo que el plan leyó de tu lista queda atado: si entre la lectura del plan y la ejecución de un paso cambia la entrada de su servidor (orden, argumentos, entorno, carpeta, plazos) o de su herramienta (operación, `auto_read`, tope, argumentos), ese paso no se llama y el plan termina `list_changed`. La `description` no cuenta. La caja dice el hash en su línea `bound:`.
+
 ## Configuración
 
 Por variables de entorno (ver `.env.example`):

@@ -23,6 +23,7 @@ Checks and reasons, in the order they are applied (the first failure wins):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Mapping
@@ -105,6 +106,27 @@ def canonical_json(value: Any) -> bytes:
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
     ).encode("utf-8")
+
+
+ENTRY_HASH_DOMAIN = b"ai-harness/mcp-entry/v1\n"
+
+
+def entry_sha256(config: LoadedConfig, server: str, tool: str) -> str | None:
+    """The hash of what the local list says about one call (code-mode A2): the server's
+    entry (command and its arguments, environment names, folder, deadlines) and the tool's
+    (operation, `auto_read`, result limit, declared arguments), as they are now. The tool's
+    `description` is left out: it only words the catalogue and never changes what runs.
+    None when the server or the tool is not listed."""
+    entry = config.servers.get(server)
+    if entry is None or tool not in entry.tools:
+        return None
+    bound = {
+        "server": server,
+        "tool": tool,
+        "entry": entry.model_dump(mode="json", exclude={"tools"}),
+        "tool_entry": entry.tools[tool].model_dump(mode="json", exclude={"description"}),
+    }
+    return hashlib.sha256(ENTRY_HASH_DOMAIN + canonical_json(bound)).hexdigest()
 
 
 def decide_before_start(
