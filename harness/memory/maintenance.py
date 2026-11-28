@@ -228,9 +228,12 @@ def _broken_links(notes: list[Note], known: list[str], budget: _Budget) -> list[
             continue
         for match in _WIKI_LINK_RE.finditer(note.body):
             # Inside a Markdown table the alias pipe is escaped, `[[a/b\|alias]]`, as the
-            # capture writes `agents/_skills-index.md`: the `\` belongs to the table, not to
-            # the target (memory-format-conformance D6).
-            target = match.group(1).split("|", 1)[0].removesuffix("\\")
+            # capture writes `agents/_skills-index.md`: that `\` belongs to the table, not to
+            # the target. Only before a `|`: `[[a/b\]]` is still looked up as written
+            # (memory-format-conformance D6).
+            target, pipe, _ = match.group(1).partition("|")
+            if pipe:
+                target = target.removesuffix("\\")
             target = target.split("#", 1)[0].strip()
             if not target:
                 continue  # a link to a heading of the same note
@@ -268,6 +271,13 @@ def _index_audit(
     file like any other (memory-format-conformance D5). `known` is every file the confined
     walk saw, so the answer never depends on anything outside the vault: an entry that climbs
     out of it names nothing the harness may look at, and is reported as dangling.
+
+    As in the original (`memoria-dream.sh` at 92b19ea, lines 155-160), only a target that
+    ends in `.md` is an entry (`..` or a folder are not), and it is compared as written: an
+    absolute `/x.md` (joined onto the file system root there) is dangling and reported as
+    written; no `%20` decoding, no case folding and no Unicode normalisation, because the
+    original's answer for those depends on the file system. A target in `Memoria/Archivo/`
+    is dangling too: the walk does not list that folder and nothing else may (design D5).
     """
     present = set(known)
     named: set[str] = set()
@@ -275,9 +285,10 @@ def _index_audit(
     for index in indexes:
         for line in index.text.split("\n"):
             match = _INDEX_ENTRY_RE.match(line)
-            if not match or "://" in match.group(1):
+            if not match or "://" in match.group(1) or not match.group(1).endswith(".md"):
                 continue
-            target = _index_target(match.group(1))
+            entry = match.group(1)
+            target = entry if entry.startswith("/") else _index_target(entry)
             named.add(target)
             if target not in present:
                 dangling.append(f"{index.relative} -> {target}")
@@ -286,11 +297,11 @@ def _index_audit(
 
 
 def _index_target(entry: str) -> str:
-    """The vault path an index entry names, with `.` and `..` resolved as text (nothing on
-    disk is looked at). One that climbs out of the vault keeps a leading `..` and so names no
-    file of the walk."""
+    """The vault path a relative index entry names, with `.` and `..` resolved as text
+    (nothing on disk is looked at). One that climbs out of the vault keeps a leading `..` and
+    so names no file of the walk."""
     parts: list[str] = []
-    for part in f"{CURATED_MEMORY}/{entry.split('#', 1)[0]}".split("/"):
+    for part in f"{CURATED_MEMORY}/{entry}".split("/"):
         if part in ("", "."):
             continue
         if part == ".." and parts and parts[-1] != "..":

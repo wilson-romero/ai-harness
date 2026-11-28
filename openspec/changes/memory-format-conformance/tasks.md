@@ -47,13 +47,11 @@
   - **control negativo:** `test_every_other_note_still_needs_created`, con una lección, una sesión, `projects/demo-alpha/otra/_project.md`, `Memoria-CC/_index.md` y sin ruta: todos siguen diciendo `created is not YYYY-MM-DD`;
   - `test_a_created_that_is_there_is_still_checked`.
   - Recibo (2026-11-28): pasan. En 2.1 fallaban con el código antiguo.
-- [x] 2.3 D2, valor sin comillas con `: ` (`notes._is_quoted`, `_parse_block`). Oráculos:
-  - `test_unquoted_colon_space_breaks_the_frontmatter` (3 casos);
-  - `test_maintain_reports_the_broken_description` (`Memoria-CC/feedback_rota.md (unsupported)`);
+- [x] 2.3 D2, valor sin comillas con `: `. **Revisada en la tarea 5.1:** la primera versión (`notes._is_quoted`, `_parse_block` devolvía `None`) cambiaba la selección y se revirtió. Los oráculos de la primera versión eran:
+  - `test_unquoted_colon_space_breaks_the_frontmatter` (3 casos), que pasa a llamarse `test_unquoted_colon_space_is_reported_but_the_fields_are_read` en 5.1;
+  - `test_maintain_reports_the_broken_description`, con el motivo `unsupported` cambiado a `a value is not valid YAML` en 5.1;
   - **control negativo:** `test_quoted_or_without_space_it_is_fine`. Entre comillas simples o dobles, `https://…` y `12:15:00` siguen siendo válidos.
-
-  Efecto lateral sobre `SKILL.md`: `git grep -n -E "^description: [^\"'].*: " -- skills tests/fixtures` no devuelve nada.
-  - Recibo (2026-11-28): pasan. El grep sale con código 1, sin resultados.
+  - Recibo (2026-11-28, `22886ee`): pasan.
 - [x] 2.4 D3, el rechazo del proyecto dice el motivo (`paths.slug_problem`, `SLUG_RULE`). La regla no cambia.
   - **Oráculo:** `test_rejected_project_identifiers` (26 casos). Fija el mensaje exacto de cada entrada, más los tres nombres que deriva el original (con espacio, con acento y de 136 caracteres).
   - **Control negativo:** las entradas válidas de `test_accepted_project_identifiers` siguen aceptadas sin cambios.
@@ -106,10 +104,36 @@ Cada una cambió porque el test fijaba un dato del vault sintético antiguo, no 
 
     La aserción de `test_rejected_project_identifiers` no aparece porque su primera línea no cambió; su valor esperado ahora incluye el motivo (3.6).
 
+## 5. Revisión independiente del 2026-11-28 sobre `22886ee`
+
+No hay ningún bloqueo de seguridad. Cinco hallazgos, cada uno con un test que primero se vio fallar.
+
+- [x] 5.0 Control negativo de todo el lote, sobre `22886ee` y antes de tocar el código: `uv run pytest -q -p no:randomly tests/unit/test_memory_format_conformance.py tests/unit/test_memory_paths.py`.
+  - Recibo (2026-11-28): `16 failed, 70 passed`. Fallan los 15 tests nuevos de 5.1–5.4 y `test_rejected_project_identifiers[Ébano-x-…]`.
+
+    Los casos de `test_shapes_the_report_flags` fallan sobre `22886ee` porque el motivo era `unsupported`, no la forma. Los que de verdad fallaban por la forma son `test_shapes_the_report_does_not_flag[h: a # b: c]` y `[h: a\t# b: c]` (falso positivo) y `test_shapes_the_report_flags[tab: a:\tb]` y `[k: "a" b: "c"]` (falsos negativos).
+- [x] 5.1 MEDIO. D2 cambiaba la selección. `_parse_block` vuelve a ser exactamente el de `origin/develop`, incluido `_unquote`: `git diff origin/develop -- harness/memory/notes.py` no toca `_parse_block` ni `_unquote`. La regla nueva es `Frontmatter.yaml_error`, y solo la mira `frontmatter_problem`. Oráculos:
+  - `test_the_report_rule_does_not_change_what_the_context_selects`: nota de `Memoria-CC/` con `tags: [demo-alpha]` y `description: Estilo: breve`, y sesión con `project: Cliente: X/demo-alpha`. El sha256 del bloque es igual al pin `4ae9aed…`, que calculó el código de `origin/develop` `e2ce87f` (sus tres ficheros de `harness/memory/` puestos con `git checkout origin/develop --`) sobre el mismo vault. La nota está en el bloque y la sesión conserva `(session, 2026-11-21)`.
+  - `test_the_report_rule_does_not_change_the_project_search`.
+  - `test_a_decision_with_an_unquoted_colon_is_still_recognised` (`find_decision_notes`).
+  - `test_maintain_still_reports_the_unquoted_colon`.
+  - Recibo (2026-11-28): con el código de `origin/develop`, los tres de selección pasan (`3 passed`). Con `22886ee` fallan, y la cabecera era `(-, -)`. Con la corrección pasan. Ya no hay efecto sobre `SKILL.md`, porque `definition.py` mira `syntax_ok`.
+- [x] 5.2 BAJO. Formas de `: ` sin un parser YAML: `notes._breaks_yaml` y `_quoted_end`. El comentario se corta desde un espacio o tabulador seguido de `#`; un `:` seguido de espacio o tabulador cuenta; una comilla cerrada seguida de algo que no es un comentario cuenta. El spec delta dice exactamente qué formas se marcan («Línea del frontmatter que YAML rechaza»). Oráculos:
+  - `test_shapes_the_report_flags` (7 casos);
+  - **control negativo:** `test_shapes_the_report_does_not_flag` (9 casos, entre ellos `h: a # b: c`, `'it''s: fine'` y `"a\" b: c"`).
+  - Recibo (2026-11-28): pasan. Mi primera versión del test tenía `h: a #b: c` como «sí»; YAML lo lee como un comentario, porque hay un espacio antes del `#`, así que lo cambié a `h: a#b: c`. Era un error del test, no del código.
+- [x] 5.3 BAJO. `\` sin alias: `_broken_links` quita la `\` solo si va antes de una `|`. Oráculo: `test_a_backslash_without_an_alias_is_still_a_broken_link`. `[[agents/skills/revisor\]]` sale en `broken_links` con la corrección `agents/skills/revisor.md`. **Control negativo:** `test_table_escaped_alias_is_not_a_broken_link` sigue pasando.
+  - Recibo (2026-11-28): pasa. Con `22886ee` el enlace no salía.
+- [x] 5.4 BAJO. Entradas de índice, caso por caso con el comprobador del original (`memoria-dream.sh` en `92b19ea`, líneas 155–160, leído como datos). Solo cuentan los destinos que terminan en `.md`, así que `..` y `../Lecciones/` no son entradas. `/x.md` cuelga y se informa tal como está escrita. Siguen colgando, documentados en design D5: `%20`, diferencias de mayúsculas y de NFC/NFD (la respuesta del original depende del sistema de ficheros) y `Memoria/Archivo/` (el recorrido no lo lista y no se mira el disco). Oráculo: `test_index_entries_that_are_not_notes_or_are_absolute`.
+  - Recibo (2026-11-28): pasa. Con `22886ee`, `..` salía como `Memoria-CC/MEMORY-tecnico.md -> ` (ruta vacía), y `/Lecciones/…` como `Memoria-CC/Lecciones/…`.
+- [x] 5.5 BAJO. Orden de los motivos: espacio y no ASCII van antes del primer carácter. Oráculo: `test_rejected_project_identifiers`, con dos casos nuevos: `Ébano-x` da `not ASCII` y `Mi Ébano` da `space`.
+  - Recibo (2026-11-28): pasan los 28 casos.
+
 ## 4. Puerta y documentación
 
 - [x] 4.1 Suite completa sin Edge ni Copilot. Oráculo: `caffeinate -i uv run pytest -m "not edge and not copilot"`.
-  - Recibo (2026-11-28): `2560 passed, 191 deselected in 439.50s`, código 0.
+  - Recibo (2026-11-28, `22886ee`): `2560 passed, 191 deselected in 439.50s`, código 0.
+  - Recibo (2026-11-28, tras la sección 5): `2584 passed, 191 deselected in 442.89s`, código 0. `origin/develop` no se movió (`e2ce87f`), así que no hubo merge. `check_sec_matrix.py` → `PASS (15 rows, 206 tests)`. El grep de plataforma, vacío. El grep de aserciones quitadas devuelve las mismas 4 líneas de 3.7.
 - [x] 4.2 `openspec validate --all --strict --no-interactive`.
   - Recibo (2026-11-28): `Totals: 29 passed, 0 failed (29 items)`.
 - [x] 4.3 `uv run python scripts/check_sec_matrix.py`. Comprueba que la matriz no cita ningún id de test que ya no exista, como los casos de `test_rejected_project_identifiers` renombrados.
@@ -130,3 +154,4 @@ Cada una cambió porque el test fijaba un dato del vault sintético antiguo, no 
   - Ejecución previa del agente (2026-11-28, macOS arm64, con el Mock, `</dev/null`):
     - `demo_project_memory`, `demo_architecture_skills` y `demo_mvp_without_ea` → `demo: PASS`, código 0.
     - `demo_interactive_shell` falló en el paso (g) (`demo: FAIL - the pseudo-terminal test failed`, 1 failed, 16 passed) mientras la suite completa corría en paralelo. Los dos ficheros que lanza ese paso, `tests/integration/test_chat_terminal.py` y `test_chat_tui_terminal.py`, pasan en la suite completa (4.1), y la demo, lanzada sola al terminar la suite, dio `demo: PASS`, código 0. Se lee como un fallo de tiempos bajo carga, no del cambio: el único uso del vault sintético en esos tests es completar `demo-a` a `demo-alpha`.
+  - Ejecución del agente tras la sección 5 (2026-11-28), las cuatro en secuencia y sin la suite corriendo: `demo_project_memory`, `demo_architecture_skills`, `demo_mvp_without_ea` y `demo_interactive_shell` → `demo: PASS`, código 0.

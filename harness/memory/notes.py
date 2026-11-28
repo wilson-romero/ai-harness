@@ -31,6 +31,11 @@ class Frontmatter:
     present: bool  # the text opens with a `---` line
     syntax_ok: bool  # present, closed and made only of the supported forms
     fields: Mapping[str, FieldValue] = field(default_factory=dict)
+    # A `key: value` line that YAML would refuse although this parser reads it
+    # (`_breaks_yaml`). Only `frontmatter_problem` looks at it: the fields, and so the
+    # selection, the headers and the decision lookup, are read exactly as before
+    # (memory-format-conformance D2, revised after the independent review of 2026-11-28).
+    yaml_error: bool = False
 
 
 @dataclass(frozen=True)
@@ -93,10 +98,12 @@ def parse_frontmatter(text: str) -> tuple[Frontmatter, str]:
     except StopIteration:
         return Frontmatter(present=True, syntax_ok=False), text
     body = "\n".join(lines[end + 1 :])
-    fields = _parse_block(lines[1:end])
+    block = lines[1:end]
+    fields = _parse_block(block)
     if fields is None:
         return Frontmatter(present=True, syntax_ok=False), body
-    return Frontmatter(present=True, syntax_ok=True, fields=fields), body
+    yaml_error = any(_breaks_yaml(line) for line in block)
+    return Frontmatter(present=True, syntax_ok=True, fields=fields, yaml_error=yaml_error), body
 
 
 def _parse_block(lines: list[str]) -> dict[str, FieldValue] | None:
@@ -130,24 +137,66 @@ def _parse_block(lines: list[str]) -> dict[str, FieldValue] | None:
                 return None
             inner = value[1:-1].strip()
             fields[key] = tuple(_unquote(p.strip()) for p in inner.split(",")) if inner else ()
-        elif _is_quoted(value):
-            fields[key] = _unquote(value)
-        elif ": " in value or value.endswith(":"):
-            # YAML reads `key: a: b` as a mapping inside a plain scalar, which is an error:
-            # Obsidian and `claude-memory-system` stop indexing that note, so it is not valid
-            # here either (memory-format-conformance D2). Quoted, the same text is fine.
-            return None
         else:
-            fields[key] = value
+            fields[key] = _unquote(value)
     return fields
 
 
-def _is_quoted(value: str) -> bool:
-    return len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'"
+_COMMENT_RE = re.compile(r"[ \t]#")
+_MAPPING_INDICATOR_RE = re.compile(r":[ \t]")
+
+
+def _breaks_yaml(line: str) -> bool:
+    """Whether YAML would refuse this `key: value` line of a block the parser accepted.
+
+    Two shapes only, both of which YAML refuses for certain (memory-format-conformance D2):
+
+    - a plain value (not quoted, not a `[...]` list) that, without its comment (from the
+      first space or tab followed by `#`), has `:` followed by a space or a tab, or ends in
+      `:`; for example `description: Estilo: breve`;
+    - a value that opens a quoted scalar and closes it on this line, with something after it
+      other than spaces, tabs and a comment; for example `k: "a" b`.
+
+    Everything else is not flagged: list items, inline lists, an indented line and a quoted
+    scalar that does not close on its line.
+    """
+    if not line or line[0].isspace() or line.lstrip().startswith("-") or ":" not in line:
+        return False
+    value = line.partition(":")[2].strip(" \t")
+    if not value or value.startswith("["):
+        return False
+    if value[0] in "\"'":
+        end = _quoted_end(value)
+        if end is None:
+            return False
+        rest = value[end + 1 :]
+        return bool(rest.strip(" \t")) and not _COMMENT_RE.match(rest)
+    plain = _COMMENT_RE.split(value, maxsplit=1)[0].rstrip(" \t")
+    return bool(_MAPPING_INDICATOR_RE.search(plain)) or plain.endswith(":")
+
+
+def _quoted_end(value: str) -> int | None:
+    """Index of the quote that closes the scalar `value` opens, or None if it stays open:
+    `\\` escapes in double quotes, `''` is a quote in single quotes."""
+    quote, i = value[0], 1
+    while i < len(value):
+        char = value[i]
+        if quote == '"' and char == "\\":
+            i += 2
+            continue
+        if char == quote:
+            if quote == "'" and value[i + 1 : i + 2] == "'":
+                i += 2
+                continue
+            return i
+        i += 1
+    return None
 
 
 def _unquote(value: str) -> str:
-    return value[1:-1] if _is_quoted(value) else value
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
 
 
 def as_list(value: FieldValue | None) -> tuple[str, ...]:
@@ -192,6 +241,8 @@ def frontmatter_problem(frontmatter: Frontmatter, relative: str | None = None) -
         return "missing"
     if not frontmatter.syntax_ok:
         return "unsupported"
+    if frontmatter.yaml_error:
+        return "a value is not valid YAML"
     if not isinstance(frontmatter.fields.get("type"), str) or not frontmatter.fields["type"]:
         return "missing type"
     for key in ("created", "updated"):

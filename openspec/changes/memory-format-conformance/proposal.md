@@ -33,7 +33,7 @@ Se demuestra en **macOS**. Es el mismo código para Windows, y una ejecución al
    - `contexto-reciente.md` con secciones `## YYYY-MM-DD`;
    - los ficheros que faltaban.
 2. **`created` opcional** solo en las tres rutas que la captura reescribe (D1).
-3. **Un valor sin comillas con `: ` invalida el frontmatter** (D2).
+3. **Una línea del frontmatter que YAML rechaza** (`description: Estilo: breve`) **se informa** en `memory maintain` (D2). Los campos se leen exactamente igual que en `develop`, así que la selección, las cabeceras y el reconocimiento de decisiones no cambian. Esto quedó así el 2026-11-28, tras la revisión independiente; la primera versión invalidaba el bloque.
 4. **El rechazo de un proyecto dice el motivo** (D3). La regla no se relaja.
 5. **Huérfanas y duplicados: solo el primer nivel de `Memoria-CC/`** (D4).
 6. **Las entradas de un índice son rutas relativas a `Memoria-CC/`** y se comprueban contra los ficheros del vault (D5).
@@ -51,9 +51,11 @@ Se demuestra en **macOS**. Es el mismo código para Windows, y una ejecución al
 
 ### Modified Capabilities
 
-- `memory-maintenance`: se añaden dos requisitos.
-  - «Índices de Memoria-CC con el formato real» cubre la entrada relativa a `Memoria-CC/` y el primer nivel.
-  - «Frontmatter y enlaces con el formato real» cubre las notas de la captura sin `created`, el valor con `: `, el enlace de tabla y el vault sintético limpio.
+- `memory-maintenance`: se añaden cuatro requisitos.
+  - «Índices de Memoria-CC con el formato real» cubre la entrada relativa a `Memoria-CC/`, las que terminan en `.md` y el primer nivel.
+  - «Frontmatter y enlaces con el formato real» cubre las notas de la captura sin `created`, el enlace de tabla, la barra sin alias y el vault sintético limpio.
+  - «Línea del frontmatter que YAML rechaza» dice qué formas se informan.
+  - «La regla de YAML solo informa» dice que esa regla no cambia la selección.
 
   «Hallazgos del informe» no cambia: sus categorías son las mismas, y lo que cambia es cómo se lee el formato real. Se añaden requisitos en vez de modificarlo porque el texto de un requisito no puede pasar de 500 caracteres en modo estricto.
 - `memory-vault`: cambia «Identificador de proyecto validado». El mensaje dice el motivo y se añade el escenario del nombre con espacio. Los escenarios existentes siguen ciertos.
@@ -67,7 +69,7 @@ El escenario «Cabecera corta sin pérdida» del change `prompt-economy`, aún s
 ## Impact
 
 - Código: `harness/memory/paths.py` (`slug_problem`, `SLUG_RULE`), `harness/memory/notes.py` (`_is_quoted`, `created_is_optional`, `frontmatter_problem(…, relative)`) y `harness/memory/maintenance.py`.
-- **Efecto lateral:** `harness/skills/definition.py` usa el mismo `parse_frontmatter`. Un `SKILL.md` cuyo `description:` lleve `: ` sin comillas pasa a ser inválido. Ningún Skill del repositorio lo tiene, y la suite completa pasa.
+- **Sin efecto lateral sobre Skills:** `harness/skills/definition.py` usa el mismo `parse_frontmatter`, pero mira `syntax_ok`, que no cambia (D2 revisada).
 - Tests:
   - uno nuevo, `tests/unit/test_memory_format_conformance.py`;
   - `tests/unit/test_memory_paths.py` es más estricto: fija el motivo de cada entrada;

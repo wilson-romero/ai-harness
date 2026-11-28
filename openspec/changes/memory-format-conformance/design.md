@@ -32,16 +32,34 @@ El repositorio se leyó como datos: no se ejecutó ningún script. Aquí el form
   - `maintenance.py` pasa `note.relative`.
   - `test_every_fixture_note_is_valid_and_loads` comprueba con la ruta.
 
-### D2. Un escalar sin comillas con `: ` dentro invalida el frontmatter
+### D2. Una línea que YAML rechaza se informa; los campos se leen igual que antes
 
-- **Qué.** En `_parse_block`, un valor que no va entre comillas y contiene `: ` o termina en `:` hace que el bloque sea `unsupported`. Lo mismo pasa con lo que YAML trata como una estructura que este parser no admite. `12:15:00` y `https://…` siguen siendo válidos, porque no llevan espacio tras los dos puntos. `"Estilo: breve"` también, porque va entre comillas.
-- **Por qué.** En YAML, `description: Estilo: breve` es un error: un mapeo dentro de un escalar plano. El formato real pide comillas en `description` precisamente por eso, y Obsidian no lee ese frontmatter. El harness lo aceptaba y le daba un valor que ningún otro lector daría.
+**Revisada el 2026-11-28 tras la revisión independiente.** La primera versión de esta rama (`22886ee`) hacía que `_parse_block` devolviera `None` ante un valor sin comillas con `: `. Eso tiraba todos los campos del bloque: `tags`, `project_slug`, `type` y `updated`. Con ello cambiaba qué notas entran en `memory context` y en `search --project`, la cabecera de la nota (`(-, -)`) y el reconocimiento de una nota de decisión por su `decision_id`. Esta rama prometía no tocar nada de eso. Se revirtió.
+
+- **Qué.**
+  - `_parse_block` es otra vez exactamente el de `origin/develop`.
+  - `parse_frontmatter` marca aparte `Frontmatter.yaml_error` cuando una línea `clave: valor` del bloque tiene una de dos formas que YAML rechaza con seguridad (`_breaks_yaml`):
+    1. **Valor plano.** El valor no va entre comillas ni es una lista `[...]`. Sin su comentario (desde el primer espacio o tabulador seguido de `#`), tiene `:` seguido de un espacio o un tabulador, o termina en `:`. Ejemplos: `description: Estilo: breve`, `tab: a:<TAB>b`, `h: a#b: c`, `x: termina:`.
+    2. **Comilla cerrada con algo detrás.** El valor abre un escalar entre comillas, lo cierra en la misma línea y lleva detrás algo que no son espacios, tabuladores y un comentario. Ejemplos: `k: "a" b: "c"`, `k: 'a' b`. En las comillas dobles `\` escapa, y en las simples `''` es una comilla.
+  - Solo `frontmatter_problem` lo mira, y devuelve `a value is not valid YAML`. Es decir: solo `memory maintain` lo informa.
+- **No se marca** lo que no se puede decidir bien sin un parser YAML:
+  - los elementos de lista (`- a: b` es una lista de mapeos, y es válido);
+  - las listas en línea;
+  - las líneas sangradas;
+  - un escalar entre comillas que no se cierra en su línea.
+
+  Tampoco se marcan `h: a # b: c` (comentario), `"Estilo: breve"`, `'it''s: fine'`, `"a\" b: c"`, `https://…` ni `12:15:00`.
+- **Por qué.** En YAML, `description: Estilo: breve` es un error: un mapeo dentro de un escalar plano. El formato real pide comillas en `description` precisamente por eso, y Obsidian no lee ese frontmatter.
+
+  Avisar al dueño es útil. Cambiar lo que el harness selecciona no lo es: la nota seguiría con los mismos datos y desaparecería del contexto sin que nadie lo pidiera.
 - **Alternativas rechazadas.**
+  - *Invalidar el bloque (la primera versión).* Cambiaba la selección, las cabeceras y la deduplicación de decisiones. Lo reprodujo la revisión independiente.
   - *Comprobarlo solo en `description`.* El error de YAML es el mismo con cualquier clave.
-  - *Usar un parser YAML completo.* El parser mínimo es una decisión de `project-memory` (D10): no evalúa anclas ni etiquetas. Cambiarlo no entra en esta rama.
+  - *Usar un parser YAML completo.* El parser mínimo es una decisión de `project-memory` (D10). Cambiarlo no entra en esta rama.
 - **Impacto.**
-  - Spec `memory-maintenance`, escenario «Valor sin comillas con dos puntos».
-  - Efecto lateral: `harness/skills/definition.py` usa el mismo parser, así que un `SKILL.md` con `description: a: b` pasa a ser inválido. Ningún Skill del repositorio lo tiene: `git grep -n "^description: [^\"'].*: " -- skills tests/fixtures` no devuelve nada, y la suite completa pasa.
+  - Spec `memory-maintenance`, escenarios «Valor sin comillas con dos puntos» y «Una línea que YAML rechaza no cambia la selección».
+  - Ya no hay efecto lateral sobre `SKILL.md`: `harness/skills/definition.py` mira `syntax_ok`, que no cambia.
+  - `test_the_report_rule_does_not_change_what_the_context_selects` fija el sha256 del bloque. Lo calculó el código de `origin/develop` `e2ce87f` sobre el mismo vault: `4ae9aed…`.
 
 ### D3. Un identificador de proyecto no válido se rechaza con su motivo; la regla no cambia
 
@@ -52,6 +70,8 @@ El repositorio se leyó como datos: no se ejecutó ningún script. Aquí el form
   - no termina en punto ni en espacio.
 
   El mensaje pasa a ser `invalid project identifier '<x>': <motivo>; use the plain name of a folder under projects/ (…)`. El motivo es uno de una lista cerrada (`slug_problem`), por ejemplo `it contains a space`, `it contains a character that is not ASCII` o `it is longer than 128 characters`. El mensaje sigue siendo el mismo en macOS y en Windows.
+
+  Los motivos se comprueban en orden, del más concreto que sea cierto al más general: vacío, separador, `.`/`..`, longitud, punto o espacio final, espacio, no ASCII, primer carácter y demás caracteres. Por eso `Ébano-x` da «not ASCII», que es lo que promete el README, y no «does not start with a letter or a digit» (revisión independiente del 2026-11-28).
 - **Por qué.** El `vault_slug` real se deriva de la ruta del proyecto y conserva sus espacios y acentos. Ese slug se guarda en SQLite y se escribe en el frontmatter y en las etiquetas de la nota de decisión: se convierte en una ruta y en texto que el harness **escribe**. Relajar la regla abriría esa escritura a nombres que la regla protege en Windows (espacios y puntos finales) y a la normalización Unicode. No se relaja.
 
   Lo que faltaba era decir por qué se rechaza un nombre que no parece un ataque. Las notas de esa carpeta no se ignoran: `memory search` sin `--project` las devuelve (escenario y test).
@@ -78,10 +98,16 @@ El repositorio se leyó como datos: no se ejecutó ningún script. Aquí el form
 ### D5. Las entradas de un índice son rutas relativas a `Memoria-CC/` y se comprueban contra el vault
 
 - **Qué.**
-  - **Cómo se resuelve.** El destino de `- [título](destino)` se resuelve como texto: `Memoria-CC/` + destino. Se quitan `.` y `#ancla`, y cada `..` sube un nivel.
+  - **Qué es una entrada.** Como en el original (`memoria-dream.sh`, líneas 155–160), solo un destino que termina en `.md`. `..`, una carpeta o `x.md#ancla` no son entradas: ni cuelgan ni nombran nada. Esto se revisó el 2026-11-28 tras la revisión independiente, porque `..` se resolvía como `''`.
+  - **Cómo se resuelve.** El destino de `- [título](destino)` se resuelve como texto: `Memoria-CC/` + destino. Se quitan los `.`, y cada `..` sube un nivel.
   - **Cuándo cuenta como colgante.** Solo si no nombra ningún fichero que el recorrido confinado vio, con cualquier extensión. Así una rama `MEMORY-<tema>.md` o una lección de `../Lecciones/` cuentan como existentes.
   - **Si sale del vault.** Un destino que sube por encima de la raíz conserva su `..` inicial, no coincide con nada y se informa como colgante, con la ruta resuelta.
   - **Sin acceso al disco.** No se mira el sistema de ficheros ni se usa `posixpath`: el guardián de `test_memory_package_has_no_copy_upload_or_write_path` admite solo una lista cerrada de módulos.
+  - **Casos que siguen saliendo como colgantes**, revisados uno a uno con el comprobador del original:
+    - *Ruta absoluta `/Lecciones/x.md`.* Obsidian la lee desde la raíz del vault, pero el original la une a la raíz del sistema de ficheros con `os.path.join`, así que para él cuelga. Se informa tal como está escrita.
+    - *`%20` y otros escapes de URL.* El original no los decodifica, así que cuelga.
+    - *Diferencias solo de mayúsculas, o de NFC frente a NFD.* La respuesta del original depende del sistema de ficheros: sí existe en macOS y no en Linux. El harness da la misma respuesta en todas las plataformas, compara exactamente y la entrada cuelga.
+    - *Un destino en `Memoria/Archivo/`.* El original lo encuentra en disco. El recorrido confinado no lista esa carpeta y aquí no se puede mirar el disco, así que cuelga. Es un límite escrito: una entrada así es un falso «colgante».
 - **Por qué.** Markdown y el original (`os.path.exists(join(mcc, rel))`) leen el enlace igual. Hoy `../Lecciones/x.md` se lee como `Memoria-CC/../Lecciones/x.md` y no se encuentra.
 
   Resolverlo contra el disco abriría una consulta fuera del vault con una ruta que viene de una nota (SEC-04). Por eso solo se compara con la lista que ya pasó por la lectura confinada.
@@ -93,7 +119,7 @@ El repositorio se leyó como datos: no se ejecutó ningún script. Aquí el form
 
 ### D6. Un enlace de tabla `[[ruta\|alias]]` se lee sin la `\`
 
-- **Qué.** En `_broken_links`, el destino se corta en la primera `|` y después se le quita una `\` final.
+- **Qué.** En `_broken_links`, el destino se corta en la primera `|`. Solo si había `|`, se quita la `\` que la precede. `[[agents/skills/x\]]`, sin alias, se sigue buscando tal como está escrito y sale como roto (revisión independiente del 2026-11-28; la primera versión quitaba la `\` siempre).
 - **Por qué.** Dentro de una tabla de Markdown la barra del alias se escapa, y la captura escribe así `agents/_skills-index.md`. El original no trata ese destino como roto (`memoria-dream.sh`, líneas 121–123). El harness lo daba por roto porque buscaba `agents/skills/x\`.
 - **Alternativas rechazadas.** *Quitar todas las `\` del destino.* Una `\` dentro de un nombre es otro problema y debe seguir saliendo.
 - **Impacto.** Spec `memory-maintenance`, escenario «Enlace con alias escapado en una tabla».
@@ -112,7 +138,8 @@ El repositorio se leyó como datos: no se ejecutó ningún script. Aquí el form
 ## Riesgos y límites
 
 - [Un vault real con una forma que el estudio no vio] -> los arreglos siguen los hechos citados de `92b19ea`. Medir sobre el vault real es la tarea NOT RUN del Corte 3, que hace el dueño en local.
-- [D2 rechaza un `SKILL.md` de terceros con `description: a: b`] -> es YAML no válido también para cualquier otro lector. El error dice `unsupported`. Queda escrito en el proposal.
+- [Una forma que YAML rechaza y `_breaks_yaml` no ve (una lista o un escalar de varias líneas)] -> no se informa. Es la versión estrecha que se puede decidir bien sin un parser YAML (D2), y la selección no depende de ella.
+- [Entradas de índice que el original da por buenas y el harness por colgantes (`Memoria/Archivo/`, mayúsculas o NFD en macOS)] -> son falsos «colgantes» escritos en D5. El informe no repara nada, así que no se pierde nada.
 - [Desajuste 8, sin resolver: decisión del dueño] -> hoy, en un vault real, `memory context` y `ask --project` no incluyen ninguna nota de `Lecciones/` ni de `Memoria-CC/` escrita por el curador real, porque las escribe con `tags: []` y sin `project_slug`. Solo entran:
   - `_project.md`;
   - las decisiones que escribe el harness;

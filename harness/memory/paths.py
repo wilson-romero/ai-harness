@@ -98,12 +98,14 @@ def slug_problem(raw: str) -> str:
         return f"it is longer than {SLUG_MAX_CHARS} characters"
     if raw.endswith((".", " ")):
         return "it ends with a dot or a space"
-    if not raw[0].isascii() or not raw[0].isalnum():
-        return "it does not start with a letter or a digit"
+    # A space or an accent explains a real folder name better than its first character does
+    # (`Ébano-x` is "not ASCII"; independent review of 2026-11-28).
     if " " in raw:
         return "it contains a space"
     if not raw.isascii():
         return "it contains a character that is not ASCII"
+    if not raw[0].isalnum():
+        return "it does not start with a letter or a digit"
     if not _PROJECT_RE.fullmatch(raw):
         return "it contains a character other than letters, digits, '.', '_' and '-'"
     return "it is a reserved Windows device name"

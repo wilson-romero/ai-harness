@@ -40,6 +40,10 @@ REJECTED = {
     "srv-equipo-Mis Proyectos-demo": "it contains a space",
     "srv-equipo-Código-demo": "it contains a character that is not ASCII",
     "srv-" + "carpeta-" * 16 + "demo": "it is longer than 128 characters",
+    # Independent review of 2026-11-28: an accent at the start is "not ASCII", the reason
+    # the README promises, not "does not start with a letter or a digit".
+    "Ébano-x": "it contains a character that is not ASCII",
+    "Mi Ébano": "it contains a space",
 }
 
 
