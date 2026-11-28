@@ -413,7 +413,8 @@ def collect_ids(root: Path, timeout_s: float = COLLECT_TIMEOUT_S) -> set[str]:
         raise CollectError(f"pytest --collect-only did not finish in {timeout_s} s")
     text = run.output.decode("utf-8", errors="replace")
     if run.returncode != 0:
-        tail = " | ".join(line for line in text.splitlines()[-5:] if line.strip())
+        said = text + "\n" + run.errors.decode("utf-8", errors="replace")
+        tail = " | ".join(line for line in said.splitlines()[-5:] if line.strip())
         raise CollectError(f"pytest --collect-only exited {run.returncode}: {tail}")
     if run.truncated:
         raise CollectError("pytest --collect-only printed more than the check reads")

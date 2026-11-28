@@ -445,32 +445,27 @@ class BoundedRun:
     """What `run_bounded` saw. `returncode` is None when the deadline came first."""
 
     returncode: int | None
-    output: bytes  # standard output, with standard error unless it was asked apart
-    errors: bytes  # standard error when asked apart, else empty
+    output: bytes  # standard output
+    errors: bytes  # standard error
     truncated: bool
     tree_ended: bool
 
 
 def run_bounded(argv: list[str], *, cwd: Path, deadline_s: float,
-                env: Mapping[str, str] | None = None, separate_errors: bool = False,
+                env: Mapping[str, str] | None = None,
                 output_limit: int = BOUNDED_OUTPUT_LIMIT) -> BoundedRun:
     """Run `argv` in its own kill scope, the session process's (process group on POSIX, Job
     Object on Windows), and end its whole tree with `_end_tree` when it exits or at
     `deadline_s`, whichever comes first.
 
     Standard output is read from a pipe while the process runs, so it can never block on a full
-    pipe. Standard error goes with it, or, with `separate_errors`, to an anonymous temporary
-    file (`tempfile.TemporaryFile`: no name, nothing to delete afterwards). Nothing named is
-    written to disk, so no surviving descendant can keep a file open that then cannot be
-    deleted: on Windows a uv launcher's child outlives the launcher by a few milliseconds.
-    A start that fails raises OSError.
+    pipe; standard error goes to an anonymous temporary file (`tempfile.TemporaryFile`: no
+    name, nothing to delete afterwards). Nothing named is written to disk, so no surviving
+    descendant can keep open a file that then cannot be deleted: on Windows a uv launcher's
+    child outlives the launcher by a few milliseconds. A start that fails raises OSError.
     """
-    import subprocess
     import tempfile
 
-    if not separate_errors:
-        return anyio.run(_run_bounded, list(argv), cwd, env, subprocess.STDOUT, deadline_s,
-                         output_limit)
     with tempfile.TemporaryFile() as errors:
         run = anyio.run(_run_bounded, list(argv), cwd, env, errors, deadline_s, output_limit)
         errors.seek(0)

@@ -74,7 +74,7 @@ def harness_bounded(
     from harness.mcp.client import run_bounded  # noqa: PLC0415 - only the demos that need it
 
     run = run_bounded([sys.executable, "main.py", *args], cwd=ROOT, env=env,
-                      deadline_s=deadline_s, separate_errors=True)
+                      deadline_s=deadline_s)
     result = subprocess.CompletedProcess(
         args, -9 if run.returncode is None else run.returncode, _text(run.output),
         _text(run.errors),
