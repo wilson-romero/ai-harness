@@ -409,7 +409,7 @@ Decisiones tomadas al construir `/plan`. Completan D8 a D12; donde cambian algo,
 
 ### T2-3. El plazo del plan
 
-- **Qué.** Decisión 5, opción (a): la suma de `startup_timeout_s + call_timeout_s` de cada paso, con un máximo de 300 s, guardada en la fila del plan y mostrada en la caja. Un temporizador activa la señal de parada (`StopSignal`) al vencer. El paso en curso termina con su árbol de procesos, como con Ctrl+C. El plan queda `timeout` con `error_code = deadline`, y los pasos siguientes no se llaman.
+- **Qué.** Decisión 5, opción (a): la suma de `startup_timeout_s + call_timeout_s` de cada paso más 10 s de gracia (`DEADLINE_GRACE_S`, añadida tras la revisión independiente: ver T2-9), con un máximo de 300 s, guardada en la fila del plan y mostrada en la caja. Un temporizador activa la señal de parada (`StopSignal`) al vencer. El paso en curso termina con su árbol de procesos, como con Ctrl+C. El plan queda `timeout` con `error_code = deadline`, y los pasos siguientes no se llaman.
 - **Por qué.** Cada paso arranca su servidor (decisión 6, opción (a)), así que su tiempo máximo es el arranque más la llamada.
 - **Alternativas rechazadas.**
   - Solo los plazos de llamada: un arranque lento se comería el plazo.
@@ -450,7 +450,8 @@ Decisiones tomadas al construir `/plan`. Completan D8 a D12; donde cambian algo,
 
 - **Qué.** `main.py plan SESSION_ID PREGUNTA` usa el mismo flujo (`plan_flow.run_plan`).
   - Exige stdin y stdout de consola. Sin ella sale con código 2 antes de leer la lista o abrir la base.
-  - Las líneas del harness van a stderr; la respuesta y los resultados, saneados, a stdout; la caja, a la terminal.
+  - Las líneas del harness van a stderr; la respuesta y los resultados, saneados y con cada línea tras la barra `| ` (`prefixed`, como `mcp call`), a stdout; la caja, a la terminal.
+  - Ctrl+C en el aviso del código: queda `undecided` y sale con 130 (T2-9).
   - En la conversación, una terminal no interactiva no ofrece caja: el plan queda `undecided`.
   - La CLI no tiene `--project` en este tramo.
 - **Por qué.** Un plan que nadie puede aprobar no debe gastar un envío.
@@ -469,13 +470,39 @@ Decisiones tomadas al construir `/plan`. Completan D8 a D12; donde cambian algo,
 - **Por qué.** A3 tendrá que acotarlo y marcarlo para enviarlo. Ya tiene lo que necesita sin volver a llamar.
 - **Impacto.** Ninguno en este tramo.
 
+### T2-9. La revisión independiente de `6b83412` (2026-11-27)
+
+- **La CLI marca lo ajeno.** `_Stdio.reply` y `_Stdio.result` escribían el texto ajeno sin barra: una respuesta o un resultado (el servidor `forge-output`) podía imitar las líneas del harness o dibujar una caja falsa. Ahora pasan por `prefixed`, como `mcp call` y `chat --plain`.
+- **Ctrl+C en el aviso del código.** Bajo `asyncio.run`, Ctrl+C solo marca la tarea como cancelada; `input()` sigue esperando. Si después se escribía el código, la aprobación se concedía y se consumía, y ningún paso corría (`consumed`, `code`, `interrupted`). Ahora, tras `decide` y antes de `record_verdict`, una cancelación pendiente se retira y el veredicto es `undecided`. Se retira para que el cierre del proveedor no se corte en su primer `await`. La CLI sale con 130.
+- **El bloqueo del plan.** Si `lock.acquire()` no lo obtiene, el ejecutor no hace nada: `not_run` / `plan_in_use`, auditado, y la fila queda para quien lo tiene.
+- **`read_plan_reply`.** Tests directos de sus dos condiciones (no completada o sin texto; truncada): ninguna llega a `read_plan`.
+- **Las etiquetas del plazo.** El plazo era exactamente la suma de los presupuestos, así que un paso que gastaba el suyo competía con él y terminaba como `deadline` del plan (tres de tres ejecuciones). Con 10 s de gracia termina como `timeout` de ese paso. Bajo el tope de 300 s las etiquetas aún pueden diferir: un plan cuyos presupuestos suman más de 300 s termina `deadline` aunque la culpa sea de un paso.
+- **La orden de arranque no se aprueba.** La caja muestra una línea del harness por servidor distinto: «`<server>` is started by the command in your local MCP list; that command is not part of this approval». Va en la cabecera, fuera de lo hasheado.
+  - Se eligió frente a un hash corto de la entrada: el ejecutor no lo comprobaría, y la caja sugeriría una atadura que no existe hasta A2.
+
+### Requisitos para los tramos siguientes (revisión independiente, 2026-11-27)
+
+Sin código en este tramo; son condiciones para aceptar A2 y A3.
+
+**A2**
+- La decisión se ata a un hash de la `ServerEntry` y de la `ToolEntry` de cada paso (orden, argumentos, entorno, `cwd`, operación y límites) tal como eran al decidir. El ejecutor lo vuelve a calcular y deniega si difiere. Cuando eso exista, la línea de arranque de la caja pasa a mostrar ese hash.
+- Hace falta un modo de aprobación `rule`, con su propio medio y su propia auditoría.
+- El texto `allowed` de la caja sale de la decisión real de la política en el momento de decidir, no de una constante.
+
+**A3**
+- Invierte «nada sale de la máquina»: los resultados vuelven al proveedor. Necesita consentimiento explícito de la persona, distinto de la aprobación del plan.
+- Un tope de envío muy por debajo de `SHOWN_MAX_BYTES` (el límite del proveedor ronda los 32 000 caracteres).
+- Los resultados van marcados como datos, nunca como instrucciones.
+- Una aprobación por turno, salvo que A2 lo permita por regla: el nonce no protege contra una inyección dentro del mismo turno.
+- «Una llamada al proveedor por /plan» se redefine como un tope de turnos; un `uncertain` corta el bucle.
+
 ### Decisiones abiertas del tramo 2
 
 1. **Título de los bloques de resultado en la pantalla completa.**
    - (a) el genérico «text from outside the harness», con la línea del harness encima (tomada, porque `tui.py` estaba fuera de alcance);
    - (b) «result of step k», pasando una etiqueta a `show_rows` cuando se mergee `bugfix/windows-parity-2`.
 
-   **Recomiendo (b).**
+   **Recomiendo (b).** Tras el merge (2026-11-27) sigue (a): la API pública de la caja no lleva título para un bloque ajeno; el título sale de `_label` dentro de `tui.py`, que esta rama no toca. Queda para quien cambie el protocolo `Terminal`.
 2. **`--project` en `main.py plan`.**
    - (a) sin memoria (tomada);
    - (b) como `ask --project`, con su auditoría de denegación.

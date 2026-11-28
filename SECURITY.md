@@ -117,12 +117,12 @@ Lo que **no** garantiza:
 Lo que el harness garantiza:
 
 - Solo la respuesta a un `/plan` escrito entero se lee como plan. Una respuesta normal con un plan dentro es texto.
-- Ningún paso arranca nada antes de una aprobación de una persona en una terminal interactiva. La aprobación está ligada al hash del plan canónico (que incluye el nonce de la pregunta), al de su caja, a la sesión y a la solicitud; caduca y vale una vez. Si cambia un byte de lo ejecutado, de lo registrado o de lo mostrado, se deniega.
+- Ningún paso arranca nada antes de una aprobación de una persona en una terminal interactiva. Un Ctrl+C en el aviso del código deja el plan sin aprobar aunque después se teclee el código. La aprobación está ligada al hash del plan canónico (que incluye el nonce de la pregunta), al de su caja, a la sesión y a la solicitud; caduca y vale una vez. Si cambia un byte de lo ejecutado, de lo registrado o de lo mostrado, se deniega.
 - Cada paso pasa por la pasarela de `mcp call`, que decide otra vez la política al ejecutar. Un plan nunca llama a una herramienta `write`.
 - Ningún texto del modelo ni de una herramienta aprueba, cambia el plan o dibuja una línea del harness: llegan siempre como texto ajeno, marcado.
 - Una sola pregunta por `/plan`: los resultados no vuelven al proveedor.
 
-Lo que **no** garantiza: que un modelo real proponga el plan que la pregunta necesita, ni que una lectura permitida sea inocua para tus datos. El plan solo lee lo que tu lista permite; lo que el servidor haga con esa lectura es cosa del servidor.
+Lo que **no** garantiza: que un modelo real proponga el plan que la pregunta necesita, ni que una lectura permitida sea inocua para tus datos. Tampoco ata la orden que arranca cada servidor: sale de tu lista local al ejecutar y no entra en el hash; la caja lo dice con una línea por servidor (atarla es un requisito de A2, en `openspec/changes/code-mode/design.md`). El plan solo lee lo que tu lista permite; lo que el servidor haga con esa lectura es cosa del servidor.
 
 ## Matriz SEC y deuda conocida
 

@@ -295,6 +295,51 @@ Sobre `15ea6b0` (2026-11-27, macOS arm64), cada una una vez con `caffeinate -i`:
 - `tests/unit/test_portability.py`: 4 passed. `scripts/demo_code_mode.py`: código 0, `demo: PASS`.
 - Sin caracteres invisibles literales en los ficheros nuevos del tramo. Los que señala el recorrido de 3.5 en la línea 155 de este fichero, en `harness/mcp/config.py` y en el servidor sintético ya estaban en `28e8f81`, y no se tocaron.
 
+### Correcciones de la revisión independiente de `6b83412` (2026-11-27)
+
+Antes, `develop` = `2fe06e0` (con `bugfix/windows-parity-2`) se mergeó en la rama. Hubo un conflicto en `docs/security/sec-matrix.md`, fila SEC-12: se conservaron las dos listas de tests y los dos textos. Los tests de la pantalla completa abren ahora la caja con `Tui.approval_box()`. Cada corrección tiene su test, visto fallar antes del arreglo, y un mutante que lo mata (aplicado en el sitio y deshecho).
+
+- [x] R1 (media) La CLI escribía la respuesta y los resultados sin barra.
+  - Arreglo: `_Stdio.reply` y `_Stdio.result` pasan por `prefixed` (`harness/mcp/commands.py`), como `mcp call`.
+  - Test: `test_plan_cli.py::test_no_reply_or_result_can_draw_harness_lines_in_the_cli` (servidor `forge-output` y una respuesta que dibuja una caja y líneas de paso falsas). Falló antes del arreglo: la primera línea de stdout era `Plan approval requested` sin barra.
+- [x] R2 (baja) Ctrl+C en el aviso del código de la CLI.
+  - Arreglo: tras `decide` y antes de `record_verdict`, `_withdraw_pending_interrupt` retira la cancelación pendiente. El veredicto es `undecided` y la CLI sale con 130.
+  - Test: `test_plan_cli.py::test_ctrl_c_at_the_code_prompt_leaves_the_plan_undecided` (`signal.raise_signal(SIGINT)` dentro del aviso y, después, el código bueno). Falló antes del arreglo: salió con 1 y aprobó.
+  - El test usa un cierre del proveedor que espera: sin retirar la cancelación, ese cierre se corta (mutante M31).
+- [x] R3a El bloqueo del plan no obtenido.
+  - Arreglo: falla cerrado. `not_run` / `plan_in_use`, auditado; la fila queda `granted` para quien tiene el bloqueo.
+  - Test: `test_mcp_plan_run.py::test_a_plan_whose_lock_is_held_elsewhere_runs_nothing`.
+- [x] R3b `read_plan_reply` en directo.
+  - Tests: `tests/unit/test_mcp_plan_reply.py`, 6. Cubren: no completada (`uncertain`, `failed`, `timeout`) con un texto válido; completada sin texto; truncada con un texto válido; y el control, el mismo texto completo, que es un plan.
+  - Pasaron a la primera, porque el código ya era correcto. Los matan los mutantes M34 a M36.
+- [x] R3c Las etiquetas del plazo.
+  - Test: `test_shell_plan.py::test_a_single_hung_step_ends_as_its_own_timeout` (un paso, `hang-call`, arranque 1 s y llamada 1 s). Falló tres de tres veces antes del arreglo: `timeout` / `deadline` del plan.
+  - Arreglo: `DEADLINE_GRACE_S = 10` sobre la suma, dentro del tope de 300 s. El caso que queda bajo el tope está documentado en `deadline_s` y en el diseño (T2-9).
+- [x] R4 La orden de arranque de cada servidor.
+  - Decisión: una línea del harness por servidor distinto, en la cabecera de la caja y fuera de lo hasheado. Un hash corto de la entrada sugeriría una atadura que el ejecutor no comprueba hasta A2.
+  - Test: `test_shell_plan.py::test_the_box_says_each_server_command_is_not_approved`; falló antes del arreglo.
+  - La caja crece una línea. En la pantalla completa, `test_the_box_shows_the_plan_and_approve_runs_it_once` pulsa ahora `End` antes de esperar a Approve: la caja no habilita Approve hasta que se ve el final.
+- [x] R5 Los requisitos de A2 y A3 están en el diseño, con fecha, sin código: «Requisitos para los tramos siguientes».
+  - El título «result of step k» no se tomó: la API pública de la caja no lo permite sin tocar `tui.py` (decisión abierta 1).
+
+| # | Mutante | Lo mata |
+|---|---|---|
+| M30 | `reply`/`result` de la CLI sin `prefixed` (el código anterior) | `test_plan_cli.py::test_no_reply_or_result_can_draw_harness_lines_in_the_cli` |
+| M31 | Se detecta la cancelación pero no se retira | `test_plan_cli.py::test_ctrl_c_at_the_code_prompt_leaves_the_plan_undecided` (el cierre del proveedor no termina) |
+| M32 | No se mira la cancelación tras `decide` | el mismo (sale con 1 y aprueba) |
+| M33 | Se ignora el resultado de `lock.acquire()` (el código anterior) | `test_mcp_plan_run.py::test_a_plan_whose_lock_is_held_elsewhere_runs_nothing` |
+| M34 | `read_plan_reply` no mira el estado | `test_mcp_plan_reply.py`: 3 casos no completados |
+| M35 | `read_plan_reply` no mira `truncated` | `test_mcp_plan_reply.py::test_a_truncated_reply_is_refused_even_with_a_valid_text` |
+| M36 | `read_plan_reply` no mira el texto vacío | `test_mcp_plan_reply.py::test_a_completed_reply_with_no_text_is_refused` |
+| M37 | Sin gracia en el plazo (el código anterior) | `test_shell_plan.py::test_a_single_hung_step_ends_as_its_own_timeout` |
+
+Resultado: 8 de 8 muertos.
+
+Comprobaciones tras las correcciones (macOS arm64, `caffeinate -i`):
+- Tanda `-m "not edge and not copilot"`: código 0, 2296 passed, 158 deselected en 400,10 s.
+- La tanda `-m edge` **no se ejecutó** para estas correcciones, como pidió la revisión: ninguna toca el proveedor de Copilot ni Edge. El último recibo de Edge es el de `15ea6b0` (arriba).
+- `openspec validate --all --strict`: 27 passed, 0 failed. `check_public_safety.py`: `PASS (483 file(s))`. `check_sec_matrix.py`: `PASS (15 rows, 169 tests)`. `scripts/demo_code_mode.py`: código 0, `demo: PASS`.
+
 ## 5. Tramo 3 · Sonda y medición con Copilot real (unos 12 envíos del presupuesto de 100)
 
 - [ ] 5.1 Sonda sin herramientas: un bloque `json` sintético de 80 líneas, comparado byte a byte. 1–2 envíos.
