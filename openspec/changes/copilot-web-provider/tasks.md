@@ -240,6 +240,34 @@ Wilson ejecutó la rama en Windows 11 AMD64 (Python 3.14.10, Edge 158, PowerShel
   - Recibo (mismo equipo, sin envíos): `harness/skills/checks.py` lee los bloques de código como CommonMark (`skill-engine` D6 revisada el 2026-11-26; escenarios nuevos en `skill-execution` y `hls-review`). `tests/unit/test_skill_checks.py` 35 passed, y sus 8 pruebas nuevas en rojo contra el `checks.py` anterior (las dos entradas mínimas: `## X` solo dentro de un bloque, que pasaba, y un bloque `json` con cuatro acentos graves tras prosa, que fallaba). `tests/integration/test_hls_review.py` 13 passed: el encabezado solo dentro de código falla y, contra el código anterior, la ejecución terminaba `completed`. Los hashes de los Skills no cambian: `skill_hash` cubre solo los ficheros de la carpeta del Skill, y `skills/` no cambia.
   - Recibo (mismo equipo, sin envíos): tras fusionar `develop` con la interfaz a pantalla completa (`shell-tui`: el núcleo de la conversación corre en su propio hilo con su `asyncio.run`, Textual en el principal), `tests/browser/test_copilot_tui.py` (Pilot + `copilot_web` contra la página sintética, Edge sin ventana) 4 passed: pregunta, Ctrl+C con la respuesta a medias (`uncertain`, no se reenvía), Ctrl+Q con la pregunta en curso, aviso de sesión cerrada y aviso de pestaña perdida como líneas del harness; Edge se lanza y se cierra en el hilo `conversation`, una vez, sin contextos abiertos, con el candado del navegador y el de la sesión libres. Controles por mutación, cada uno en rojo: la conversación no llama a `close_resources` (hallazgo: Edge se cerraba igualmente, porque `asyncio.run` finaliza el generador del lanzador al terminar su bucle; por eso el oráculo comprueba que lo cierra la conversación y en qué hilo), Ctrl+C de la pantalla no llega al núcleo, y las líneas del harness no llegan a la pantalla.
 
+## 9. Segunda ejecución en Windows (2026-11-27, `develop` = `79cde60`)
+
+Wilson ejecutó `develop` en Windows 11 con Edge. En la batería `-m edge` falló un test, en dos ejecuciones separadas. Rama `bugfix/windows-parity-2`. La demo del change sigue siendo 7.5.
+
+- [x] 9.1 El perfil en uso se reconoce con las señales de los dos sistemas (P8 revisada; spec `dedicated-edge-browser`, requisito «Perfil abierto por otro Edge»).
+  - Causa: `test_profile_open_in_another_edge_is_reported_as_in_use` daba `BrowserLaunchFailed` «Target page, context or browser has been closed» en lugar de `ProfileInUse`. El lanzador solo reconocía el texto de macOS.
+  - Hecho en `launch_error`:
+    - además de los textos conocidos, cuenta como en uso el cierre inmediato (el texto de `TargetClosedError` o ese nombre de clase, que `playwright.async_api` no exporta) junto con `SingletonLock` o `lockfile` en el perfil;
+    - sin tocar las opciones de arranque ni el sandbox, y sin ramas por plataforma.
+  - Oráculo:
+    - `tests/unit/test_edge_launch_errors.py` (11 casos): las formas de error de macOS y de Windows con cada artefacto (`lockfile`, `SingletonLock` como enlace y como fichero), y la ruta del perfil nunca en el mensaje;
+    - controles negativos: cierre inmediato sin artefacto → `BrowserLaunchFailed`; otro error con artefacto → `BrowserLaunchFailed`;
+    - con Edge, `tests/browser/test_edge_launcher.py::test_a_held_profile_carries_a_lock_artefact`: con un Edge abierto sobre el perfil hay al menos uno de los dos artefactos, y al cerrarlo no queda ninguno. Imprime cuáles encontró.
+  - Recibo (2026-11-27, macOS arm64, Python 3.14.8, Edge instalado):
+    - antes del cambio, 6 failed (las formas de Windows) y 5 passed;
+    - con el cambio, 11 passed. Con Edge, `test_profile_open_in_another_edge_is_reported_as_in_use` y `test_a_held_profile_carries_a_lock_artefact` pasan (`lock artefacts while open: ['SingletonLock']`).
+    - Control por mutación: sin `lockfile` en la lista, 2 failed, los casos `lockfile`; restaurado, pasa.
+  - Premisa sin medir en Windows: que Edge tiene `lockfile` en el perfil mientras lo usa y lo borra al cerrarse. La comprueba el test con Edge de arriba.
+- [x] 9.3 Revisión independiente (2026-11-27). Un `SingletonLock` que dejó un Edge que se colgó, junto con un cierre al arrancar que no tiene nada que ver, también se informa como «perfil en uso», y se perdía el mensaje de Playwright; además no se comprueba que el cierre fuera inmediato.
+  - Se mantiene la clasificación. El mensaje conserva siempre la primera línea de Edge, con `<profile>` en lugar de la ruta. En el caso del cierre con artefacto dice además que la causa puede ser un bloqueo de un Edge que se colgó.
+  - Oráculo: `test_in_use_by_an_immediate_close_keeps_edges_message_and_names_a_stale_lock` (`lockfile` y `SingletonLock`) y `test_in_use_by_a_named_singleton_keeps_edges_message`.
+  - Recibo (2026-11-27, macOS): antes, 3 failed; después, `test_edge_launch_errors.py` → 14 passed.
+- [ ] 9.2 Confirmación en Windows (no es puerta), en PowerShell, sobre la rama: `uv run pytest -m edge tests/browser/test_edge_launcher.py -v -s`.
+  - Tienen que pasar `test_profile_open_in_another_edge_is_reported_as_in_use` y `test_a_held_profile_carries_a_lock_artefact`.
+  - Hay que pegar la línea `lock artefacts while open: [...]`; se espera `lockfile`.
+  - Si el primero falla, pegar el mensaje entero de `BrowserLaunchFailed` (sin rutas: el lanzador ya pone `<profile>`).
+  - Estado: **NOT RUN**.
+
 ## Workflow follow-up
 
 - Abrir el PR de `feature/copilot-web-provider` contra `develop` con descripción en español cuando las tareas estén cerradas; el merge lo aprueba Wilson.

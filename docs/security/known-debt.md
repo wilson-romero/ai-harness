@@ -22,6 +22,10 @@ Decisiones posibles: **aceptado** (se convive con ello, escrito), **arreglar** (
 
 - **Qué:**
   - En un PC personal con Windows, sobre `develop` = `57c413d` (2026-11-27): la batería sin tests de navegador dio 1592 pasados, 17 omitidos y 1 fallo por carga (`tests/integration/test_mcp_cli.py::test_a_tool_that_never_ends` venció su plazo y pasó 5 de 5 solo); todas las demos, `demo: PASS`. Los tests con marca `edge` **no se ejecutaron** (NOT RUN, falta de disco), así que Copilot Web, el lanzador de Edge y su sandbox no se han probado en Windows.
+  - Segunda ejecución, sobre `develop` = `79cde60` (2026-11-27, Windows 11, con Edge): 5 fallos sin navegador y 1 con Edge.
+    - Tres son del producto: `private_file` ante una carpeta (otro error que en POSIX), el armado de la caja de aprobación solo por reloj (unas teclas llegadas tras el plazo aprobaron en una máquina lenta) y el perfil de Edge en uso, que en Windows no se reconocía.
+    - Dos son tests que no esperaban a la caja montada.
+    - Las correcciones están en `bugfix/windows-parity-2` y su ejecución en Windows está **NOT RUN**.
   - Lo que solo existe en `feature/hardening` (la comprobación de la matriz, los tests de la revisión independiente del 2026-11-25 y las correcciones de la revisión de seguridad del 2026-11-27) no se ha ejecutado en Windows (NOT RUN).
   - El defecto de `v0.2.0` con la clave de los HMAC MCP está corregido en `0.2.1`. Para recuperar una instalación de `0.2.0` afectada, con ningún proceso del harness en marcha se borra `keys/mcp-args.key` y el siguiente `mcp call` crea otra; los HMAC guardados antes no se pueden comparar con los nuevos.
   - Probado solo en macOS, porque en Windows esos tests se omiten por capacidad: el rechazo de enlaces simbólicos, el informe de carpetas ilegibles y las comprobaciones de permisos (`0600`/`0700`, dueño de la lista MCP). Las uniones de directorio no las crea ningún test. **En Windows los modos `0600`/`0700` no se usan y el harness no fija ni comprueba ACL** (clave HMAC, logs, lista MCP, directorio de datos, base de datos, bloqueos y `copilot/login.json`): lo creado hereda los permisos de la carpeta padre.
