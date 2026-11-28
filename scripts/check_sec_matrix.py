@@ -406,7 +406,8 @@ def collect_ids(root: Path, timeout_s: float = COLLECT_TIMEOUT_S) -> set[str]:
     On the deadline its whole tree is ended. A failed or late collection raises CollectError.
     """
     try:
-        run = run_bounded([sys.executable, *COLLECT_ARGS], cwd=root, deadline_s=timeout_s)
+        run = run_bounded([sys.executable, *COLLECT_ARGS], cwd=root, deadline_s=timeout_s,
+                          end_tree_on_exit=True)
     except OSError as exc:
         raise CollectError(f"pytest --collect-only could not start: {exc}") from exc
     if run.returncode is None:

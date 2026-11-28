@@ -448,26 +448,31 @@ class BoundedRun:
     output: bytes  # standard output
     errors: bytes  # standard error
     truncated: bool
-    tree_ended: bool
+    tree_ended: bool | None  # None: it exited in time and its tree was not asked to end
 
 
 def run_bounded(argv: list[str], *, cwd: Path, deadline_s: float,
-                env: Mapping[str, str] | None = None,
+                env: Mapping[str, str] | None = None, end_tree_on_exit: bool = False,
                 output_limit: int = BOUNDED_OUTPUT_LIMIT) -> BoundedRun:
     """Run `argv` in its own kill scope, the session process's (process group on POSIX, Job
-    Object on Windows), and end its whole tree with `_end_tree` when it exits or at
-    `deadline_s`, whichever comes first.
+    Object on Windows). At `deadline_s` its whole tree is ended with `_end_tree`; when it
+    exits in time, only with `end_tree_on_exit`. Without it, what the process left alive stays
+    alive, so the caller can check for it: on Windows the MCP servers `main.py` starts are in
+    the same job, and ending it would hide a server the harness failed to stop (review of
+    windows-parity-3, finding 1). The job handle is then kept open until this process ends.
 
     Standard output is read from a pipe while the process runs, so it can never block on a full
-    pipe; standard error goes to an anonymous temporary file (`tempfile.TemporaryFile`: no
-    name, nothing to delete afterwards). Nothing named is written to disk, so no surviving
+    pipe; standard error goes to `tempfile.TemporaryFile`, which needs no deletion afterwards:
+    on POSIX it has no name; on Windows it is a named `O_TEMPORARY` file that the system
+    deletes when the last handle to it closes, also one a surviving descendant inherited. So no
     descendant can keep open a file that then cannot be deleted: on Windows a uv launcher's
     child outlives the launcher by a few milliseconds. A start that fails raises OSError.
     """
     import tempfile
 
     with tempfile.TemporaryFile() as errors:
-        run = anyio.run(_run_bounded, list(argv), cwd, env, errors, deadline_s, output_limit)
+        run = anyio.run(_run_bounded, list(argv), cwd, env, errors, deadline_s, output_limit,
+                        end_tree_on_exit)
         errors.seek(0)
         kept = errors.read(output_limit + 1)
     return BoundedRun(run.returncode, run.output, kept[:output_limit],
@@ -475,7 +480,8 @@ def run_bounded(argv: list[str], *, cwd: Path, deadline_s: float,
 
 
 async def _run_bounded(argv: list[str], cwd: Path, env: Mapping[str, str] | None, errlog: Any,
-                       deadline_s: float, output_limit: int) -> BoundedRun:
+                       deadline_s: float, output_limit: int,
+                       end_tree_on_exit: bool) -> BoundedRun:
     process = await _create_platform_compatible_process(
         command=argv[0], args=argv[1:], env=None if env is None else dict(env), errlog=errlog,
         cwd=cwd,
@@ -513,7 +519,15 @@ async def _run_bounded(argv: list[str], cwd: Path, env: Mapping[str, str] | None
             group.cancel_scope.cancel()
     finally:
         with anyio.CancelScope(shield=True):
-            ended = await _end_tree(process)
+            if returncode is None or end_tree_on_exit:
+                ended: bool | None = await _end_tree(process)
+            else:
+                ended = None
+                await _close_pipe(process.stdout)
+                # The leader has exited: closing its transport kills nothing.
+                transport = getattr(getattr(process, "_process", None), "_transport", None)
+                if callable(getattr(transport, "close", None)):
+                    transport.close()
     return BoundedRun(returncode, bytes(output), b"", truncated, ended)
 
 

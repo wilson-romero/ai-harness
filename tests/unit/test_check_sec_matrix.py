@@ -325,6 +325,18 @@ time.sleep(30)
 """
 
 
+def empty_soon(folder: Path) -> list[Path]:
+    """The folder's listing once it is empty, or after 1 s. On Windows the errors file of a
+    bounded run is a named `O_TEMPORARY` file that stays listed until the last descendant that
+    inherited it closes its handle, and the end of the tree waits only for the leader there."""
+    for _ in range(20):
+        left = list(folder.iterdir())
+        if not left:
+            break
+        time.sleep(0.05)
+    return left
+
+
 @pytest.fixture
 def late_child(tmp_path, monkeypatch):
     """A collection that is late and whose child outlives it; an empty temporary directory to
@@ -346,7 +358,7 @@ def test_a_late_collection_whose_child_outlives_it_ends_the_whole_tree(late_chil
     assert (marks / "ready").exists()  # the grandchild was started before the deadline
     time.sleep(4)  # past the moment the grandchild would have written `survived`
     assert not (marks / "survived").exists(), "a process of the collection outlived it"
-    assert list(scratch.iterdir()) == []
+    assert empty_soon(scratch) == []
 
 
 def test_a_cleanup_that_fails_does_not_hide_a_late_collection(late_child, tmp_path, monkeypatch):
@@ -366,7 +378,7 @@ def test_a_cleanup_that_fails_does_not_hide_a_late_collection(late_child, tmp_pa
     monkeypatch.setattr(shutil, "rmtree", rmtree_refused_once)
     with pytest.raises(checker.CollectError, match="did not finish"):
         checker.collect_ids(tmp_path, timeout_s=2)
-    assert list(scratch.iterdir()) == []
+    assert empty_soon(scratch) == []
 
 
 def test_a_child_that_exits_leaving_a_descendant_returns_and_ends_it(tmp_path):
@@ -379,12 +391,31 @@ def test_a_child_that_exits_leaving_a_descendant_returns_and_ends_it(tmp_path):
                       encoding="utf-8", newline="\n")
     started = time.monotonic()
     run = checker.run_bounded([sys.executable, str(script), str(marks)], cwd=tmp_path,
-                              deadline_s=20, output_limit=1000)
+                              deadline_s=20, output_limit=1000, end_tree_on_exit=True)
     assert time.monotonic() - started < 10
     assert run.returncode == 0 and run.truncated and run.output == b"x" * 1000
     assert run.tree_ended
     time.sleep(4)
     assert not (marks / "survived").exists()
+
+
+def test_without_a_deadline_a_descendant_survives_unless_asked(tmp_path):
+    """What the demos need (review of windows-parity-3, finding 1): a process that `main.py`
+    leaves alive must still be alive after `harness_bounded` returns, or a leak check after it
+    proves nothing. By default the tree is ended only when the deadline expires."""
+    marks = tmp_path / "marks"
+    marks.mkdir()
+    script = tmp_path / "exits.py"
+    script.write_text(STAND_IN.replace("time.sleep(30)", "pass"), encoding="utf-8",
+                      newline="\n")
+    run = checker.run_bounded([sys.executable, str(script), str(marks)], cwd=tmp_path,
+                              deadline_s=20)
+    assert run.returncode == 0 and run.tree_ended is None
+    for _ in range(100):  # the descendant writes `survived` 4 s after it starts
+        if (marks / "survived").exists():
+            break
+        time.sleep(0.1)
+    assert (marks / "survived").exists(), "the bounded run ended a descendant it was not asked to"
 
 
 def test_main_without_collected_fails_on_a_broken_collection(project, capsys):

@@ -67,9 +67,11 @@ def harness_bounded(
     """Like `harness`, for commands that start other processes (MCP servers).
 
     Run with `harness.mcp.client.run_bounded`: in a kill scope of its own, its output read
-    while it runs (nothing named on disk that a descendant could keep open), a monotonic
-    deadline measured here, and its whole tree ended when it exits or at the deadline. A
-    process that had to be killed reports return code -9.
+    while it runs (nothing on disk that needs deleting afterwards), and a monotonic deadline
+    measured here, at which its whole tree is ended; a process that had to be killed reports
+    return code -9. A command that ends in time is NOT followed by ending its tree: whatever
+    it left alive (an MCP server the harness failed to stop) is still there for the demo's
+    leak checks, on Windows too, where the server shares the command's Job Object.
     """
     from harness.mcp.client import run_bounded  # noqa: PLC0415 - only the demos that need it
 
