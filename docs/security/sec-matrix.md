@@ -75,6 +75,9 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `openspec/changes/mcp-gateway/specs/tool-policy/spec.md` · Auditoría de cada decisión sin contenido
 - `openspec/changes/architecture-skills-llm/specs/architecture-memory/spec.md` · Credenciales enmascaradas en la nota
 - `openspec/changes/copilot-web-provider/specs/copilot-web-provider/spec.md` · Sin contenido real guardado
+- `openspec/changes/workspace-tools/specs/workspace-files/spec.md` · Ficheros prohibidos por nombre
+- `openspec/changes/workspace-tools/specs/workspace-files/spec.md` · Ficheros prohibidos por contenido o tamaño
+- `openspec/changes/workspace-tools/specs/workspace-files/spec.md` · Misma auditoría
 **Tests:**
 - `tests/unit/test_redaction.py::test_each_format_is_masked`
 - `tests/security/test_audit_findings.py::test_a_gitlab_token_of_every_current_shape_is_masked`
@@ -93,7 +96,10 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `tests/unit/test_skill_checks.py::test_controls_and_credentials_are_cleaned`
 - `tests/integration/test_architecture_memory.py::test_a_token_in_the_model_output_is_masked_in_what_is_shown_and_written`
 - `tests/browser/test_copilot_provider.py::test_canaries_never_reach_storage`
-**Control negativo:** `project-memory` 8.2 y 8.3 (archivado); `mcp-gateway` 1.3 y 6.4; `architecture-skills-llm` 4.2; `copilot-web-provider` 6.1; `hardening` 5.1, 5.2 y 5.3 (cada test nuevo visto fallar sobre el código sin corregir); mutación SEC-01 de la tabla.
+- `tests/unit/test_workspace_rules.py::test_the_fixture_cases_are_refused`
+- `tests/unit/test_workspace_rules.py::test_a_credential_split_by_an_invisible_character_is_found`
+- `tests/integration/test_workspace_cli.py::test_every_call_is_audited_without_path_or_text`
+**Control negativo:** La carpeta de trabajo (`feature/workspace-tools`, tramo B1) añade sus requisitos y tests sin cambiar el estado; su control negativo es la tabla de mutaciones de `openspec/changes/workspace-tools/tasks.md` 2.12; `project-memory` 8.2 y 8.3 (archivado); `mcp-gateway` 1.3 y 6.4; `architecture-skills-llm` 4.2; `copilot-web-provider` 6.1; `hardening` 5.1, 5.2 y 5.3 (cada test nuevo visto fallar sobre el código sin corregir); mutación SEC-01 de la tabla.
 **Windows:** la redacción es código puro, el mismo en las dos plataformas; los tests sin marca `edge` de esta fila pasaron en la ejecución de `57c413d` (ver arriba), salvo los que comprueban `0600`/`0700`, que se omiten donde no hay bits de permiso POSIX: en Windows el harness no fija ni comprueba ACL. Los tests de `tests/browser/` (marca `edge`) usan Edge contra el chat sintético local y se omiten donde Edge no se puede lanzar; en Windows no se ejecutaron (NOT RUN). Los tests de `tests/security/test_audit_findings.py` son del 2026-11-27, posteriores a la ejecución en Windows: NOT RUN allí.
 **Límites:** **no cubre lo que escribe la persona:** el texto de `ask` llega al proveedor tal cual y, con el Mock, se guarda en `messages` (`history` y `ask` lo muestran ya redactado). Solo se reconocen formatos conocidos; una contraseña en prosa, una cadena de conexión o un token de formato desconocido pasan tal cual (lo dice el requisito «Límite declarado»); un token de GitLab de más de 300 caracteres de cuerpo tampoco se reconoce. En el log de stderr MCP se quitan las secuencias de escape antes de redactar, pero no otros caracteres invisibles: un carácter de formato metido dentro de una credencial la deja en claro allí (en el vault y en la terminal se quitan antes). Lo que no cubre la redacción del stderr lo enumera `SECURITY.md`. Ningún test comprueba la rotación a `.1`. SQLite no está cifrado y, con el Mock, guarda prompts y respuestas (sintéticos por definición).
 
@@ -137,6 +143,7 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `openspec/changes/mcp-gateway/specs/tool-policy/spec.md` · Resultados como datos no confiables
 - `openspec/changes/mcp-gateway/specs/tool-policy/spec.md` · Lo que dice el servidor no amplía la política
 - `openspec/changes/code-mode/specs/code-mode/spec.md` · El resultado es para la persona
+- `openspec/changes/workspace-tools/specs/workspace-files/spec.md` · Resultados saneados y no guardados
 **Tests:**
 - `tests/security/test_note_instructions.py::test_note_with_orders_to_the_harness`
 - `tests/security/test_note_instructions.py::test_note_with_orders_that_reaches_the_limit`
@@ -159,7 +166,9 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `tests/unit/test_shell_plan.py::test_read_plan_is_called_only_for_the_reply_to_plan`
 - `tests/unit/test_shell_tui_plan.py::test_a_reply_that_draws_the_box_chrome_stays_foreign`
 - `tests/unit/test_mcp_plan_prompt.py::test_the_server_says_nothing_in_the_catalogue`
-**Control negativo:** `project-memory` 8.12 (archivado); `skill-engine` 3.1; `copilot-web-provider` 4.4 (sin la limpieza, el test de respuesta hostil falla); `hardening` 5.4 y 5.9; mutación SEC-03 de la tabla. (`architecture-skills-llm` 5.2 tiene recibo pero no anota un control negativo.) Code mode, tramo 2: `code-mode` 4.6 y 4.7 (el modo `inject` del servidor sintético y las líneas falsas del harness; ver los controles de `tasks.md`).
+- `tests/unit/test_workspace_output.py::test_hostile_text_is_made_visible_and_cannot_act`
+- `tests/integration/test_workspace_cli.py::test_a_hostile_file_cannot_imitate_a_harness_line`
+**Control negativo:** La carpeta de trabajo (`feature/workspace-tools`, tramo B1) añade sus requisitos y tests sin cambiar el estado; su control negativo es la tabla de mutaciones de `openspec/changes/workspace-tools/tasks.md` 2.12; `project-memory` 8.12 (archivado); `skill-engine` 3.1; `copilot-web-provider` 4.4 (sin la limpieza, el test de respuesta hostil falla); `hardening` 5.4 y 5.9; mutación SEC-03 de la tabla. (`architecture-skills-llm` 5.2 tiene recibo pero no anota un control negativo.) Code mode, tramo 2: `code-mode` 4.6 y 4.7 (el modo `inject` del servidor sintético y las líneas falsas del harness; ver los controles de `tasks.md`).
 **Windows:** código puro; los tests sin marca `edge` de esta fila pasaron en la ejecución de `57c413d`. Los tests de `tests/browser/` (marca `edge`) usan Edge contra el chat sintético local y se omiten donde Edge no se puede lanzar; en Windows no se ejecutaron (NOT RUN). Los tests de `tests/security/test_audit_findings.py` son del 2026-11-27, posteriores a la ejecución en Windows: NOT RUN allí. Los tests de `code-mode` 4.x (2026-11-27) son posteriores a la última ejecución en Windows: NOT RUN allí.
 **Límites:** prueba que el harness no obedece, con el Mock y con el chat sintético; no prueba lo que un modelo real hace con el texto (los delimitadores son una mitigación). La anchura de una fila se calcula como la mide Rich; cómo dibuja cada emulador de terminal los emoji y los caracteres de anchura ambigua no se ha observado. El cuerpo del contexto de memoria puede imitar una línea de cabecera de nota (deuda conocida 14). EA: BLOCKED.
 
@@ -173,6 +182,9 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `openspec/specs/memory-vault/spec.md` · Entradas del vault que no se leen
 - `openspec/changes/skill-engine/specs/skill-definition/spec.md` · Enlaces y traversal rechazados
 - `openspec/changes/architecture-skills-llm/specs/decision-notes/spec.md` · Escritura confinada a Decisiones
+- `openspec/changes/workspace-tools/specs/workspace-files/spec.md` · Forma de las rutas
+- `openspec/changes/workspace-tools/specs/workspace-files/spec.md` · Camino real de las rutas
+- `openspec/changes/workspace-tools/specs/workspace-files/spec.md` · Carpetas que no se aceptan
 **Tests:**
 - `tests/security/test_vault_confinement.py::test_symlink_to_outside_file_ignored`
 - `tests/security/test_vault_confinement.py::test_symlinked_directory_to_outside_ignored`
@@ -185,8 +197,14 @@ No se mutaron SEC-08 ni SEC-10: su control negativo es el del recibo citado en l
 - `tests/unit/test_decision_writer.py::test_decisiones_as_a_link_to_outside_is_refused`
 - `tests/unit/test_decision_writer.py::test_decisiones_swapped_for_a_link_during_the_write_takes_the_note_back`
 - `tests/integration/test_architecture_memory.py::test_decisiones_as_a_link_to_outside_fails_before_the_approval`
-**Control negativo:** `project-memory` 8.5, 8.16 y 8.18 (archivado); `skill-engine` 2.2; mutación SEC-04 de la tabla.
-**Windows:** las formas de ruta de Windows (`C:\`, `\\servidor`, nombres reservados) se prueban en macOS con `PureWindowsPath`. Todo lo que crea un enlace simbólico se omite donde la cuenta no puede crearlos (Windows sin modo desarrollador): **el rechazo de enlaces está probado solo en macOS**. El resto de los tests de esta fila pasaron en la ejecución de `57c413d`.
+- `tests/unit/test_workspace_paths.py::test_each_form_is_refused_with_its_reason`
+- `tests/security/test_workspace_confinement.py::test_a_folder_link_to_outside_is_refused`
+- `tests/security/test_workspace_confinement.py::test_a_name_with_other_case_is_refused`
+- `tests/security/test_workspace_confinement.py::test_a_file_swapped_for_a_link_between_the_walk_and_the_open`
+- `tests/security/test_workspace_confinement.py::test_a_file_with_two_hard_links_is_refused`
+- `tests/unit/test_workspace_root.py::test_the_data_dir_is_refused_both_ways`
+**Control negativo:** La carpeta de trabajo (`feature/workspace-tools`, tramo B1) añade sus requisitos y tests sin cambiar el estado; su control negativo es la tabla de mutaciones de `openspec/changes/workspace-tools/tasks.md` 2.12; `project-memory` 8.5, 8.16 y 8.18 (archivado); `skill-engine` 2.2; mutación SEC-04 de la tabla.
+**Windows:** las formas de ruta de Windows (`C:\`, `\\servidor`, nombres reservados) se prueban en macOS con `PureWindowsPath`. Todo lo que crea un enlace simbólico se omite donde la cuenta no puede crearlos (Windows sin modo desarrollador): **el rechazo de enlaces está probado solo en macOS**. El resto de los tests de esta fila pasaron en la ejecución de `57c413d`. Los tests de la carpeta de trabajo (`feature/workspace-tools`, 2026-11-27) son posteriores: NOT RUN en Windows. Las uniones y los nombres cortos 8.3 se prueban simulados en macOS (`Path.is_junction` y una búsqueda que nunca se hace).
 **Límites:** el código rechaza las uniones de directorio (`is_junction`), pero ningún test crea una. Entre la comprobación de `Decisiones/` y la escritura del temporal, quien pueda escribir en el vault puede cambiar la carpeta por un enlace: el harness lo detecta después de publicar y retira la nota, pero el temporal existió un momento fuera (límite 2 de «Skills de arquitectura» en el README).
 
 ## SEC-05 · MCP desconocido o argumentos inválidos

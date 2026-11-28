@@ -124,6 +124,40 @@ Lo que el harness garantiza:
 
 Lo que **no** garantiza: que un modelo real proponga el plan que la pregunta necesita, ni que una lectura permitida sea inocua para tus datos. Tampoco ata la orden que arranca cada servidor: sale de tu lista local al ejecutar y no entra en el hash; la caja lo dice con una línea por servidor (atarla es un requisito de A2, en `openspec/changes/code-mode/design.md`). El plan solo lee lo que tu lista permite; lo que el servidor haga con esa lectura es cosa del servidor.
 
+## Carpeta de trabajo (`main.py workspace`, rama `feature/workspace-tools`, tramo B1)
+
+El harness lee ficheros de una carpeta que tú eliges con `--root`. En este tramo, solo desde la CLI y solo para leer: no hay orden en la conversación, ni plan, ni bucle, ni escrituras. Runbook: [`docs/runbook/workspace-tools.md`](docs/runbook/workspace-tools.md).
+
+Lo que el harness garantiza:
+
+- **Qué carpeta acepta.** No hay carpeta por defecto. Se rechaza:
+  - una carpeta que es un enlace o una unión;
+  - la carpeta personal misma y la raíz del sistema;
+  - el repo del harness, el directorio de datos y el vault, tanto si la carpeta es uno de ellos como si está dentro o los contiene. Se compara por nombre (NFC y sin distinguir mayúsculas) y por identidad (`st_dev` y `st_ino`) de cada antepasado.
+- **Qué ruta acepta.** Las rutas son relativas y se comprueban con la misma función pura en macOS y en Windows. Se rechazan:
+  - `..`, rutas absolutas de cualquier sistema, `\`, `:` (unidades y flujos alternativos) y `<>"|?*`;
+  - invisibles, controles, lo que no está en NFC y los nombres reservados de Windows;
+  - un componente que acaba en punto o en espacio;
+  - más de 1 024 caracteres en la ruta o 255 bytes en un componente.
+- **Cómo se llega al fichero:**
+  - cada componente tiene que ser exactamente un nombre que lista su carpeta. Una variante de mayúsculas, una forma NFD o un nombre corto 8.3 nunca se busca;
+  - ningún componente puede ser un enlace ni una unión;
+  - un fichero con más de un enlace duro no se lee;
+  - el fichero se abre sin seguir enlaces (`O_NOFOLLOW` donde existe). Sobre el descriptor se comprueba que sigue siendo el mismo fichero regular, con un solo enlace, y que lo leído no pasa del tope. Después se comprueba que sigue resolviendo dentro de la carpeta.
+- **Qué no se lee nunca,** aunque esté dentro:
+  - `.git/`, `.ssh/`, `.aws/` y los demás componentes de la lista;
+  - `.env` y `.env.*` (salvo los de ejemplo), los nombres y extensiones de claves y credenciales de la lista;
+  - un fichero con una credencial de forma conocida;
+  - un binario, un fichero que no es UTF-8 o uno de más de 256 KiB.
+- **Cómo se muestra.** El texto del fichero sale tras `| `, con cada invisible o control escrito como `<U+XXXX>` y las credenciales enmascaradas. Una línea de un fichero no puede pasar por una del harness: las del harness van por stderr y nunca llevan texto del fichero.
+- **Qué se guarda.** Nada del fichero. La auditoría (`tool_calls` y `workspace_events`) guarda el motivo y la ruta solo como HMAC.
+
+Lo que **no** garantiza:
+
+- **Secretos.** Un secreto con forma desconocida en un fichero normal se lee y se muestra.
+- **Carreras con otro proceso.** Un proceso con tu cuenta que cambie una carpeta intermedia por un enlace entre la comprobación y la apertura no siempre se detecta: no hay `openat` portable. El harness sí detecta el cambio del fichero mismo y de la carpeta raíz. Quien controla tu cuenta ya puede leer esos ficheros sin el harness (deuda conocida 1 y 15).
+- **Windows.** Ahí no se ha ejecutado (NOT RUN). Las uniones, los enlaces duros de NTFS, los nombres cortos y los flujos alternativos se rechazan por regla y se prueban simulados en macOS.
+
 ## Matriz SEC y deuda conocida
 
 Qué propiedad de seguridad (SEC-01..SEC-15) prueba qué test, con su control negativo y sus límites, está en [`docs/security/sec-matrix.md`](docs/security/sec-matrix.md); `scripts/verify.sh` comprueba que lo que cita existe. Lo que no se hace o no se prueba, con su decisión, está en [`docs/security/known-debt.md`](docs/security/known-debt.md).

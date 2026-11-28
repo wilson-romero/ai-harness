@@ -489,63 +489,87 @@ Cada tope es una constante con su número literal en la frontera, como en `code-
 - **B2:** la tabla de la carpeta por sesión y del consentimiento, en la misma migración o en la siguiente. Revertir quita `/workspace` y la tabla interna del catálogo; las listas MCP no cambian, salvo que un servidor llamado `workspace` vuelve a ser legal.
 - **B3 y B4:** sin migración, si la fila del plan (`plan_runs`, migración 009) basta para la aprobación de escritura (se mide en la tarea 4.1). Si no basta, una columna nueva.
 
-## Decisiones que quedan para el dueño
+## Decisiones del dueño (2026-11-27)
 
-Cada una tiene la opción de trabajo que sigue el diseño, que se cambia aquí si el dueño elige otra.
+El dueño contestó el 2026-11-27 y autorizó solo el tramo **B1**. Lo que sigue sustituye a las decisiones abiertas que había aquí. «Tomada» quiere decir que la decidió él. «Por defecto» quiere decir que se adopta la recomendación de este diseño y que él puede revisarla.
 
-1. **Cómo se elige la carpeta.**
-   - (a) **`/workspace <ruta>` por sesión y `--root` en la CLI, sin variable** (tomada, D1);
-   - (b) también `HARNESS_WORKSPACE` como valor inicial;
-   - (c) el directorio actual.
+1. **Cómo se elige la carpeta. Tomada:**
+   - `/workspace <ruta>` por sesión y `--root <ruta>` en la CLI;
+   - sin variable de entorno y sin valor por defecto;
+   - se rechazan las carpetas que propone D1.
 
-   **Recomiendo (a).**
-2. **Ficheros ignorados por git.**
-   - (a) **se leen si no los prohíbe D3; no se interpreta `.gitignore`** (tomada);
-   - (b) se implementa un subconjunto de `.gitignore` en la biblioteca estándar y se saltan en `list`, `glob` y `grep`, pero no en `read` explícito;
-   - (c) `git check-ignore` en un subproceso.
+   D1 queda como está, con la precisión de B1 que se anota en D1.
+2. **Ficheros ignorados por git. Por defecto:** se leen si no los prohíbe D3, y `.gitignore` no se interpreta.
+3. **`delete` y `move`. Tomada:** no existen en v1. El único borrado es el de `/undo` de un fichero que el harness creó.
+4. **Leer antes de editar. Tomada:** obligatorio, y se rechaza si el fichero cambió desde esa lectura (`not_read`, `changed_since_read`; D11).
+5. **Profundidad de deshacer. Tomada:** un nivel, aprobado como cualquier escritura (D12).
+6. **Contenido de ficheros hacia un proveedor que no es el Mock. Tomada:**
+   - solo con un consentimiento por carpeta, apagado por defecto (D14);
+   - `.env*`, los ficheros de claves y `.git` se rechazan siempre, haya o no consentimiento (D3).
+7. **`AGENTS.md`. Por defecto:** fuera de este change.
+8. **Tabuladores y `\r` en lo que se escribe. Por defecto:** prohibidos en B3, porque D5 de code-mode se aplica sin excepciones.
+9. **Fila SEC. Por defecto:** una fila nueva para las escrituras en la carpeta (D17). Llega con B3.
+10. **Número del corte. Tomada:** **Corte 12**, ya añadido a `docs/plan/2026-11-24-ai-harness-cortes.md`.
+11. **Orden. Tomada:**
+    - B1 empieza ya, en paralelo al bucle;
+    - B2 y los tramos siguientes, que dependen del bucle, esperan al merge de `feature/code-mode-loop`.
 
-   **Recomiendo (a) en B1–B4 y (b) en B5** si las búsquedas se llenan de `node_modules`. (c) añade un proceso.
-3. **`delete` y `move` en v1.**
-   - (a) **no; solo el borrado de `/undo`** (tomada);
-   - (b) sí, como efectos aprobados con su diff («file removed»).
+## Lo que enseñó el tramo B1 (2026-11-27)
 
-   **Recomiendo (a).**
-4. **Leer antes de editar.**
-   - (a) **obligatorio, con el `sha256` del fichero entero** (tomada, D11);
-   - (b) solo coincidencia exacta, sin registro.
+### B1-1. Las carpetas del sistema que son enlaces (decisión D1 precisada)
 
-   **Recomiendo (a).**
-5. **Profundidad de deshacer.**
-   - (a) **la última lista aplicada, una vez** (tomada, D12);
-   - (b) una pila de las 20 últimas.
+- **Qué.** D1 decía que no puede ser un enlace ni la carpeta ni «ninguno de sus componentes». En B1:
+  - la carpeta misma no puede ser un enlace ni una unión;
+  - los componentes de **encima** de ella se resuelven, y lo que se muestra y se guarda es la ruta resuelta.
+- **Por qué.**
+  - En macOS, `/tmp`, `/var` y `/etc` son enlaces del sistema a `/private/…`, así que la regla original rechazaba cualquier carpeta bajo `/tmp`.
+  - El atacante de este diseño es el contenido de la carpeta, que no controla las carpetas de encima.
+  - **Dentro** de la carpeta, la regla sigue siendo la de D2: ningún componente puede ser un enlace.
+- **Alternativas rechazadas.**
+  - Exigir que la ruta escrita coincida con la resuelta: también rechaza `/tmp/x` en macOS.
+- **Impacto.** `harness/workspace/root.py` (`check_root`); test `test_a_folder_under_a_system_link_is_accepted_resolved`.
 
-   **Recomiendo (a)**, y (b) cuando se pida.
-6. **Contenido de ficheros hacia un proveedor real.**
-   - (a) **solo con consentimiento por carpeta, apagado por defecto** (tomada, D14);
-   - (b) global;
-   - (c) nunca en este change.
+### B1-2. Contención por identidad además de por nombre
 
-   **Recomiendo (a).**
-7. **`AGENTS.md` de la carpeta.**
-   - (a) **fuera de este change** (tomada);
-   - (b) como datos marcados (no privilegiados), enviados con el catálogo y acotados.
+- **Qué.** «Está dentro de» y «contiene» se deciden de dos maneras, y basta que una diga sí:
+  - **por los nombres** de las rutas resueltas, comparados componente a componente tras NFC y `casefold()`;
+  - **por la identidad** (`st_dev`, `st_ino`) de cada carpeta antepasada, cuando la ruta protegida existe.
+- **Por qué.**
+  - `resolve()` no corrige las mayúsculas en un sistema que no las distingue: `…/AI-Harness` y `…/ai-harness` son la misma carpeta en APFS y en NTFS.
+  - La identidad no depende de cómo se escriba el nombre.
+  - Ser más estricto que el sistema solo rechaza más carpetas, nunca menos.
+- **Alternativas rechazadas.**
+  - Solo `is_within`: distingue mayúsculas en `PosixPath`, así que en macOS dejaría pasar el repo escrito con otras mayúsculas.
+- **Impacto.** `root.py`; tests `test_protected_folder_written_with_other_case_is_refused` y `test_containment_by_identity_when_names_differ`.
 
-   **Recomiendo (a)**: el modelo puede pedirlo con `read`.
-8. **Tabuladores y `\r` en el contenido escrito.**
-   - (a) **no se pueden escribir: D5 de code-mode sin excepciones** (tomada);
-   - (b) admitir `\t` solo en los elementos de un argumento `lines`, mostrado en la caja como `<U+0009>`.
+### B1-3. `code_run_root` todavía no se comprueba
 
-   **Recomiendo (a) en B3** y medir con la carpeta real cuántos ficheros lo necesitan.
-9. **Número y forma de la fila SEC.**
-   - (a) **una fila nueva para las escrituras en la carpeta** (tomada, D17);
-   - (b) ampliar SEC-04 y SEC-12.
+- **Qué.** La configuración de `code-run` no existe en `develop`: es una propuesta sin código. El rechazo `code_run_root` queda en la lista cerrada, pero B1 no lo puede comprobar.
+- **Impacto.** Se añadirá con su test cuando `code-run` se mergee. Queda anotado en `tasks.md` 2.2.
 
-   **Recomiendo (a).**
-10. **Número del corte.**
-    - (a) **Corte 12** (tomada);
-    - (b) otro.
+### B1-4. Cómo se ve el texto de un fichero
 
-    `code-run` usa «11», que ya es `response-mode`.
+- **Qué.** Cada línea de un fichero (o cada nombre de una entrada de `list`) se escribe así, en este orden:
+  1. todo carácter invisible, de control o separador de línea pasa a `<U+XXXX>` (también el tabulador y ESC);
+  2. se redacta;
+  3. se corta;
+  4. se imprime tras `| `, como `mcp call`.
+
+  Las líneas del harness (la cabecera, el resumen y los errores) van por stderr y nunca llevan texto del fichero. La ruta solo aparece en ellas después de pasar la fase 1 de D2.
+- **Por qué.** Una línea `error: …` dentro de un fichero sale como `| error: …`. Una secuencia de escape o un carácter bidi se ve en vez de actuar. Así la persona ve un intento de «Trojan Source» en lugar de que se lo oculten.
+- **Límite.** Un fichero que contiene el texto literal `<U+202E>` se ve igual que uno con el carácter real. Para leer es aceptable. Para la caja de B3, el hash ata los bytes.
+- **Impacto.** `harness/workspace/render.py`; tests de `test_workspace_output.py`.
+
+### B1-5. Auditoría: qué fila deja cada caso (D7 concretada)
+
+- **Qué.** Migración **011** (`011_workspace_events.sql`): la 009 está en `develop` y la 010 la tomará `feature/code-mode-loop`. El ejecutor de migraciones aplica cada versión que falte, así que un hueco no estorba. Qué deja cada caso:
+  - un rechazo por la forma de la ruta o por las reglas de nombre (se decide sin tocar el disco): fila `denied` con `argument_invalid`;
+  - un rechazo de la carpeta: fila `denied` con `server_not_allowed`;
+  - lo que se descubre en el disco (enlace, binario, credencial, tamaño, nombre inexacto): fila `allowed` y `failed` con `tool_error`;
+  - una lectura correcta: fila `completed` con `result_bytes`.
+
+  En todos los casos hay además una fila en `workspace_events` con el código exacto (o `ok`) y el HMAC de la ruta. La clave es la de `mcp-args.key`, con un dominio propio (`ai-harness/workspace-path/v1`). Las lecturas no dejan fila `running`: no tienen efecto que reconciliar.
+- **Impacto.** `harness/workspace/audit.py`; tests de `test_workspace_audit.py`.
 
 ## Referencias: cómo lo hacen OpenCode, Claude Code y Codex
 

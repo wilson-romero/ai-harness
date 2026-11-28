@@ -134,3 +134,19 @@ El estudio `docs/estudios/2026-11-26-formato-compacto-para-copilot.md` midió qu
 ## Revisado el 2026-11-27 (Wilson): Corte 11 · Modo de respuesta
 
 Wilson decidió el 2026-11-27 que el modo de respuesta de Copilot (automático, rápido, profundo) se elige desde el harness con un comando de sesión, `/mode auto|quick|deep`, visible en el panel lateral y recordado por sesión, y que el harness confirma en la página que el modo está puesto antes de enviar. Forma el **Corte 11** (`response-mode`, riesgo N2 porque el harness hace clic en un control de la página real, SEC-02 y SEC-07; macOS como puerta y Windows como confirmación opcional). Se implementa contra la página sintética; el selector real lo mide la sonda (`copilot_probe.py response-mode`, sin enviar nada) con el dueño, y la demo con Copilot real queda pendiente de esa medida. No cambia el orden de la revisión anterior.
+
+## Revisado el 2026-11-27 (Wilson): Corte 12 · Herramientas de la carpeta de trabajo
+
+Wilson aprobó el 2026-11-27 la fase B de la hoja de ruta: que el harness trabaje como OpenCode dentro de una carpeta de trabajo que él elige. Es el **Corte 12** (`workspace-tools`).
+
+- **Riesgo:** N1 en las lecturas (tramos B1, B2 y B5) y N2 en las escrituras (B3 y B4).
+- **SEC:** 01, 03, 04, 05, 07, 08, 12 y 15, más una fila nueva para las escrituras.
+- **Plataformas:** macOS como puerta y Windows como confirmación opcional.
+- **Qué decidió:**
+  - la carpeta se elige con `/workspace <ruta>` por sesión y con `--root` en la CLI, sin variable de entorno ni valor por defecto;
+  - las lecturas permitidas por regla corren solas y quedan auditadas, y toda escritura necesita la aprobación del diff exacto;
+  - el contenido de los ficheros solo sale hacia un proveedor que no es el Mock con un consentimiento por carpeta, y `.env*`, las claves y `.git` se rechazan siempre;
+  - hay que leer un fichero antes de editarlo; no hay `delete` ni `move`; `/undo` deshace un nivel.
+- **Orden:** B1 (la carpeta, el confinamiento, las reglas fijas y `read`/`list`, solo por la CLI) empieza ya, en paralelo al bucle. Los tramos siguientes esperan al merge de `feature/code-mode-loop`.
+
+Nota: la propuesta `code-run` se llamaba «Corte 11», número que ya tenía `response-mode`; su número se fija cuando se retome.

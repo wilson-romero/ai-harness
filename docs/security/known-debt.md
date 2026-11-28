@@ -121,6 +121,21 @@ Una revisión de seguridad de `develop` (sobre `5af28ed`, con datos sintéticos 
 - **Decisión:** pendiente de Wilson: cada uno, si se aborda, en un change propio.
 - **Dueño:** Wilson.
 
+## 15. Carpeta de trabajo: la carrera que queda abierta y Windows sin ejecutar (rama `feature/workspace-tools`)
+
+- **Qué:**
+  - **La carrera.** Entre el paseo componente a componente y la apertura de un fichero de la carpeta de trabajo, otro proceso con la cuenta de la persona puede cambiar una carpeta intermedia por un enlace. El harness detecta:
+    - el cambio del fichero mismo: la identidad sobre el descriptor, `O_NOFOLLOW` y la nueva resolución dentro de la carpeta;
+    - el de la carpeta raíz: su identidad se comprueba en cada llamada.
+
+    Pero no puede cerrar la ventana de las carpetas intermedias: `os.open` no admite `dir_fd` en Windows, así que no hay `openat` portable.
+  - **Windows.** En Windows no se ha ejecutado nada de este tramo (NOT RUN). Las uniones reales, `st_nlink` en NTFS, los nombres cortos 8.3, los flujos alternativos y las rutas largas se rechazan por regla y se prueban simulados en macOS.
+- **Riesgo:**
+  - un proceso local que ya tiene la cuenta de la persona podría hacer leer al harness un fichero de fuera de la carpeta. Ese proceso podría leerlo igualmente sin el harness;
+  - una diferencia de conducta del sistema en Windows que la simulación no reproduzca.
+- **Decisión:** aceptado. El atacante de este diseño es el contenido de la carpeta, no un proceso concurrente. Las órdenes para el PC de pruebas están en `docs/runbook/workspace-tools.md` («Windows») y en `openspec/changes/workspace-tools/tasks.md` 8.1 y 8.2.
+- **Dueño:** Wilson.
+
 ## Fuera del alcance: aplazado (proyecto educativo)
 
 Decidido por Wilson el 2026-11-25: el proyecto sirve para aprender a construir un harness, no para producción. Se aplaza lo que solo sirve para operar en producción:
