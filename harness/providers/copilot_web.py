@@ -41,6 +41,7 @@ from harness.browser.edge import SHUTDOWN_S, EdgeLauncher
 from harness.browser.login import recorded_ready_path
 from harness.browser.page_state import (
     PageState,
+    address,
     classify,
     guest_page_advice,
     host_of,
@@ -730,6 +731,7 @@ class _Turn:
         self.on_sent = on_sent
         self.events = events
         self.deadline = deadline
+        self.started = time.monotonic()  # before Edge starts: the deadline counts its start
         self.host = host_of(plan.url)
         self.locators: Locators = plan.measurement.locators
         label = self.locators.code_language
@@ -948,6 +950,7 @@ class _Turn:
     async def wait_ready(self, page: Page, ready_by: float) -> None:
         measurement = self.plan.measurement
         state, since = PageState.UNKNOWN, time.monotonic()
+        waited_since = since
         while True:
             now_state = await classify(page, measurement, self.host)
             if now_state is not state:
@@ -970,9 +973,34 @@ class _Turn:
                 raise ProviderTimeout(
                     "the Copilot page was not ready in time "
                     f"(HARNESS_COPILOT_READY_TIMEOUT_S is {self.settings.copilot_ready_timeout_s:g} s, "
-                    "within HARNESS_REQUEST_TIMEOUT_S); nothing was sent"
+                    "within HARNESS_REQUEST_TIMEOUT_S); nothing was sent; "
+                    + await self.not_ready_seen(page, state, waited_since, ready_by)
                 )
             await asyncio.sleep(STATE_POLL_S)
+
+    async def not_ready_seen(self, page: Page, state: PageState, waited_since: float,
+                             ready_by: float) -> str:
+        """What the page showed when the readiness wait ran out, by structure only: its
+        address without the query, the editor and the user turns found, the state, and which
+        bound ended the wait. Never a text of the page (Windows parity 3)."""
+        now = time.monotonic()
+        bound = ("HARNESS_REQUEST_TIMEOUT_S, which counts the start of Edge"
+                 if ready_by >= self.deadline else "HARNESS_COPILOT_READY_TIMEOUT_S")
+        timing = (f"waited {now - waited_since:.1f} s, {now - self.started:.1f} s since the "
+                  f"request started, ended by {bound}")
+        try:
+            editor = self.locators.composer.resolve(page)
+            matched = await editor.count()
+            visible = matched > 0 and await editor.first.is_visible()
+            enabled = visible and await editor.first.is_enabled()
+            users = await self.locators.user_turn.resolve(page).count()
+            where = address(page.url)
+        except PlaywrightError:
+            return f"{timing}; the page could not be read"
+        shown = ("visible and enabled" if enabled else "visible, not enabled" if visible
+                 else "not visible")
+        return (f"{timing}; page {where}, state {state}, editor {matched} matched, {shown}, "
+                f"{users} user turns")
 
     async def settle(self, page: Page, ready_by: float) -> None:
         """Wait until the page stops adding elements: a key press on a page still rendering

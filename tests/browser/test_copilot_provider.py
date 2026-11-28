@@ -448,9 +448,29 @@ def test_page_that_does_not_load_keeps_the_session(cli, env, data_dir, app):
         **env | {"HARNESS_COPILOT_URL": url, "HARNESS_COPILOT_READY_TIMEOUT_S": "4"},
     )
     assert code == 1 and "not ready in time" in err
+    # What the page showed, by structure only (Windows parity 3: a timeout seen once in a full
+    # Edge run could not be told apart from a slow start): the address without its query, the
+    # editor found but hidden, the turns of the reopened conversation, and the bound that ended it.
+    assert f"page {app.base}/c/" in err and "ready_ms" not in err
+    assert "editor 1 matched, not visible" in err and "1 user turns" in err
+    assert "ended by HARNESS_COPILOT_READY_TIMEOUT_S" in err
+    assert "since the request started" in err
     assert request_states(data_dir, session_id) == ["completed", "timeout"]
     assert session_row(data_dir, session_id) == before
     assert app.prompt_count == 1
+
+
+def test_a_readiness_ended_by_the_request_deadline_says_so(cli, env, data_dir, app):
+    """The message names HARNESS_COPILOT_READY_TIMEOUT_S (60 s), but the request deadline,
+    which also counts the start of Edge, can end the wait first; the message says which."""
+    session_id = new_session(cli, env)
+    code, _, err = cli("ask", session_id, "primera",
+                       **env | {"HARNESS_COPILOT_URL": app.url("/app", ready_ms="600000"),
+                                "HARNESS_REQUEST_TIMEOUT_S": "8"})
+    assert code == 1 and "not ready in time" in err and "is 60 s" in err
+    assert "ended by HARNESS_REQUEST_TIMEOUT_S, which counts the start of Edge" in err
+    assert f"page {app.base}/app," in err and "0 user turns" in err
+    assert app.prompt_count == 0
 
 
 # -- 4.4: the new reply and its end -------------------------------------------------------------
