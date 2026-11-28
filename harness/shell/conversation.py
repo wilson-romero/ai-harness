@@ -41,7 +41,13 @@ from harness.core.response_mode import describe_mode
 from harness.core.service import SessionService
 from harness.core.strict_json import decode_text_limited
 from harness.mcp.config import LoadedConfig, load_config
-from harness.mcp.plan_flow import PlanRequest, PlanSetting, auto_read_setting, run_plan
+from harness.mcp.plan_flow import (
+    PlanRequest,
+    PlanSetting,
+    auto_read_setting,
+    box_option,
+    run_plan,
+)
 from harness.mcp.plan_prompt import PlanUnavailable, build_catalogue, shown_instructions
 from harness.memory.config import MemorySettings, ensure_data_dir_outside_vault
 from harness.memory.context import ProjectContext, build_context, new_nonce
@@ -918,15 +924,17 @@ class Conversation:
         return lambda: load_config(environ)
 
     async def _cmd_plan(self, *words: str) -> None:
-        """`/plan QUESTION`: the only way a reply is ever read for a plan (D9). The question
-        is the words as the parser split them, joined by one space."""
+        """`/plan [--box] QUESTION`: the only way a reply is ever read for a plan (D9). The
+        question is the words as the parser split them, joined by one space. `--box` as the
+        first word turns the rule `auto_read` off for this question only (A2-4)."""
+        box, words = box_option(words)
         question = " ".join(words)
         size = len(question.encode("utf-8", errors="surrogatepass"))
         if size > MAX_QUESTION_BYTES:
             raise UsageError(f"the question has {size} bytes; the limit is {MAX_QUESTION_BYTES}; "
                              "nothing was sent")
         load = self._mcp_config()
-        auto_read = auto_read_setting(self._environ())  # a wrong value: stop here
+        auto_read = auto_read_setting(self._environ()) and not box  # a wrong value: stop here
         build_catalogue(load())  # no read tool, or a list that cannot be read: stop here
         context = self._context_for_question(question)
         attachment, self._attachment = self._attachment, None

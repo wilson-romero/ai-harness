@@ -200,6 +200,13 @@ Un plan cuyos pasos son todos `auto_read` SHALL ejecutarse sin la caja de aproba
 - **WHEN** `HARNESS_AUTO_READ` vale `off`
 - **THEN** un plan de lecturas `auto_read` pide la caja como cualquier otro
 
+### Requirement: La regla se apaga para una pregunta
+Con `--box` como primera palabra tras la orden, todo plan de esa pregunta SHALL ir a la caja. La opción SHALL NOT enviarse ni guardarse como parte de la pregunta, y `--box` sin pregunta SHALL NOT enviar nada.
+
+#### Scenario: Regla apagada para una pregunta
+- **WHEN** la persona escribe `/plan --box PREGUNTA` y después `/plan PREGUNTA`, y los dos planes son de lecturas `auto_read`
+- **THEN** el primero pide la caja y el segundo corre por la regla, y ningún prompt enviado contiene `--box`
+
 ### Requirement: La lista se ata al leer el plan
 Al leer un plan, el harness SHALL fijar un hash de la entrada de la lista de cada paso (orden y argumentos de arranque, entorno, carpeta, plazos, operación, `auto_read`, tope y argumentos declarados). Antes de cada paso, el ejecutor SHALL calcularlo otra vez con la lista que va a usar y SHALL rechazar el paso, sin arrancar nada, si difiere. La `description` de la herramienta SHALL NOT contar.
 

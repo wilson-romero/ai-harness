@@ -28,7 +28,17 @@ from harness.storage.database import (
     transaction,
 )
 from tests.mcp_support import DEFAULT_TOOLS, hang_guard, server_entry, write_config  # noqa: F401
-from tests.plan_support import ALPHA, BETA, QUESTION, McpList, plan_reply, rows, scripted_mock
+from harness.providers.mock import MockProvider
+from tests.plan_support import (
+    ALPHA,
+    BETA,
+    KEY,
+    QUESTION,
+    McpList,
+    plan_reply,
+    rows,
+    scripted_mock,
+)
 from tests.shell_support import CODE, ScriptedTerminal, make_conversation
 
 PLAN_LINE = f"/plan {QUESTION}"
@@ -144,6 +154,58 @@ def test_without_an_answer_and_the_rule_off_nothing_runs(conn, data_dir, mcp):
     terminal = _run(conn, data_dir, mcp, scripted_mock(plan_reply(ALPHA)), [PLAN_LINE],
                     environ={"HARNESS_AUTO_READ": "off"})
     assert len(terminal.questions) == 1 and mcp.starts() == 0
+
+
+class _Recording(MockProvider):
+    """The scripted Mock, keeping every prompt it receives."""
+
+    def __init__(self, reply: str) -> None:
+        super().__init__(responses={KEY: reply})
+        self.prompts: list[str] = []
+
+    async def ask(self, request, on_sent, **options) -> str:
+        self.prompts.append(request.prompt)
+        return await super().ask(request, on_sent, **options)
+
+
+def test_box_turns_the_rule_off_for_one_question_only(conn, data_dir, mcp):
+    provider = _Recording(plan_reply(ALPHA))
+    terminal = _run(conn, data_dir, mcp, provider, [f"/plan --box {QUESTION}", PLAN_LINE],
+                    [CODE])
+    assert len(terminal.questions) == 1 and provider.calls == 2
+    assert [plan[:3] for plan in _plans(conn)] == [("completed", "consumed", "code"),
+                                                    ("completed", "consumed", "rule")]
+    # The option is the harness's: it is neither sent nor kept as part of the question.
+    assert all("--box" not in prompt for prompt in provider.prompts)
+    assert rows(conn, "SELECT content FROM messages WHERE role = 'user' ORDER BY rowid") == [
+        (PLAN_LINE,), (PLAN_LINE,)]
+
+
+def test_box_without_an_answer_runs_nothing(conn, data_dir, mcp):
+    terminal = _run(conn, data_dir, mcp, scripted_mock(plan_reply(ALPHA)),
+                    [f"/plan --box {QUESTION}"])
+    assert len(terminal.questions) == 1 and mcp.starts() == 0
+
+
+def test_box_alone_is_no_question(conn, data_dir, mcp):
+    provider = scripted_mock(plan_reply(ALPHA))
+    terminal = _run(conn, data_dir, mcp, provider, ["/plan --box"])
+    assert "--box needs a question after it; nothing was sent" in terminal.text
+    assert provider.calls == 0 and rows(conn, "SELECT COUNT(*) FROM requests") == [(0,)]
+
+
+def test_control_box_later_in_the_question_is_part_of_it(conn, data_dir, mcp):
+    provider = _Recording(plan_reply(ALPHA))
+    terminal = _run(conn, data_dir, mcp, provider, [f"/plan {QUESTION} --box"])
+    assert terminal.questions == [] and mcp.calls() == ["call get_project_metadata"]
+    assert f"{QUESTION} --box" in provider.prompts[0]
+
+
+def test_a_rule_that_no_longer_holds_runs_nothing(conn, data_dir, mcp, monkeypatch):
+    monkeypatch.setattr(flow, "record_rule", lambda *_, **__: "undecided")
+    terminal = _run(conn, data_dir, mcp, scripted_mock(plan_reply(ALPHA)), [PLAN_LINE])
+    assert "could not be approved by rule; nothing was run" in terminal.text
+    assert terminal.questions == [] and mcp.starts() == 0
 
 
 @pytest.mark.parametrize("value", ["yes", "ON", "0", ""])

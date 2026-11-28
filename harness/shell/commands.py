@@ -52,6 +52,11 @@ class CommandSpec:
         return self.most is None or self.most > 0
 
 
+# code-mode A2: for this one question, every plan goes to the approval box, even one of reads
+# the local list allows by rule (`auto_read`). Only as the first word after the command.
+BOX = Option("--box", TEXT, "every plan of this question asks the box, even reads by rule")
+
+
 TABLE: tuple[CommandSpec, ...] = (
     CommandSpec("help", 0, 0, "/help", "this list"),
     CommandSpec("status", 0, 0, "/status", "session, project, provider and last request"),
@@ -77,9 +82,9 @@ TABLE: tuple[CommandSpec, ...] = (
     CommandSpec("file", 1, 1, "/file PATH",
                 "attach a text file to the next question (it is never stored)",
                 positional=(PATH,)),
-    CommandSpec("plan", 1, None, "/plan QUESTION",
+    CommandSpec("plan", 1, None, "/plan [--box] QUESTION",
                 "ask for a plan of reads from the MCP list; you approve it, then it runs",
-                positional=(TEXT,), full_name_only=True),
+                positional=(TEXT,), options=(BOX,), full_name_only=True),
     CommandSpec("mode", 0, 1, f"/mode [{'|'.join(MODES)}]",
                 "the response mode of this session (nothing is sent)", positional=(MODE,)),
     CommandSpec("exit", 0, 0, "/exit", "leave (end of input leaves too)"),

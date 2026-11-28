@@ -141,6 +141,19 @@ def auto_read_setting(environ: Mapping[str, str]) -> bool:
     return raw == "on"
 
 
+BOX_OPTION = "--box"
+
+
+def box_option(words: tuple[str, ...]) -> tuple[bool, tuple[str, ...]]:
+    """`/plan --box QUESTION` (A2-4): whether the first word asks the box for every plan of
+    this one question, and the words of the question. `--box` alone is no question."""
+    if words and words[0] == BOX_OPTION:
+        if len(words) == 1:
+            raise UsageError(f"{BOX_OPTION} needs a question after it; nothing was sent")
+        return True, words[1:]
+    return False, words
+
+
 async def run_plan(request: PlanRequest, *, service: SessionService, conn, view: PlanView,
                    terminal: Terminal, setting: PlanSetting) -> PlanOutcome:
     """The whole of one `/plan` (see the module docstring)."""
@@ -179,8 +192,8 @@ async def run_plan(request: PlanRequest, *, service: SessionService, conn, view:
 
 
 RULE_HEADER = ("running plan: {plan_id}, {steps} step(s), every one a read your local MCP list "
-               "allows by rule (auto_read); no approval is asked (HARNESS_AUTO_READ=off asks "
-               "for every plan). Ctrl+C stops it")
+               "allows by rule (auto_read); no approval is asked (--box, or HARNESS_AUTO_READ=off, "
+               "asks for every plan). Ctrl+C stops it")
 
 
 async def approve_and_run(plan: Plan, request: PlanRequest, request_id: UUID,
@@ -198,7 +211,10 @@ async def approve_and_run(plan: Plan, request: PlanRequest, request_id: UUID,
     if setting.auto_read and plan.by_rule:
         # Every step was `auto_read` when the plan was read; the executor checks it again
         # against the list as it is when it runs (A2).
-        record_rule(conn, plan_id=plan_id, plan=plan, now=setting.clock())
+        if record_rule(conn, plan_id=plan_id, plan=plan, now=setting.clock()) != "granted":
+            # Its row was no longer pending: nothing is run on a rule that did not hold.
+            view.say(f"plan: {plan_id} could not be approved by rule; nothing was run")
+            return PlanOutcome("not_approved")
         view.result(RULE_HEADER.format(plan_id=plan_id, steps=len(plan.steps)),
                     proposal.content)
         return await _run(plan, plan_id, request, request_id, approval_hash, deadline, view,

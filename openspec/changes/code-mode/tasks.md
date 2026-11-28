@@ -383,9 +383,11 @@ Va aquí, tras el tramo 2, porque la hoja de ruta del dueño (design, «Fase A»
 - [x] 10.3 Un plan con un paso que no es por regla va entero a la caja; sin respuesta no corre nada.
   - Oráculo: `::test_a_plan_with_one_read_not_by_rule_goes_to_the_box_whole` y `::test_a_plan_left_undecided_in_the_box_runs_nothing_even_if_one_step_is_by_rule` (`starts.log` vacío).
   - Control negativo: mutantes A02 y A04.
-- [x] 10.4 El interruptor `HARNESS_AUTO_READ` (A2-4).
+- [x] 10.4 El interruptor `HARNESS_AUTO_READ` y la opción `--box` (A2-4).
   - Oráculo: `::test_harness_auto_read_off_asks_the_box_for_every_plan`, `::test_without_an_answer_and_the_rule_off_nothing_runs` y `::test_a_wrong_switch_sends_nothing` (`yes`, `ON`, `0`: 0 envíos, 0 solicitudes; sin variable, `on`).
   - Control negativo: mutantes A03 y A13.
+  - `--box`, añadida al verificar A2 (A2-4 revisada): `::test_box_turns_the_rule_off_for_one_question_only` (dos preguntas: la primera `code` con la caja, la segunda `rule`; ningún prompt con `--box`; el historial guarda `/plan PREGUNTA` dos veces), `::test_box_without_an_answer_runs_nothing`, `::test_box_alone_is_no_question` (0 envíos, 0 solicitudes) y su control `::test_control_box_later_in_the_question_is_part_of_it` (más adelante es texto y la regla vale). Control negativo: mutantes A18, A20 y A21.
+- [x] 10.4b La regla que ya no vale no ejecuta nada (A2-8): `::test_a_rule_that_no_longer_holds_runs_nothing` (`starts.log` vacío). Control negativo: mutante A19.
 - [x] 10.5 La lista atada al leer el plan y comprobada antes de cada paso (A2-2).
   - Oráculo: `::test_a_list_changed_after_the_plan_was_read_refuses_the_step`, 7 casos (orden, entorno, plazo de llamada, plazo de arranque, tope de resultado, `auto_read` quitado, límites de un argumento): `starts.log` vacío, `('failed', …, 'list_changed', 1)`, 0 filas en `tool_calls`. Con la caja: `::test_a_command_changed_while_the_box_is_open_refuses_the_plan`. Con dos servidores: `::test_a_step_after_the_first_is_refused_when_its_entry_changed` (el paso 1 corre, el 2 no arranca, `stopped_at = 2`). Una fila sin atadura: `::test_a_plan_recorded_before_010_never_runs` (`plan_altered`).
   - Controles: la misma lista escrita otra vez corre (`::test_control_the_same_list_written_again_runs`); una `description` nueva no cambia nada (`::test_control_a_new_description_changes_nothing_that_runs`); una herramienta quitada se sigue denegando en la pasarela (`test_shell_plan.py::test_the_policy_is_decided_again_when_the_plan_runs`, sin tocar).
@@ -424,8 +426,12 @@ Va aquí, tras el tramo 2, porque la hoja de ruta del dueño (design, «Fase A»
 | A15 | La `description` entra en el hash | `::test_control_a_new_description_changes_nothing_that_runs` |
 | A16 | Una herramienta quitada cuenta como «cambiada» | `test_shell_plan.py::test_the_policy_is_decided_again_when_the_plan_runs` |
 | A17 | Al leer el plan, todo paso se toma por regla | `::test_a_plan_with_one_read_not_by_rule_goes_to_the_box_whole` |
+| A18 | `--box` no apaga la regla | `::test_box_turns_the_rule_off_for_one_question_only` |
+| A19 | No se mira lo que devuelve `record_rule` | `::test_a_rule_that_no_longer_holds_runs_nothing` |
+| A20 | `--box` en cualquier posición | `::test_control_box_later_in_the_question_is_part_of_it` |
+| A21 | `--box` sin pregunta se acepta | `::test_box_alone_is_no_question` |
 
-Resultado: **17 de 17 muertos, 0 supervivientes**. Equivalente, sin mutar: quitar `auto_read` del hash de la herramienta. Lo repite a propósito `changed_entry` («un plan por regla exige que siga siendo `auto_read`»), así que ese mutante sobreviviría y quitar los dos lo mata A05.
+Resultado: **17 de 17 muertos, 0 supervivientes**. Verificación independiente (2026-11-27, otro agente sobre `d508812` con los arreglos de A2): los 17 se reescribieron desde la tabla con un guion nuevo (ancla única, sus tests con `-x`, `PYTHONPYCACHEPREFIX` nuevo, se deshace) y los 17 murieron con el test que dice la tabla; A18 a A21, 4 de 4 muertos. Equivalente, sin mutar: quitar `auto_read` del hash de la herramienta. Lo repite a propósito `changed_entry` («un plan por regla exige que siga siendo `auto_read`»), así que ese mutante sobreviviría y quitar los dos lo mata A05.
 
 - [x] 10.10 Comprobaciones de A2 (macOS arm64, `caffeinate -i`, 2026-11-27, sobre `a9c51fe` con el cambio sin confirmar):
   - `caffeinate -i uv run pytest -m "not edge and not copilot"`: **2398 passed, 191 deselected** en 412 s, código 0.

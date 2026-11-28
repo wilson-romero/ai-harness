@@ -542,18 +542,27 @@ Construido en `feature/code-mode-loop`, desde `develop` = `a9c51fe`. Cumple los 
   - Reconstruir también `tool_calls`: más filas en juego para nada.
 - **Impacto.** `harness/storage/database.py` (`FOREIGN_KEYS_OFF`, `MigrationError`), las guardas de versión de `test_storage.py` y `test_response_mode.py` (`[…, 10]`). Pruebas: `test_a_database_at_009_upgrades_to_010_and_keeps_its_plans_and_their_calls` y su control negativo `test_a_rebuilding_migration_that_would_break_a_reference_is_refused`.
 
-### A2-4. Cómo se apaga la regla: `HARNESS_AUTO_READ=off`
+### A2-4. Cómo se apaga la regla: `--box` para una pregunta, `HARNESS_AUTO_READ=off` para todas
 
-- **Qué.** Una variable de entorno, leída en cada `/plan` (y `/agent`, A3) y en `main.py plan`: `on` (por defecto) u `off`. Con `off` todo plan va a la caja, como antes de A2. Cualquier otro valor se rechaza antes de enviar nada.
-- **Por qué.** Vale para la conversación (plana y pantalla completa) y para la CLI con un solo mecanismo, y se decide antes de empezar, no a mitad de una pregunta.
+**Revisada al verificar A2 (2026-11-27).** La primera versión solo tenía la variable y rechazaba una opción. Pero en la conversación la variable vale para todo el proceso, no para **una** pregunta, que es lo que pedía el tramo. Se añade la opción y la variable se queda.
+
+- **Qué.**
+  - `/plan --box PREGUNTA` (y `/agent --box PREGUNTA`, A3): todo plan de esa pregunta va a la caja. `--box` solo cuenta como **primera** palabra tras la orden; más adelante es texto de la pregunta (`/plan qué es --box` envía `qué es --box`). No se envía ni se guarda: el historial guarda `/plan PREGUNTA`. `--box` sin pregunta es un error y no envía nada. Está declarada en la tabla de órdenes (`commands.BOX`), así que `/help` la muestra.
+  - `HARNESS_AUTO_READ`, leída en cada `/plan` y `/agent` y en `main.py plan`: `on` (por defecto) u `off`. Con `off` todo plan va a la caja, como antes de A2. Cualquier otro valor se rechaza antes de enviar nada. En la CLI es ya por pregunta: `HARNESS_AUTO_READ=off uv run python main.py plan …`.
+- **Por qué.**
+  - La opción decide antes de enviar, en la misma línea que la pregunta, y no obliga a salir de la conversación.
+  - La variable sirve para quien no quiere la regla nunca, sin editar la lista.
+  - La ambigüedad que se temía (una pregunta que empieza por `--box`) es real pero estrecha: solo la primera palabra, y la ayuda lo dice. Una pregunta así se escribe con otra palabra delante.
 - **Alternativas rechazadas.**
-  - `/plan --ask PREGUNTA`: una opción dentro de una orden de texto libre se confunde con una pregunta que empiece por `--ask`, y la CLI necesitaría otra.
+  - Solo la variable: no es por pregunta en la conversación (motivo de la revisión).
+  - Una orden aparte (`/planbox`): una orden más que hay que escribir entera, para lo mismo.
+  - Un interruptor de sesión (`/rule off`): vale para las preguntas siguientes, no para una, y se olvida encendido o apagado.
   - Quitar `auto_read` de la lista: funciona, pero es editar el fichero cada vez.
-- **Impacto.** `plan_flow.auto_read_setting`; README.
+- **Impacto.** `plan_flow.box_option` y `auto_read_setting`, `commands.BOX`, `conversation._cmd_plan`; README. Pruebas: `test_box_turns_the_rule_off_for_one_question_only`, `test_box_without_an_answer_runs_nothing`, `test_box_alone_is_no_question` y su control `test_control_box_later_in_the_question_is_part_of_it`.
 
 ### A2-5. Lo que se ve antes de que corra un plan por regla
 
-- **Qué.** Una línea del harness, `running plan: <id>, N step(s), every one a read your local MCP list allows by rule (auto_read); no approval is asked (HARNESS_AUTO_READ=off asks for every plan). Ctrl+C stops it`, y debajo, como texto ajeno marcado (`|`), las mismas líneas que mostraría la caja: por paso, servidor, herramienta, operación, la decisión de la política con `auto_read`, los argumentos canónicos y qué lee. Ctrl+C lo para como a cualquier plan.
+- **Qué.** Una línea del harness, `running plan: <id>, N step(s), every one a read your local MCP list allows by rule (auto_read); no approval is asked (--box, or HARNESS_AUTO_READ=off, asks for every plan). Ctrl+C stops it`, y debajo, como texto ajeno marcado (`|`), las mismas líneas que mostraría la caja: por paso, servidor, herramienta, operación, la decisión de la política con `auto_read`, los argumentos canónicos y qué lee. Ctrl+C lo para como a cualquier plan.
 - **Por qué.** Los argumentos los escribió el modelo: van marcados como ajenos aunque D5 ya rechazó saltos de línea e invisibles.
 - **Alternativas rechazadas.** Una línea del harness por paso con los argumentos dentro: mezclaría texto del modelo con el del harness.
 - **Impacto.** `plan_flow.RULE_HEADER`.
@@ -567,6 +576,12 @@ Construido en `feature/code-mode-loop`, desde `develop` = `a9c51fe`. Cumple los 
 
 - La regla confía en el fichero de la persona: quien pueda escribirlo puede marcar `auto_read`. Es la misma frontera de siempre (`_check_writers` lo exige solo suyo; en Windows no se miran las ACL).
 - Una lectura automática saca datos de la máquina hacia ese servidor sin preguntar: es exactamente lo que la persona permite al escribir `auto_read`.
+
+### A2-8. Una regla que ya no vale no ejecuta nada
+
+- **Qué.** `record_rule` solo concede si la fila sigue `pending`; si no (otro proceso la tocó), devuelve otro estado. El flujo lo mira: sin `granted`, dice «could not be approved by rule; nothing was run» y no llama al ejecutor. Antes se ignoraba el valor devuelto; el ejecutor fallaba cerrado igualmente (`approval_not_usable`), pero tras arrancar su hilo y su conexión.
+- **Por qué.** Hallado al verificar A2: un valor de retorno que nadie mira es un control que no se ve decir NO.
+- **Impacto.** `plan_flow.approve_and_run`; `test_a_rule_that_no_longer_holds_runs_nothing`.
 
 ### Decisiones abiertas del tramo 2
 
