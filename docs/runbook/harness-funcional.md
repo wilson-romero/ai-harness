@@ -14,8 +14,8 @@ La guía de estudio que explica cada pieza es [`docs/aprendizaje/fundamentos-de-
 | 1 · Conversar | `ask`/`chat` con el Mock y con Copilot real | Mock: **HECHO**. Copilot real: **EN CURSO** (probado en macOS con cuenta de prueba; falta tu demo 7.5 y Windows). |
 | 2 · Memoria de proyecto | `memory …` y `ask --project` con contexto acotado y marcado | **HECHO** con el vault sintético. Medición sobre tu vault real: NOT RUN. Memoria por deltas: **EN CURSO** (`prompt-economy` 5.x). |
 | 3 · Skills con aprobación | `hls-review` y `architecture-memory` de punta a punta | Mock: **HECHO**. Con Copilot real (Puerta MVP sin EA, 4.1–4.4): **EN CURSO**. |
-| 4 · Herramientas | Pasarela MCP con políticas | `mcp call` de solo lectura desde la CLI: **HECHO**. Desde la conversación, escrituras, hooks: **FALTA**. |
-| 5 · Lazo de agente | El modelo propone, el harness ejecuta con aprobación, el resultado vuelve | **FALTA**. Decidido el diseño (plan JSON, botón, hooks); nada implementado. |
+| 4 · Herramientas | Pasarela MCP con políticas | `mcp call` de solo lectura desde la CLI: **HECHO**. Desde la conversación: solo los pasos de un plan aprobado (`/plan`, Nivel 5). Escrituras, hooks: **FALTA**. |
+| 5 · Lazo de agente | El modelo propone, el harness ejecuta con aprobación, el resultado vuelve | **PARCIAL** (sobre `develop` `a9c51fe`): `/plan` de solo lectura con aprobación por hash, en `develop`. Lecturas por regla y lazo con vueltas: en curso, sin fusionar. Vuelta del resultado, medición con Copilot real y escrituras: **FALTA**. |
 
 ---
 
@@ -212,7 +212,7 @@ Con Copilot real: `docs/runbook/mvp-without-ea.md` §5 **[no verificado]**. Cada
 
 **Estado:**
 - `mcp list/tools/call` de solo lectura desde la CLI: **HECHO** (`mcp-gateway` mergeado; abierta la demo 5.4).
-- Llamadas desde la conversación: **FALTA**.
+- Llamadas desde la conversación: **PARCIAL**. Solo los pasos de un plan que apruebas con `/plan` (Nivel 5), en `develop` desde `a9c51fe`.
 - Escrituras con aprobación: **FALTA**; además, EA está en pausa.
 - Hooks: **FALTA**. Decididos el 2026-11-27: órdenes externas, observar y bloquear, fallo cerrado.
 - Servidor MCP propio (`harness-mcp-server`): **FALTA** (0 de 34 tareas).
@@ -258,15 +258,17 @@ La demo automática: `uv run python scripts/demo_mcp_gateway.py` → `demo: PASS
 
 Después, con `/send`, ese resultado vuelve a Copilot marcado como datos.
 
-**Estado: PARCIAL** (pasos 1 a 6 en `feature/code-mode-plan`, sin merge; la vuelta del resultado, la medición con Copilot real y las escrituras faltan). Lo decidido el 2026-11-27 (`docs/estudios/2026-11-27-code-mode.md` §10.1):
+**Estado: PARCIAL** (pasos 1 a 6 en `develop` desde `a9c51fe`; la vuelta del resultado, la medición con Copilot real y las escrituras faltan). Lo decidido el 2026-11-27 (`docs/estudios/2026-11-27-code-mode.md` §10.1):
 - plan JSON interpretado por el harness, sin Monty;
 - una aprobación por hash del plan entero, con botón en pantalla completa y código tecleado en modo plano;
 - el resultado no vuelve a Copilot en el primer corte;
-- no se implementa hasta que se mergeen `prompt-economy`, `approval-buttons`, `collapsible-blocks` y la guarda de SQL.
+- no se implementaba hasta que se mergearan `prompt-economy`, `approval-buttons`, `collapsible-blocks` y la guarda de SQL; ya están en `develop`.
 
 En curso y relacionado:
-- `feature/code-run`: propuesta para guardar y ejecutar con aprobación el código que escribe el modelo (rama abierta, sin commits propios al 2026-11-27);
-- `feature/response-mode` (`/mode`).
+- lecturas por regla, sin la caja (`code-mode` A2) y el lazo con vueltas (A3): en curso, sin fusionar;
+- `workspace-tools`: carpeta de trabajo, con `read` y `list` por la CLI en su primer tramo; en curso, sin fusionar;
+- `code-run`: propuesta para guardar y ejecutar con aprobación el código que escribe el modelo; solo la propuesta, sin fusionar;
+- `/mode` (`response-mode`): en `develop`; el selector de la página real está sin medir.
 
 ### Qué hay que construir, en orden
 
@@ -284,15 +286,15 @@ Cada paso es un change de OpenSpec pequeño, demostrable con el Mock, y lleva su
 | 8 | **Vuelta del resultado (`/send`)** y **turno de cierre** sin catálogo; presupuesto de envíos visible (hook corte 2) | Con el Mock, un `/send` gasta exactamente 1 envío; superado el presupuesto, no se envía nada | Lección 5 del estudio de OpenCode; hooks §8.2 |
 | 9 | **Escrituras:** vista previa → lista exacta de efectos → hash → `Effect.apply`/`reconcile` | Solo cuando la pasarela acepte escrituras con aprobación (y EA vuelva) | `harness/skills/effects.py`; estudio de code mode §5.2 |
 
-**Paso 1, hecho en `feature/code-mode` (2026-11-27, tramo 1 de `openspec/changes/code-mode/`).** `harness/mcp/plan.py` lee el plan como función pura; nada lo usa todavía. Respecto a la fila 1 de la tabla, el esquema de la versión 1 **no** tiene `$ref`, `return` ni `for_each`: es una lista de llamadas con argumentos literales (design D2). Se comprueba con `uv run pytest tests/unit/test_mcp_plan.py`. El siguiente es el tramo 2 (filas 2 a 6).
+**Paso 1, hecho y en `develop` (2026-11-27, tramo 1 de `openspec/changes/code-mode/`).** `harness/mcp/plan.py` lee el plan como función pura; lo usa `/plan` (pasos 2 a 6). Respecto a la fila 1 de la tabla, el esquema de la versión 1 **no** tiene `$ref`, `return` ni `for_each`: es una lista de llamadas con argumentos literales (design D2). Se comprueba con `uv run pytest tests/unit/test_mcp_plan.py`.
 
-**Pasos 2 a 6, hechos en `feature/code-mode-plan` (2026-11-27, tramo 2).** `/plan <pregunta>` existe en la conversación (pantalla completa y `--plain`) y como `main.py plan SESSION_ID PREGUNTA`. Solo lecturas, con el Mock y el servidor sintético; el resultado no vuelve a Copilot (eso es la fila 8). Diferencias con la tabla:
+**Pasos 2 a 6, hechos y en `develop` desde `a9c51fe` (2026-11-27, tramo 2).** `/plan <pregunta>` existe en la conversación (pantalla completa y `--plain`) y como `main.py plan SESSION_ID PREGUNTA`. Solo lecturas, con el Mock y el servidor sintético; el resultado no vuelve a Copilot (eso es la fila 8). Diferencias con la tabla:
 - fila 2: el catálogo lleva la `description` que tú escribes en la lista local (una línea, 120 caracteres como mucho), no la del servidor; no hay `result_fields`. Su tope propio es de 64 herramientas y 8 000 caracteres; además cuenta en el tope del proveedor, como toda la pregunta;
 - fila 3: la migración es la 009 (la 008 es de `feature/response-mode`);
 - fila 4: en la CLI y en `--plain` se teclea el código; la CLI exige una terminal interactiva y, si no la hay, no envía nada;
 - el plan tiene un plazo total: la suma de arranque y llamada de cada paso, 300 s como mucho.
 
-**El siguiente paso más pequeño (antes del tramo 1):** el paso 1 solo, sin tocar la conversación. Es una función pura que recibe el texto de la respuesta y el nonce y devuelve «sin propuesta», «propuesta válida» o «rechazada: motivo». Se prueba con unos quince textos de fixture. No necesita ninguna rama abierta. Puedes escribir el primer borrador del esquema en la lección 11 de la guía.
+**El siguiente paso más pequeño:** revisar y fusionar las lecturas por regla (A2), y después el lazo con vueltas (A3). Es el Hito 1 de [`docs/plan/2026-11-27-plan-por-hitos.md`](../plan/2026-11-27-plan-por-hitos.md).
 
 ### Comprobación de salida
 
