@@ -661,6 +661,12 @@ class CopilotWebProvider:
                 page = context.pages[0] if context.pages else await context.new_page()
                 text = await turn.run(page)
             return text  # the browser is closed before the answer is handed back
+        except asyncio.CancelledError as cancel:
+            # The request's deadline fired while the browser was closing after the page gave
+            # up: the reason travels with the cancellation, for the service to report it.
+            if turn.gave_up is not None and not turn.sent:
+                cancel.__context__ = turn.gave_up
+            raise
         except ProviderUncertain:
             raise
         except (ProviderError, HarnessError):
@@ -732,6 +738,7 @@ class _Turn:
         self.events = events
         self.deadline = deadline
         self.started = time.monotonic()  # before Edge starts: the deadline counts its start
+        self.gave_up: ProviderTimeout | None = None  # the page was not ready in time
         self.host = host_of(plan.url)
         self.locators: Locators = plan.measurement.locators
         label = self.locators.code_language
@@ -970,12 +977,13 @@ class _Turn:
                         guest_page_advice(self.plan.url, recorded_ready_path(self.settings.data_dir))
                         + ". Nothing was sent"
                     )
-                raise ProviderTimeout(
+                self.gave_up = ProviderTimeout(
                     "the Copilot page was not ready in time "
                     f"(HARNESS_COPILOT_READY_TIMEOUT_S is {self.settings.copilot_ready_timeout_s:g} s, "
                     "within HARNESS_REQUEST_TIMEOUT_S); nothing was sent; "
                     + await self.not_ready_seen(page, state, waited_since, ready_by)
                 )
+                raise self.gave_up
             await asyncio.sleep(STATE_POLL_S)
 
     async def not_ready_seen(self, page: Page, state: PageState, waited_since: float,

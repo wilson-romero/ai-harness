@@ -460,9 +460,26 @@ def test_page_that_does_not_load_keeps_the_session(cli, env, data_dir, app):
     assert app.prompt_count == 1
 
 
-def test_a_readiness_ended_by_the_request_deadline_says_so(cli, env, data_dir, app):
+@pytest.mark.parametrize("close", ["as_it_is", "slower_than_the_deadline"])
+def test_a_readiness_ended_by_the_request_deadline_says_so(cli, env, data_dir, app, monkeypatch,
+                                                           close):
     """The message names HARNESS_COPILOT_READY_TIMEOUT_S (60 s), but the request deadline,
-    which also counts the start of Edge, can end the wait first; the message says which."""
+    which also counts the start of Edge, can end the wait first; the message says which.
+
+    The provider gives up 2 s before the request's deadline (25 % of 8 s kept for closing
+    Edge). Where Edge takes longer to close, the request's deadline fires during the close; the
+    second case makes that order certain (the close waits 3 s first) and the person must still
+    see the provider's reason, not the generic deadline (Windows parity 3)."""
+    if close == "slower_than_the_deadline":
+        import harness.browser.edge as edge_module
+
+        original = edge_module._close_quietly
+
+        async def slow(context):  # noqa: ANN001, ANN202
+            await asyncio.sleep(3)
+            await original(context)
+
+        monkeypatch.setattr(edge_module, "_close_quietly", slow)
     session_id = new_session(cli, env)
     code, _, err = cli("ask", session_id, "primera",
                        **env | {"HARNESS_COPILOT_URL": app.url("/app", ready_ms="600000"),
