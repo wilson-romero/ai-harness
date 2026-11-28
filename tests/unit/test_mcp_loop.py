@@ -21,6 +21,8 @@ from harness.mcp.loop import (
     RESULTS_SEND_MAX_BYTES,
     STEP_SEND_MAX_BYTES,
     TURN_SEND_MAX_CHARS,
+    Block,
+    TurnNotClean,
     TurnTooLarge,
     bounded,
     closing_turn,
@@ -28,8 +30,10 @@ from harness.mcp.loop import (
     loop_settings,
     results_block,
     results_turn,
+    sendable,
     step_budget,
 )
+from harness.text.safe_text import safe_foreign_text
 from harness.mcp.plan import MAX_STEPS, Refusal, read_plan
 from harness.mcp.plan_prompt import (
     PLAN_INSTRUCTIONS,
@@ -300,3 +304,57 @@ def test_the_plan_question_is_unchanged_and_the_loop_s_says_it_is_a_loop(config)
     assert "Tú no verás el resultado." not in first
     rules = plan_instructions(NONCE, catalogue).split("\nReglas del plan", 1)[1]
     assert first.endswith(rules)
+
+
+# -- a credential at the cut (review of fa6b6d1, finding 1) --------------------------------------
+
+HEAD_BYTES = int(STEP_SEND_MAX_BYTES * loop.HEAD_SHARE)
+TAIL_BYTES = STEP_SEND_MAX_BYTES - HEAD_BYTES
+
+
+def _sent(config, text: str) -> str:
+    plan = _plan(config)
+    block = results_block(_report(plan, text), plan)
+    return results_turn(block, turn=2, turns=5, marker=MARKER, nonce=NONCE,
+                        catalogue=build_catalogue(config))
+
+
+@pytest.mark.parametrize("where", ["head ends at the token", "tail starts at the token"])
+def test_a_credential_the_cut_reveals_is_masked_in_what_is_sent(config, where):
+    # As a whole, `…_` around the token keeps it from matching (no boundary): it is not a
+    # credential until the cut drops the `_`.
+    if where == "head ends at the token":
+        text = "a" * (HEAD_BYTES - len(TOKEN) - 1) + " " + TOKEN + "_yyyy " + "z" * 10_000
+    else:
+        text = "z" * 10_000 + " yyyy_" + TOKEN + " " + "b" * (TAIL_BYTES - len(TOKEN) - 1)
+    assert safe_foreign_text(text).count == 0  # the premise: not a credential as a whole
+    sent = _sent(config, text)
+    assert TOKEN not in sent and "[REDACTED:github]" in sent
+    assert safe_foreign_text(sent).text == sent  # the screen shows these very bytes
+    assert sendable(sent)
+
+
+def test_a_credential_split_by_the_cut_leaves_no_piece(config):
+    # Masked as a whole before the cut: no piece of it is left on either side.
+    start = HEAD_BYTES - len(TOKEN) // 2
+    text = "a" * start + " " + TOKEN + " " + "z" * 10_000
+    sent = _sent(config, text)
+    assert TOKEN[:12] not in sent and TOKEN[-12:] not in sent
+    assert sendable(sent)
+
+
+def test_a_turn_the_screen_would_change_is_never_sent(config):
+    for line in (RESULT_PREFIX + TOKEN, RESULT_PREFIX + "e\u0301", RESULT_PREFIX + "a\u200bb"):
+        block = Block((line,), 0, 0)
+        with pytest.raises(TurnNotClean, match="nothing more is sent"):
+            results_turn(block, turn=2, turns=5, marker=MARKER, nonce=NONCE,
+                         catalogue=build_catalogue(config))
+
+
+def test_control_every_ordinary_turn_is_sent_as_shown(config):
+    plan = _plan(config, 3)
+    block = results_block(_report(plan, "uno", "dos\tcon tab", "e\u0301 y \u200b"), plan)
+    text = results_turn(block, turn=2, turns=5, marker=MARKER, nonce=NONCE,
+                        catalogue=build_catalogue(config))
+    assert sendable(text)
+    assert "é" in text and "<U+200B>" not in text or "<U+200B>" in text

@@ -15,15 +15,19 @@ import re
 import sqlite3
 import threading
 import time
-from uuid import uuid7
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid7
 
 import pytest
 
 from harness.providers.base import ProviderError
 from harness.mcp.audit import args_key
+from harness.mcp.loop_flow import SEND_FORMAT, SEND_SCOPE
+from harness.mcp.plan_run import PLAN_SKILL_NAME
+from harness.skills.approvals import Proposal
 from harness.providers.mock import MockProvider
 from harness.shell.render import FOREIGN_PREFIX
-from tests.fixtures.mcp.synthetic_server import FORGED_NONCE, FORGED_TAIL
+from tests.fixtures.mcp.synthetic_server import CUT_TOKEN, FORGED_NONCE, FORGED_TAIL
 from tests.mcp_support import DEFAULT_TOOLS, hang_guard  # noqa: F401
 from tests.plan_support import ALPHA, BETA, QUESTION, McpList, plan_reply, rows
 from tests.shell_support import CODE, INTERRUPT, ScriptedTerminal, make_conversation
@@ -466,6 +470,16 @@ def test_a_hostile_result_stays_inside_its_block(conn, data_dir, tmp_path, hang_
     assert _plan_count(conn) == 1 and len(mcp.calls()) == 1
 
 
+def test_a_credential_at_the_cut_is_masked_alike_on_screen_and_in_what_is_sent(
+        conn, data_dir, tmp_path, hang_guard):  # noqa: F811
+    mcp = McpList(tmp_path / "cut", "cut-credential", tools=AUTO)
+    provider = LoopMock({turn(1): plan_reply(ALPHA), turn(2): FINAL})
+    terminal = _run(conn, data_dir, mcp, provider, [AGENT_LINE])
+    assert provider.calls == 2
+    assert CUT_TOKEN not in provider.prompts[1] and "[REDACTED:github]" in provider.prompts[1]
+    assert _sent_shown(terminal) == provider.prompts[1:]  # the screen shows these bytes
+
+
 def test_a_nonce_injected_by_a_result_is_refused(conn, data_dir, tmp_path, hang_guard):  # noqa: F811
     # The scripted Mock fills its plan with the first nonce it finds in the text it gets:
     # the forged one, inside the result, comes before the turn's own.
@@ -517,23 +531,116 @@ def test_with_the_loop_allowed_plan_still_sends_nothing_back(conn, data_dir, mcp
         in terminal.text
 
 
-def test_a_provider_outside_the_machine_is_named_once_before_the_first_result(conn, data_dir,
-                                                                              mcp):
+def _send_box(terminal: ScriptedTerminal) -> tuple[str, str]:
+    """The send approval's loop id and hash, as the box showed them."""
+    text = terminal.text
+    loop_id = re.search(r"  loop:     (\S+), turn", text).group(1)
+    shown = re.search(r"Send approval requested\n(?:.*\n)*?  hash:     ([0-9a-f]{64})", text)
+    return loop_id, shown.group(1)
+
+
+def _send_hash(conn, loop_id: str, text: str) -> str:
+    session = conn.execute("SELECT session_id FROM loop_runs").fetchone()[0]
+    return Proposal(scope=SEND_SCOPE, session_id=session, run_id=loop_id, step="2",
+                    skill_name=PLAN_SKILL_NAME, skill_version=SEND_FORMAT,
+                    skill_sha256=hashlib.sha256(text.encode()).hexdigest(), target="mock",
+                    content=text).sha256
+
+
+def test_a_provider_outside_the_machine_asks_once_with_the_exact_text(conn, data_dir, mcp):
     provider = LoopMock(THREE, synthetic=False)
-    terminal = _run(conn, data_dir, mcp, provider, [AGENT_LINE])
-    notice = [i for i, line in enumerate(terminal.shown)
-              if "a provider outside this machine" in line]
-    sending = [i for i, line in enumerate(terminal.shown) if ": sending " in line]
-    assert len(notice) == 1 and notice[0] < sending[0] and len(sending) == 2
+    terminal = _run(conn, data_dir, mcp, provider, [AGENT_LINE], approvals=[CODE])
+    # One box only, before the first results; the later turn goes without asking again.
+    assert len(terminal.questions) == 1 and provider.calls == 3
+    assert terminal.text.count("Send approval requested") == 1
+    box = terminal.shown.index("Send approval requested")
+    first_send = next(i for i, line in enumerate(terminal.shown) if ": sending " in line)
+    assert box < first_send
+    loop_id, shown_hash = _send_box(terminal)
+    assert shown_hash == _send_hash(conn, loop_id, provider.prompts[1])  # bound to what went
+    assert _sent_shown(terminal) == provider.prompts[1:]
+    assert _loops(conn) == [("completed", "answer", 3, 5, 0)]
+    assert rows(conn, "SELECT outcome FROM audit_events WHERE event_type = "
+                      "'loop.send_approval'") == [("granted",)]
     # Nothing of what the reads returned, or of the turns, is stored.
     for table, column in [("messages", "content"), ("audit_events", "detail")]:
         for (value,) in conn.execute(f"SELECT {column} FROM {table}"):  # noqa: S608
             assert value is None or ("Demo Alpha" not in value and "RESULTADOS" not in value)
 
 
+@pytest.mark.parametrize("answers", [[None], ["n", "reject"], [INTERRUPT]],
+                         ids=["undecided", "rejected", "ctrl-c"])
+def test_a_send_not_approved_sends_nothing_and_stops(conn, data_dir, mcp, answers):
+    provider = LoopMock(THREE, synthetic=False)
+    terminal = _run(conn, data_dir, mcp, provider, [AGENT_LINE], approvals=answers)
+    assert provider.calls == 1 and len(provider.prompts) == 1
+    assert mcp.calls() == ["call get_project_metadata"]  # the read ran; its result stayed here
+    assert _loops(conn) == [("stopped", "send_not_approved", 1, 5, 0)]
+    assert "the results were not approved to be sent" in terminal.text
+    assert ": sending " not in terminal.text
+    assert "this conversation now holds" not in terminal.text
+
+
+def test_a_send_approved_after_it_expired_sends_nothing(conn, data_dir, mcp):
+    times = [datetime(2026, 11, 28, 12, 0, tzinfo=UTC)]
+
+    class Late(ScriptedTerminal):
+        def ask(self, question):
+            times.append(times[-1] + timedelta(seconds=901))  # the person answers late
+            return super().ask(question)
+
+    provider = LoopMock(THREE, synthetic=False)
+    terminal = Late([AGENT_LINE], [CODE])
+    conversation, _, _ = make_conversation(conn, data_dir, terminal, provider,
+                                           environ=dict(ON), mcp_config=mcp.load,
+                                           clock=lambda: times[-1])
+    asyncio.run(conversation.run())
+    assert provider.calls == 1
+    assert _loops(conn) == [("stopped", "send_not_approved", 1, 5, 0)]
+    assert "(expired); nothing was sent" in terminal.text
+
+
+def test_a_code_typed_after_ctrl_c_at_the_send_box_grants_nothing(conn, data_dir, mcp):
+    """As at the plan's prompt (T2-9): Ctrl+C while the prompt blocks only marks the task
+    cancelled; the code typed after it must not let the results go."""
+
+    class Interrupted(ScriptedTerminal):
+        def ask(self, question):
+            asyncio.current_task().cancel()  # what asyncio.run's handler does on SIGINT
+            return super().ask(question)
+
+    provider = LoopMock(THREE, synthetic=False)
+    terminal = Interrupted([AGENT_LINE], [CODE])
+    conversation, _, _ = make_conversation(conn, data_dir, terminal, provider,
+                                           environ=dict(ON), mcp_config=mcp.load)
+    asyncio.run(conversation.run())
+    assert provider.calls == 1
+    assert _loops(conn) == [("stopped", "send_not_approved", 1, 5, 0)]
+
+
+def test_a_send_on_a_terminal_that_is_not_interactive_is_never_approved(conn, data_dir, mcp):
+    provider = LoopMock(THREE, synthetic=False)
+    terminal = ScriptedTerminal([AGENT_LINE], [CODE], interactive=False)
+    conversation, _, _ = make_conversation(conn, data_dir, terminal, provider,
+                                           environ=dict(ON), mcp_config=mcp.load)
+    asyncio.run(conversation.run())
+    assert provider.calls == 1 and terminal.questions == []
+    assert _loops(conn) == [("stopped", "send_not_approved", 1, 5, 0)]
+
+
+def test_a_correction_needs_no_send_approval(conn, data_dir, mcp):
+    # A refusal's reason is the harness's text about the plan, not what a read returned.
+    provider = LoopMock({turn(1): plan_reply({**ALPHA, "server": "otro"}), turn(2): FINAL},
+                        synthetic=False)
+    terminal = _run(conn, data_dir, mcp, provider, [AGENT_LINE])
+    assert provider.calls == 2 and terminal.questions == []
+    assert "a provider outside this machine" in terminal.text
+
+
 def test_a_synthetic_provider_gets_no_notice(conn, data_dir, mcp):
     terminal = _run(conn, data_dir, mcp, LoopMock(THREE), [AGENT_LINE])
     assert "a provider outside this machine" not in terminal.text
+    assert "Send approval requested" not in terminal.text and terminal.questions == []
 
 
 def test_the_history_keeps_a_label_of_each_turn_never_the_results(conn, data_dir, mcp):
@@ -556,9 +663,11 @@ def test_a_loop_left_running_is_marked_interrupted_and_never_resumed(conn, data_
         conn.execute("INSERT INTO loop_runs (loop_id, session_id, provider, max_turns, turns, "
                      "corrections, status, created_at) VALUES (?, ?, 'mock', 5, 2, 0, "
                      "'running', '2026-11-27T00:00:00+00:00')", (str(uuid7()), session))
+    # Found when the next conversation opens, before any /agent (review of fa6b6d1, 6).
     terminal = _run(conn, data_dir, mcp, provider, [f"/resume {session}", "/status",
                                                     AGENT_LINE, "/status"])
-    assert "loop: running, turn 2 of 5" in terminal.text
+    assert "loop: running" not in terminal.text
+    assert "loop: interrupted (abandoned), 2 send(s)\n" in terminal.text
     assert _loops(conn) == [("interrupted", "abandoned", 2, 5, 0),
                             ("completed", "answer", 1, 5, 0)]
     assert provider.calls == 1
@@ -596,3 +705,186 @@ async def test_the_side_panel_counts_the_turns(tmp_path, mcp):
         await tui.ready(pilot)
         await tui.send(pilot, "/exit")
     assert provider.calls == 3
+
+
+async def test_the_send_box_on_the_full_screen_approves_with_its_button(tmp_path, mcp):
+    from textual.widgets import Button
+
+    from tests.tui_support import SIZE, Tui
+
+    data_dir = tmp_path / "datos"
+    data_dir.mkdir()
+    provider = LoopMock(THREE, synthetic=False)
+    tui = Tui(data_dir, provider, environ=dict(ON), mcp_config=mcp.load)
+    async with tui.app.run_test(size=SIZE) as pilot:
+        await tui.send(pilot, AGENT_LINE)
+        await tui.approval_box(pilot)
+        assert "Send approval requested" in tui.screen()
+        assert provider.calls == 1  # nothing more is sent while the box is open
+        approve = tui.app.screen.query_one("#approve", Button)
+        await pilot.press("end")
+        await tui.until(pilot, lambda: not approve.disabled)
+        await pilot.press("tab", "enter")
+        await tui.until(pilot, lambda: "completed (answer), 3 send(s)" in tui.side())
+        await tui.ready(pilot)
+        await tui.send(pilot, "/exit")
+    assert provider.calls == 3
+
+
+def test_a_loop_left_running_is_marked_interrupted_when_the_conversation_opens(conn, data_dir,
+                                                                              mcp):
+    _run(conn, data_dir, mcp, LoopMock({turn(1): FINAL}), ["/status"])
+    session = conn.execute("SELECT session_id FROM sessions").fetchone()[0]
+    with conn:
+        conn.execute("INSERT INTO loop_runs (loop_id, session_id, provider, max_turns, turns, "
+                     "corrections, status, created_at) VALUES (?, ?, 'mock', 5, 1, 0, "
+                     "'running', '2026-11-27T00:00:00+00:00')", (str(uuid7()), session))
+    terminal = ScriptedTerminal(["/status"])
+    conversation, _, _ = make_conversation(conn, data_dir, terminal, LoopMock({}),
+                                           environ=dict(ON), mcp_config=mcp.load)
+    asyncio.run(conversation.run(session_id=session))
+    assert "loop: interrupted (abandoned), 1 send(s)\n" in terminal.text
+    assert _loops(conn) == [("interrupted", "abandoned", 1, 5, 0)]
+
+
+# -- reads by rule need bounded arguments inside a loop (A3-12) ---------------------------------
+
+FREE = {**AUTO, "echo_env": {**AUTO["echo_env"], "auto_read": True}}
+ECHO_ENV = {"id": "v", "server": "synthetic", "tool": "echo_env", "args": {"name": "DEMO_X"}}
+
+
+def test_a_read_by_rule_with_a_free_text_argument_asks_the_box_in_a_loop(conn, data_dir,
+                                                                        tmp_path, hang_guard):  # noqa: F811
+    mcp = McpList(tmp_path / "free", tools=FREE)
+    provider = LoopMock({turn(1): plan_reply(ALPHA, ECHO_ENV), turn(2): FINAL})
+    terminal = _run(conn, data_dir, mcp, provider, [AGENT_LINE], approvals=[CODE])
+    assert len(terminal.questions) == 1 and provider.calls == 2
+    assert ("why:      step 2 (synthetic.echo_env) takes free text in argument name; inside "
+            "/agent, a read runs by rule only when every argument is bounded, so this whole "
+            "plan asks you") in terminal.text
+    assert rows(conn, "SELECT means FROM plan_runs") == [("code",)]
+
+
+def test_control_bounded_reads_by_rule_run_without_the_box_in_a_loop(conn, data_dir, mcp):
+    terminal = _run(conn, data_dir, mcp, LoopMock(THREE), [AGENT_LINE])
+    assert terminal.questions == []
+    assert ("allows by rule (auto_read) and whose every argument is bounded (an enum, a "
+            "number, a yes/no or a pattern); no approval is asked") in terminal.text
+    assert rows(conn, "SELECT means FROM plan_runs") == [("rule",), ("rule",)]
+
+
+def test_plan_keeps_the_a2_rule_in_a_clean_session(conn, data_dir, tmp_path, hang_guard):  # noqa: F811
+    mcp = McpList(tmp_path / "free", tools=FREE)
+    provider = LoopMock({QUESTION: plan_reply(ECHO_ENV)})
+    terminal = _run(conn, data_dir, mcp, provider, [f"/plan {QUESTION}"])
+    assert terminal.questions == [] and rows(conn, "SELECT means FROM plan_runs") == [("rule",)]
+
+
+# -- after a loop that sent results (A3-13) ------------------------------------------------------
+
+
+def test_after_results_were_sent_the_session_says_so_and_plan_needs_bounded_args(
+        conn, data_dir, tmp_path, hang_guard):  # noqa: F811
+    mcp = McpList(tmp_path / "free", tools=FREE)
+    provider = LoopMock({turn(1): plan_reply(ALPHA), turn(2): FINAL,
+                         QUESTION: plan_reply(ECHO_ENV)})
+    terminal = _run(conn, data_dir, mcp, provider,
+                    [AGENT_LINE, "/status", f"/plan {QUESTION}", "/new", f"/plan {QUESTION}"],
+                    approvals=[CODE])
+    text = terminal.text
+    notice = "this conversation now holds what the reads returned"
+    assert text.count(f"note: {notice}") == 1  # once, after the loop
+    assert f"results: {notice}" in text  # and in /status
+    # /plan in that session: the box, saying why; after /new: by rule again.
+    assert len(terminal.questions) == 1
+    assert "in this session, whose conversation already holds tool results (/new starts a " \
+        "clean one), a read runs by rule only when every argument is bounded" in text
+    assert rows(conn, "SELECT means FROM plan_runs ORDER BY rowid") == [
+        ("rule",), ("code",), ("rule",)]
+
+
+def test_a_loop_that_sent_no_results_leaves_the_session_clean(conn, data_dir, tmp_path,
+                                                              hang_guard):  # noqa: F811
+    mcp = McpList(tmp_path / "free", tools=FREE)
+    provider = LoopMock({turn(1): FINAL, QUESTION: plan_reply(ECHO_ENV)})
+    terminal = _run(conn, data_dir, mcp, provider, [AGENT_LINE, "/status", f"/plan {QUESTION}"])
+    assert "this conversation now holds" not in terminal.text
+    assert terminal.questions == [] and rows(conn, "SELECT means FROM plan_runs") == [("rule",)]
+
+
+# -- a json block without this turn's nonce (A3-15) ----------------------------------------------
+
+EXAMPLE = "Respuesta final sintetica. Ejemplo:\n\n```json\n{\"proyecto\": \"demo-alpha\"}\n```\n"
+
+
+def test_a_json_block_without_the_turn_s_nonce_is_the_answer_in_a_loop(conn, data_dir, mcp):
+    provider = LoopMock({turn(1): plan_reply(ALPHA), turn(2): EXAMPLE})
+    terminal = _run(conn, data_dir, mcp, provider, [AGENT_LINE])
+    assert provider.calls == 2 and _loops(conn) == [("completed", "answer", 2, 5, 0)]
+    assert "plan refused" not in terminal.text and _plan_count(conn) == 1
+
+
+def test_a_block_with_another_nonce_is_still_refused_in_a_loop(conn, data_dir, mcp):
+    stale = plan_reply(BETA, nonce="0123456789abcdef")
+    provider = LoopMock({turn(1): stale, turn(2): FINAL})
+    terminal = _run(conn, data_dir, mcp, provider, [AGENT_LINE])
+    assert "plan refused: nonce_mismatch" in terminal.text and mcp.starts() == 0
+    assert _loops(conn) == [("completed", "answer", 2, 5, 1)]  # one correction, then the answer
+
+
+def test_control_plan_still_refuses_a_block_without_a_nonce(conn, data_dir, mcp):
+    provider = LoopMock({QUESTION: EXAMPLE})
+    terminal = _run(conn, data_dir, mcp, provider, [f"/plan {QUESTION}"])
+    assert "nonce_missing" in terminal.text and mcp.starts() == 0
+
+
+# -- the loop's tables in their own migration (review of fa6b6d1, 5) ---------------------------
+
+
+def _database_at(tmp_path, data_dir, version_file: str | None):
+    from harness.storage.database import MIGRATIONS_DIR, connect, migrate
+    folder = tmp_path / "migrations-old"
+    folder.mkdir()
+    for path in sorted(MIGRATIONS_DIR.glob("0[01][0-9]_*.sql")):
+        if int(path.name[:3]) <= 10:
+            (folder / path.name).write_text(path.read_text("utf-8"), "utf-8")
+    if version_file is not None:  # an earlier build of this branch: 010 carried the loops
+        (folder / "010_plan_rules.sql").write_text(version_file, "utf-8")
+    conn = connect(data_dir)
+    assert migrate(conn, folder) == list(range(1, 11))
+    return conn, migrate
+
+
+def test_a_database_at_the_a2_010_gets_the_loop_tables_from_013(tmp_path):
+    data_dir = tmp_path / "d"
+    data_dir.mkdir()
+    conn, migrate = _database_at(tmp_path, data_dir, None)
+    session = "0190a000-0000-7000-8000-000000000001"
+    with pytest.raises(sqlite3.OperationalError):  # what the review found: no loop_runs
+        conn.execute("SELECT 1 FROM loop_runs").fetchone()
+    assert migrate(conn) == [13]
+    from harness.mcp.loop_flow import last_loop
+    assert last_loop(conn, UUID(session)) == "-"
+    conn.close()
+
+
+def test_a_database_whose_010_held_the_loops_ends_with_the_same_schema(tmp_path):
+    from harness.storage.database import MIGRATIONS_DIR
+    # An earlier build of this branch: A2's 010 with the loop tables after it, as 013 has them.
+    loops = (MIGRATIONS_DIR / "013_loops.sql").read_text("utf-8")
+    loops = loops[loops.index("CREATE TABLE loop_runs"):]
+    earlier = (MIGRATIONS_DIR / "010_plan_rules.sql").read_text("utf-8") + "\n" + loops
+    data_dir = tmp_path / "d"
+    data_dir.mkdir()
+    conn, migrate = _database_at(tmp_path, data_dir, earlier)
+    assert "loop_runs" in {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
+    assert migrate(conn) == [13]
+    fresh_dir = tmp_path / "f"
+    fresh_dir.mkdir()
+    from harness.storage.database import connect
+    fresh = connect(fresh_dir)
+    migrate(fresh)
+    schema = "SELECT name, sql FROM sqlite_master WHERE name LIKE 'loop%' ORDER BY name"
+    assert conn.execute(schema).fetchall() == fresh.execute(schema).fetchall()
+    conn.close()
+    fresh.close()

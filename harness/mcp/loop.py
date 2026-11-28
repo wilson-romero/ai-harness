@@ -30,6 +30,7 @@ from harness.core.errors import UsageError
 from harness.mcp.plan import Plan, Refusal
 from harness.mcp.plan_prompt import Catalogue, loop_rules
 from harness.mcp.plan_run import PlanReport
+from harness.skills.approvals import normalise_content
 from harness.text.safe_text import neutralise_delimiters, safe_foreign_text, safe_line
 
 MAX_TURNS_ENV = "HARNESS_LOOP_MAX_TURNS"
@@ -77,6 +78,25 @@ CLOSING_ASK = ("Responde con texto normal, sin ningún bloque json: resume lo qu
 
 class TurnTooLarge(UsageError):
     """A turn whose text would pass TURN_SEND_MAX_CHARS: it is never sent."""
+
+
+class TurnNotClean(UsageError):
+    """A turn that the screen's cleaning or redaction would change: what would be shown is
+    not what would be sent, so it is never sent (review of `fa6b6d1`, finding 1)."""
+
+
+def clean_piece(text: str) -> tuple[str, int]:
+    """One piece of a result as it is sent: NFC, without controls, invisibles written as
+    `<U+XXXX>`, credentials masked (`normalise_content`, what an approval box shows), and
+    `<<<`/`>>>` neutralised; with the number of credentials masked."""
+    cleaned = safe_foreign_text(text)
+    return neutralise_delimiters(normalise_content(cleaned.text)), cleaned.count
+
+
+def sendable(text: str) -> bool:
+    """The exact text of a turn is a fixed point of every cleaning the screen and the box
+    apply: shown as it is sent, byte for byte, with nothing left to mask."""
+    return safe_foreign_text(text).text == text and normalise_content(text) == text
 
 
 @dataclass(frozen=True)
@@ -163,10 +183,15 @@ def results_block(report: PlanReport, plan: Plan) -> Block:
             state = f"completed, {result.result_bytes} bytes"
         else:
             state = f"{result.status} ({result.error_code or '-'}): {result.detail}"
-        cleaned = safe_foreign_text(result.text)
-        redactions += cleaned.count
-        body = neutralise_delimiters(cleaned.text)
+        body, count = clean_piece(result.text)
+        redactions += count
         head, tail, cut = bounded(body, budget)
+        # Cleaned again AFTER the cut: a cut can make a credential out of text that was none
+        # as a whole (a token followed by `_` has no boundary until the cut drops the `_`).
+        head, count = clean_piece(head)
+        redactions += count
+        tail, count = clean_piece(tail)
+        redactions += count
         lines.append(_harness(f"{where}: {state}"))
         if not body:
             lines.append(_harness("(sin texto)"))
@@ -200,6 +225,9 @@ def _checked(text: str) -> str:
     if len(text) > TURN_SEND_MAX_CHARS:
         raise TurnTooLarge(f"the next turn would have {len(text)} characters; a turn takes at "
                            f"most {TURN_SEND_MAX_CHARS}; nothing more is sent")
+    if not sendable(text):
+        raise TurnNotClean("the next turn would be shown otherwise than it would be sent (a "
+                           "credential or a character the screen changes); nothing more is sent")
     return text
 
 

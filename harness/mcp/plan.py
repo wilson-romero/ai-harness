@@ -57,7 +57,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from harness.core.contracts import LLMResponse, RequestStatus
 from harness.core.strict_json import StrictJsonError, loads_strict
-from harness.mcp.config import LoadedConfig
+from harness.mcp.config import LoadedConfig, free_argument
 from harness.mcp.policy import (
     MAX_ARGS_BYTES,
     canonical_json,
@@ -169,6 +169,9 @@ class PlanStep:
     # `policy.entry_sha256` of the server's and the tool's entries when the plan was read: the
     # executor computes it again from the list as it is then and refuses the plan if it differs.
     entry_sha256: str
+    # The tool's first declared argument that can carry free text (`config.free_argument`),
+    # None when every one is bounded: inside `/agent` such a read never runs by rule (A3-12).
+    free_argument: str | None = None
 
 
 @dataclass(frozen=True)
@@ -189,6 +192,11 @@ class Plan:
     def by_rule(self) -> bool:
         """Every step is a read the local list allows by rule (`auto_read`)."""
         return all(step.auto_read for step in self.steps)
+
+    @property
+    def first_free(self) -> PlanStep | None:
+        """The first step whose tool takes free text, None when every argument is bounded."""
+        return next((step for step in self.steps if step.free_argument is not None), None)
 
 
 Reading = NoPlan | Refusal | Plan
@@ -383,7 +391,7 @@ def _steps(model: _PlanModel, config: LoadedConfig) -> Plan | Refusal:
         assert entry is not None  # the policy allowed it: the server and the tool are listed
         steps.append(PlanStep(item.id, item.server, item.tool, str(decision.operation),
                               MappingProxyType(dict(item.args)), canonical, decision.reason,
-                              tool.auto_read, entry))
+                              tool.auto_read, entry, free_argument(tool)))
     whole = canonical_json(model.model_dump(mode="python"))
     return Plan(model.nonce, tuple(steps), whole, plan_hash(whole))
 

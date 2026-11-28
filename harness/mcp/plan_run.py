@@ -131,13 +131,15 @@ RESULTS_SHOWN_ONLY = "shown here only; nothing is sent back to the provider"
 
 
 def approval_header(proposal: Proposal, plan: Plan, approval_hash: str, expires_at: str,
-                    deadline: int, results: str = RESULTS_SHOWN_ONLY) -> list[str]:
+                    deadline: int, results: str = RESULTS_SHOWN_ONLY,
+                    why: str | None = None) -> list[str]:
     """The harness's lines above the plan in the box (D9): the statement, what the plan is,
     the hash and the expiry, for each distinct server that its launch command is not part of
     what is approved (it comes from the person's local list), and that the list's entries of
     the steps are bound as they were when the plan was read (A2): a change before the run
     refuses the plan. `results` says where the results go (A3: back to the provider in a
-    loop). None of them comes from the reply."""
+    loop). `why` says why a plan of reads by rule asks all the same (A3-12). None of them
+    comes from the reply."""
     servers = dict.fromkeys(step.server for step in plan.steps)  # in the plan's order
     return [
         "Plan approval requested",
@@ -151,6 +153,7 @@ def approval_header(proposal: Proposal, plan: Plan, approval_hash: str, expires_
         f"{plan.entries_sha256[:16]}); if one changes before the run, nothing runs",
         f"  deadline: {deadline} s for the whole plan; the first step that fails stops it",
         f"  results:  {results}",
+        *([f"  why:      {why}"] if why is not None else []),
         f"  hash:     {approval_hash}",
         f"  expires:  {expires_at} (UTC)",
     ]

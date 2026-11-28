@@ -122,6 +122,28 @@ class ToolEntry(_Strict):
         return value
 
 
+# A string argument counts as bounded (owner decision of 2026-11-28, code-mode A3-12) when it
+# declares a pattern and at most this many characters. The policy matches the pattern against
+# the whole value (`re.fullmatch`), so it is anchored whatever it is written as; the length
+# limit caps what one value the model chooses can carry. What the pattern lets through is the
+# person's choice: the harness does not judge a pattern (`.*` is as free as none).
+BOUNDED_STRING_MAX_LENGTH = 64
+
+
+def free_argument(entry: ToolEntry) -> str | None:
+    """The first declared argument (in name order) that can carry free text, or None when
+    every one is bounded: an `enum`, an `integer`, a `boolean`, or a `string` with a `pattern`
+    and `max_length` at most BOUNDED_STRING_MAX_LENGTH. An argument the list does not declare
+    is never sent (the gateway refuses it, `argument_not_allowed`), whatever the server's
+    schema accepts."""
+    for name in sorted(entry.arguments):
+        spec = entry.arguments[name]
+        if isinstance(spec, StringArgument) and (
+                spec.pattern is None or spec.max_length > BOUNDED_STRING_MAX_LENGTH):
+            return name
+    return None
+
+
 class ServerEntry(_Strict):
     command: list[Annotated[str, Field(min_length=1, max_length=4096)]] = Field(
         min_length=1, max_length=64

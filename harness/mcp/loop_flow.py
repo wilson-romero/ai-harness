@@ -22,9 +22,16 @@ The loop, turn by turn (a turn is exactly one question to the provider):
 7. Ctrl+C stops the question or the step in course and the loop: nothing more is sent.
 
 Nothing leaves the machine unless the person typed `/agent` and the provider is named in
-`HARNESS_LOOP_PROVIDERS` (checked by the caller, before anything is recorded). A provider
-whose content is not synthetic gets, once per loop and before the first result is sent, a
-harness line that says where the results go. What a loop stores: its row (`loop_runs`) and
+`HARNESS_LOOP_PROVIDERS` (checked by the caller, before anything is recorded). With a
+provider whose content is not synthetic, the first turn of a loop that carries results asks
+the person first (A3-14, owner decision of 2026-11-28): the approval box (buttons on the full
+screen, the typed code elsewhere) shows that turn's exact text, bound to its hash; approved,
+the loop goes on without asking again; rejected, undecided or expired, nothing is sent and
+the loop stops (`send_not_approved`). A synthetic provider (the Mock) gets only the line.
+Inside a loop a read runs by rule only when every argument it declares is bounded (A3-12);
+after a loop that sent results, the session's conversation holds them: a notice says so
+once, `/status` says it, and the same condition applies to `/plan` in that session (A3-13).
+What a loop stores: its row (`loop_runs`) and
 one row per turn with the request, the kind of turn, the plan whose results it carried, and
 the size and keyed hash of the harness's text of that turn (for turn 1, its block of
 instructions; for the others, the whole text sent). Never the text: the question history
@@ -40,7 +47,7 @@ import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid7
 
@@ -52,6 +59,7 @@ from harness.mcp.audit import args_key
 from harness.mcp.loop import (
     CORRECTIONS,
     LoopSettings,
+    TurnNotClean,
     TurnTooLarge,
     closing_turn,
     correction_turn,
@@ -59,10 +67,11 @@ from harness.mcp.loop import (
     results_turn,
 )
 from harness.mcp.plan import NoPlan, Refusal, read_plan_reply
-from harness.mcp.plan_flow import PlanRequest, PlanSetting, PlanView
+from harness.mcp.plan_flow import PlanRequest, PlanSetting, PlanView, withdraw_pending_interrupt
 from harness.mcp.plan_prompt import build_catalogue, loop_instructions
 from harness.memory.context import new_nonce
-from harness.skills.approvals import Terminal
+from harness.mcp.plan_run import PLAN_SKILL_NAME
+from harness.skills.approvals import Proposal, Terminal, Verdict, decide
 from harness.storage import repositories as repo
 from harness.storage.database import transaction
 from harness.storage.locks import NamedLock
@@ -73,6 +82,18 @@ AGENT_COMMAND = "/agent"
 # the loop stops and nothing more is sent.
 STOPPING_CODES = frozenset({"interrupted", "list_changed", "plan_altered", "approval_not_usable",
                             "plan_in_use", "config_error", "abandoned"})
+# Where reads by rule also need every argument bounded (A3-12), in the box's words.
+IN_A_LOOP = "inside /agent"
+IN_THIS_SESSION = ("in this session, whose conversation already holds tool results (/new "
+                   "starts a clean one)")
+# A3-13: said once after a loop that sent results, and by `/status` while the session holds them.
+HOLDS_RESULTS = ("this conversation now holds what the reads returned: the provider sees it "
+                 "when it answers the next questions of this session, /plan included, and reads "
+                 "by rule here need every argument bounded. /new starts a clean conversation")
+SEND_SCOPE = "code-mode.loop-send"
+SEND_FORMAT = "ai-harness/loop-send/1"
+SEND_BUTTON_QUESTION = ("Approve sends this text now and the later turns of this loop without "
+                        "asking again; Reject sends nothing and stops the loop.")
 
 
 @dataclass(frozen=True)
@@ -141,6 +162,14 @@ def recover_loops(conn: sqlite3.Connection, data_dir: Path,
     return recovered
 
 
+def holds_results(conn: sqlite3.Connection, session_id: UUID) -> bool:
+    """Whether a loop of this session sent (or may have sent: the row is written with the
+    request) a turn that carried a plan's results (A3-13)."""
+    return conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM loop_turns t JOIN loop_runs r ON r.loop_id = t.loop_id "
+        "WHERE r.session_id = ? AND t.plan_id IS NOT NULL)", (str(session_id),)).fetchone()[0] == 1
+
+
 class _Record:
     """The loop's rows, written as it goes."""
 
@@ -173,6 +202,16 @@ class _Record:
                          (turn.number, self.loop_id))
 
         return link
+
+    def sent_results(self) -> bool:
+        return self.conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM loop_turns WHERE loop_id = ? AND plan_id IS NOT NULL)",
+            (self.loop_id,)).fetchone()[0] == 1
+
+    def consent(self, state: str, means: str | None, approval_hash: str) -> None:
+        with transaction(self.conn):
+            _audit(self.conn, "loop.send_approval", state, self.session_id,
+                   f"loop={self.loop_id};means={means or '-'};hash={approval_hash[:16]}")
 
     def correction(self) -> None:
         with transaction(self.conn):
@@ -225,6 +264,8 @@ async def run_loop(request: PlanRequest, *, service: SessionService, conn, view:
         state("-")
         view.say(f"loop {loop_id}: {status} ({reason}) after {turns} send(s) to "
                  f"{provider_name}")
+        if record.sent_results():
+            view.say(f"note: {HOLDS_RESULTS}")
         return LoopOutcome(loop_id, status, reason, turns)
     finally:
         lock.release()
@@ -247,9 +288,12 @@ class _Loop:
         self.turn: _Turn | None = None
         # Each step of a plan says it starts (from the executor's thread, through the
         # conversation's loop): the panel shows `running step k of n`.
-        self.setting = dataclasses.replace(setting, progress=self._step)
+        self.setting = dataclasses.replace(setting, progress=self._step, bounded_only=IN_A_LOOP)
         self.provider_name, self.state, self.record = provider_name, state, record
-        self.warned = synthetic  # a synthetic provider's content never leaves the machine
+        # A synthetic provider's content never leaves the machine: it gets the line only. Any
+        # other is asked once, in the box, before the first turn that carries results (A3-14).
+        self.synthetic, self.consented = synthetic, False
+        self.warned = False
         self.corrections = 0
         self.config = setting.load_config()
         self.catalogue = build_catalogue(self.config)
@@ -281,15 +325,65 @@ class _Loop:
             response = await self._ask(turn, text)
             nxt = await self._next(turn, response)
             text = self._compose(nxt)
-            if not self.warned:
+            if nxt[1] is not None and not self.synthetic and not self.consented:
+                self._consent(nxt[0], text)  # a `_Stop` when not approved: nothing is sent
+            elif not self.warned and not self.synthetic:
                 self.view.say(f"{self.tag}: from here on, what the reads return goes to "
                               f"{self.provider_name}, a provider outside this machine; each "
                               "turn is shown here exactly as it is sent, before it goes")
-                self.warned = True
+            self.warned = True
             self.view.result(f"{self.tag}: {_counter(nxt[0], self.loop)}: sending "
                              f"{len(text)} characters to {self.provider_name}; exactly this "
                              "text, nothing else:", text)
             turn = nxt[0]
+
+    def _consent(self, turn: _Turn, text: str) -> None:
+        """The first turn of this loop that carries results, to a provider outside the
+        machine: the box with its exact text, bound to its hash (A3-14). The text is a fixed
+        point of what the box shows (`loop.sendable`, checked when it was composed), so the
+        content approved is the content sent, byte for byte."""
+        request = self.request
+        proposal = Proposal(
+            scope=SEND_SCOPE, session_id=str(request.session_id), run_id=self.record.loop_id,
+            step=str(turn.number), skill_name=PLAN_SKILL_NAME, skill_version=SEND_FORMAT,
+            skill_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            target=self.provider_name, content=text)
+        approval_hash = proposal.sha256
+        asked = self.setting.clock()
+        expires = _iso(asked + timedelta(seconds=self.setting.ttl_s))
+        self._phase(turn, "the results wait for your approval to be sent")
+        header = [
+            "Send approval requested",
+            f"  loop:     {self.record.loop_id}, {_counter(turn, self.loop)}",
+            f"  to:       {self.provider_name}, a provider outside this machine",
+            f"  sends:    exactly the text below ({len(text)} characters), with what the "
+            "reads returned as data",
+            "  after:    approved once, the later turns of this loop are shown and sent "
+            "without asking again",
+            f"  hash:     {approval_hash}",
+            f"  expires:  {expires} (UTC)",
+        ]
+        shown = self.view.approval(header, text.split("\n"))
+        if self.terminal.is_interactive():
+            verdict = decide(self.terminal, shown, approval_hash,
+                             confirm_rejection=self.setting.confirm_rejection,
+                             button_question=SEND_BUTTON_QUESTION)
+        else:
+            verdict = Verdict("undecided")
+        if withdraw_pending_interrupt():
+            verdict = Verdict("undecided")  # whatever was typed after the Ctrl+C grants nothing
+        state: str = verdict.decision
+        if state == "granted" and self.setting.clock() > asked + timedelta(
+                seconds=self.setting.ttl_s):
+            state = "expired"  # answered after the approval expired: it grants nothing
+        self.record.consent(state, verdict.means, approval_hash)
+        if state != "granted":
+            self.view.say(f"{self.tag}: the results were not approved to be sent ({state}); "
+                          "nothing was sent and the loop stops")
+            raise _Stop("stopped", "send_not_approved")
+        self.consented = True
+        self.view.say(f"{self.tag}: approved; this turn and the later ones of this loop go to "
+                      f"{self.provider_name} as shown, without asking again")
 
     async def _ask(self, turn: _Turn, text: str) -> LLMResponse:
         counter = _counter(turn, self.loop)
@@ -328,6 +422,13 @@ class _Loop:
             raise _Stop("completed", "cap")
         assert turn.nonce is not None
         reading = read_plan_reply(response, nonce=turn.nonce, config=self.config)
+        if (isinstance(reading, Refusal) and reading.reason != "nonce_mismatch"
+                and turn.nonce not in response.text):
+            # A3-15: a reply where this turn's nonce appears nowhere holds no plan of this
+            # turn: a final answer may show JSON. Nothing runs either way; this ends the loop
+            # as an answer instead of sending a correction. A block that names another nonce
+            # (`nonce_mismatch`: a stale plan, or one a result tried to forge) stays a refusal.
+            reading = NoPlan()
         last = turn.number >= self.loop.max_turns
         if isinstance(reading, NoPlan):
             view.say(f"{self.tag}: the reply holds no plan; it is the answer")
@@ -390,6 +491,9 @@ class _Loop:
         except TurnTooLarge as exc:
             self.view.say(f"error: {exc}")
             raise _Stop("stopped", "turn_too_large") from None
+        except TurnNotClean as exc:
+            self.view.say(f"error: {exc}")
+            raise _Stop("stopped", "turn_not_clean") from None
 
 
 def last_loop(conn: sqlite3.Connection, session_id: UUID) -> str:
@@ -403,6 +507,8 @@ def last_loop(conn: sqlite3.Connection, session_id: UUID) -> str:
     status, reason, turns, cap, created, finished = row
     if status == "running":
         return f"running, turn {turns} of {cap}"
+    if reason == "abandoned":  # found after its process was gone: no duration to tell
+        return f"{status} ({reason}), {turns} send(s)"
     try:
         took = (datetime.fromisoformat(finished) - datetime.fromisoformat(created))
         seconds = f", done in {max(0, int(took.total_seconds()))} s"

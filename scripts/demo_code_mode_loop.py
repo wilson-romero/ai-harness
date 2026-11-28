@@ -4,8 +4,10 @@ provider and the synthetic MCP server.
 Everything lives in temporary directories outside the repository: the allowlist (with
 `get_project_metadata` marked `auto_read`), the scripted Mock answers, the server's state and
 the data directory. Same code on macOS and in PowerShell. It drives the plain conversation in
-this process with the scripted terminal the tests use; no box is answered: every plan of the
-demo is reads by rule. The oracle of what ran is the synthetic server's own `calls.log` and
+this process with the scripted terminal the tests use. Most plans of the demo are reads by
+rule; the boxes it answers (a free-text argument inside the loop, the first send to a provider
+that is not synthetic, simulated by a Mock that says so) are answered with the typed code, as
+the tests do. The oracle of what ran is the synthetic server's own `calls.log` and
 `starts.log`, the prompts the Mock received, and the rows of the data directory.
 
 Usage: uv run python scripts/demo_code_mode_loop.py
@@ -30,10 +32,10 @@ from demo_common import ROOT, check, header, run, step
 sys.path.insert(0, str(ROOT))
 from harness.providers.mock import MockProvider  # noqa: E402
 from harness.storage.database import open_database  # noqa: E402
-from tests.fixtures.mcp.synthetic_server import FORGED_NONCE, FORGED_TAIL  # noqa: E402
+from tests.fixtures.mcp.synthetic_server import CUT_TOKEN, FORGED_NONCE, FORGED_TAIL  # noqa: E402
 from tests.mcp_support import DEFAULT_TOOLS, server_entry, write_config  # noqa: E402
 from tests.plan_support import ALPHA, BETA, QUESTION, McpList, plan_reply  # noqa: E402
-from tests.shell_support import ScriptedTerminal, make_conversation  # noqa: E402
+from tests.shell_support import CODE, ScriptedTerminal, make_conversation  # noqa: E402
 
 AUTO = {**DEFAULT_TOOLS, "get_project_metadata": {**DEFAULT_TOOLS["get_project_metadata"],
                                                    "auto_read": True}}
@@ -47,11 +49,18 @@ def turn(k: int) -> str:
     return f"vuelta {k} de"
 
 
-class Recording(MockProvider):
-    """The Mock, keeping every prompt it receives (the oracle of what was sent)."""
+FREE = {**AUTO, "echo_env": {**AUTO["echo_env"], "auto_read": True}}
+ECHO_ENV = {"id": "v", "server": "synthetic", "tool": "echo_env", "args": {"name": "DEMO_X"}}
 
-    def __init__(self, responses: dict) -> None:
+
+class Recording(MockProvider):
+    """The Mock, keeping every prompt it receives (the oracle of what was sent). With
+    `synthetic=False` it stands for a provider outside the machine (a test double: no real
+    provider is contacted)."""
+
+    def __init__(self, responses: dict, synthetic: bool = True) -> None:
         super().__init__(responses=responses)
+        self.synthetic_content = synthetic
         self.prompts: list[str] = []
 
     async def ask(self, request, on_sent, *, on_mode=None) -> str:
@@ -68,11 +77,12 @@ def query(data: Path, sql: str) -> list[tuple]:
 
 
 def converse(data: Path, mcp: McpList, responses: dict, environ: dict,
-             lines: list[str] | None = None) -> tuple[str, Recording]:
+             lines: list[str] | None = None, approvals: list | None = None,
+             synthetic: bool = True) -> tuple[str, Recording]:
     conn = open_database(data)
     try:
-        provider = Recording(responses)
-        terminal = ScriptedTerminal(lines or [AGENT], [])
+        provider = Recording(responses, synthetic)
+        terminal = ScriptedTerminal(lines or [AGENT], list(approvals or []))
         conversation, _, _ = make_conversation(conn, data, terminal, provider,
                                                mcp_config=mcp.load, columns=10_000,
                                                environ=environ)
@@ -161,6 +171,36 @@ def demo() -> list[str]:
               "no result should be stored with the loop")
         turns = query(data, "SELECT turn, kind FROM loop_turns ORDER BY rowid")
         print(f"loop_turns: {turns}")
+
+        step("(g) a read by rule with a free-text argument: inside /agent it asks the box")
+        free = McpList(work / "libre", tools=FREE)
+        text, provider = converse(data, free, {turn(1): plan_reply(ALPHA, ECHO_ENV),
+                                               turn(2): FINAL}, on, approvals=[CODE])
+        check("Plan approval requested" in text and "takes free text in argument name; "
+              "inside /agent" in text, "the box should open and say why")
+        check(provider.calls == 2 and last_loop(data) == ("completed", "answer", 2),
+              "approved, its results went back and the model answered")
+
+        step("(h) a provider outside the machine (a test double): the first send asks once")
+        text, provider = converse(data, mcp, {turn(1): plan_reply(ALPHA),
+                                              turn(2): plan_reply(BETA), turn(3): FINAL}, on,
+                                  approvals=[CODE], synthetic=False)
+        check(text.count("Send approval requested") == 1 and provider.calls == 3,
+              "one send approval, then the later turn without asking again")
+        check(provider.prompts[1] in text.replace("\n| ", "\n"),
+              "the box shows the exact text that was sent")
+        text, provider = converse(data, mcp, {turn(1): plan_reply(ALPHA), turn(2): FINAL}, on,
+                                  approvals=[None], synthetic=False)
+        check(provider.calls == 1 and last_loop(data) == ("stopped", "send_not_approved", 1),
+              "not approved: nothing sent, the loop stops")
+
+        step("(i) a credential at the cut: masked alike on screen and in what is sent")
+        cut = McpList(work / "corte", "cut-credential", tools=AUTO)
+        text, provider = converse(data, cut, {turn(1): plan_reply(ALPHA), turn(2): FINAL}, on)
+        check(CUT_TOKEN not in provider.prompts[1] and "[REDACTED:github]" in provider.prompts[1],
+              "the token the cut reveals should be masked in what is sent")
+        check(provider.prompts[1] in text.replace("\n| ", "\n"),
+              "the screen shows the very bytes sent")
     return []
 
 

@@ -129,16 +129,23 @@ class PlanSetting:
     # A3: told (k, n) in the conversation's thread just before step k of n is called; the
     # progress of a loop for the side panel. It only observes.
     progress: Callable[[int, int], None] | None = None
+    # A3-12 (owner decision of 2026-11-28): where reads by rule also need every argument
+    # bounded (`config.free_argument`), in the harness's words: inside `/agent`, or in a
+    # session whose conversation already holds tool results (A3-13). None: `/plan` as in A2.
+    bounded_only: str | None = None
 
 
 AUTO_READ_ENV = "HARNESS_AUTO_READ"
 
 
 def auto_read_setting(environ: Mapping[str, str]) -> bool:
-    """`HARNESS_AUTO_READ`: `on` (the default) lets the reads the local list marks
-    `auto_read` run by rule; `off` asks the box for every plan, for this whole run of the
-    harness. Anything else is refused before anything is sent."""
-    raw = (environ.get(AUTO_READ_ENV) or "on").strip()
+    """`HARNESS_AUTO_READ`: `on` (the default, also when unset, empty or blank) lets the
+    reads the local list marks `auto_read` run by rule; `off` asks the box for every plan, for
+    this whole run of the harness. Anything else (`On`, `0`, `no`) is refused before anything
+    is sent."""
+    raw = (environ.get(AUTO_READ_ENV) or "").strip()
+    if not raw:  # unset, empty or blank: the default, said so (review of fa6b6d1, finding 8)
+        return True
     if raw not in ("on", "off"):
         raise UsageError(f"{AUTO_READ_ENV} must be on or off; nothing was sent")
     return raw == "on"
@@ -195,8 +202,20 @@ async def run_plan(request: PlanRequest, *, service: SessionService, conn, view:
 
 
 RULE_HEADER = ("running plan: {plan_id}, {steps} step(s), every one a read your local MCP list "
-               "allows by rule (auto_read); no approval is asked (--box, or HARNESS_AUTO_READ=off, "
-               "asks for every plan). Ctrl+C stops it")
+               "allows by rule (auto_read){bounded}; no approval is asked (--box, or "
+               "HARNESS_AUTO_READ=off, asks for every plan). Ctrl+C stops it")
+BOUNDED_RULE = " and whose every argument is bounded (an enum, a number, a yes/no or a pattern)"
+
+
+def free_text_reason(plan: Plan, where: str) -> str | None:
+    """Why a plan of reads by rule goes to the box all the same (A3-12), or None."""
+    step = plan.first_free
+    if step is None:
+        return None
+    position = plan.steps.index(step) + 1
+    return (f"step {position} ({step.server}.{step.tool}) takes free text in argument "
+            f"{step.free_argument}; {where}, a read runs by rule only when every argument is "
+            "bounded, so this whole plan asks you")
 
 
 async def approve_and_run(plan: Plan, request: PlanRequest, request_id: UUID,
@@ -211,21 +230,27 @@ async def approve_and_run(plan: Plan, request: PlanRequest, request_id: UUID,
     expires = record_plan(conn, plan_id=plan_id, session_id=request.session_id,
                           request_id=request_id, plan=plan, approval_hash=approval_hash,
                           deadline=deadline, now=setting.clock(), ttl_s=setting.ttl_s)
-    if setting.auto_read and plan.by_rule:
+    by_rule = setting.auto_read and plan.by_rule
+    why = (free_text_reason(plan, setting.bounded_only)
+           if by_rule and setting.bounded_only is not None else None)
+    if why is not None:
+        by_rule = False  # the box's header says why (its `why:` line)
+    if by_rule:
         # Every step was `auto_read` when the plan was read; the executor checks it again
         # against the list as it is when it runs (A2).
         if record_rule(conn, plan_id=plan_id, plan=plan, now=setting.clock()) != "granted":
             # Its row was no longer pending: nothing is run on a rule that did not hold.
             view.say(f"plan: {plan_id} could not be approved by rule; nothing was run")
             return PlanOutcome("not_approved")
-        view.result(RULE_HEADER.format(plan_id=plan_id, steps=len(plan.steps)),
+        bounded = BOUNDED_RULE if setting.bounded_only is not None else ""
+        view.result(RULE_HEADER.format(plan_id=plan_id, steps=len(plan.steps), bounded=bounded),
                     proposal.content)
         return await _run(plan, plan_id, request, request_id, approval_hash, deadline, view,
                           setting)
     results = (RESULTS_SHOWN_ONLY if setting.loop_to is None else
                f"sent back to {setting.loop_to} as data in the next turn of this /agent loop; "
                "the exact text is shown before it goes")
-    header = approval_header(proposal, plan, approval_hash, expires, deadline, results)
+    header = approval_header(proposal, plan, approval_hash, expires, deadline, results, why)
     # The box shows the very content that was hashed, line by line (D7).
     shown = view.approval(header, proposal.content.split("\n"))
     if terminal.is_interactive():
@@ -234,7 +259,7 @@ async def approve_and_run(plan: Plan, request: PlanRequest, request_id: UUID,
                          button_question=BUTTON_QUESTION)
     else:
         verdict = Verdict("undecided")
-    interrupted = _withdraw_pending_interrupt()
+    interrupted = withdraw_pending_interrupt()
     if interrupted:
         verdict = Verdict("undecided")  # whatever was typed after the Ctrl+C grants nothing
     state = record_verdict(conn, plan_id=plan_id, verdict=verdict,
@@ -277,7 +302,7 @@ async def _run(plan: Plan, plan_id: str, request: PlanRequest, request_id: UUID,
     return PlanOutcome("ran", report)
 
 
-def _withdraw_pending_interrupt() -> bool:
+def withdraw_pending_interrupt() -> bool:
     """True if this task was cancelled while the code prompt blocked it (Ctrl+C under
     `asyncio.run` only marks the task: `input()` keeps waiting). The cancellation is withdrawn
     so that the caller's cleanup (closing the provider) is not cut by it on its first await;

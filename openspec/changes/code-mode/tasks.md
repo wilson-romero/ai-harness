@@ -551,6 +551,59 @@ Resultado: en la primera pasada, **37 de 38 muertos**: B28 sobrevivió. El servi
   - Windows: NOT RUN.
 - [x] 11.12 Demo: `uv run python scripts/demo_code_mode_loop.py` imprime `demo: PASS` (código 0, 2026-11-27): (a) consentimiento apagado, 0 envíos y 0 arranques; (b) tres turnos, dos planes por regla y la respuesta, exactamente 3 envíos, cada turno mostrado tal como se envió; (c) el tope `HARNESS_LOOP_MAX_TURNS=2` con su cierre sin gramática, y el plan de la respuesta de cierre no corre; (d) un plan rechazado (`nonce_mismatch`) cuyo motivo vuelve una vez, después la respuesta; (e) un resultado hostil (`forge-data`) que queda en su bloque, cortado con su cola, y su nonce rechazado; (f) lo guardado, sin ningún resultado. Para probarlo a mano: `--prepare DIR` (README). Estado de la demo de Wilson: **NOT RUN**.
 
+### Correcciones de la revisión independiente de `fa6b6d1` (2026-11-28)
+
+Decisiones del dueño (hallazgos 2, 3 y 4) en el design, A3-12 a A3-17, que sustituyen a A3-8.4 y A3-8.6. Los tests de 11.13 se vieron fallar sobre el código sin corregir. Los de 11.14 a 11.20 se escribieron junto a su corrección y se vieron fallar con el mutante de la tabla que la deshace (R01-R30): ese es su recibo.
+
+- [x] 11.13 (MEDIO) Una credencial que el corte revela (A3-16): la cabeza y la cola se limpian otra vez tras `bounded`, y el turno entero tiene que ser un punto fijo de `safe_foreign_text` y `normalise_content` (`loop.sendable`) o no se envía (`turn_not_clean`). Visto fallar: `test_mcp_loop.py::test_a_credential_the_cut_reveals_is_masked_in_what_is_sent[head ends at the token]` y `[tail starts at the token]` (el token salía entero en lo enviado) y `test_shell_agent.py::test_a_credential_at_the_cut_is_masked_alike_on_screen_and_in_what_is_sent` (modo `cut-credential` del servidor sintético). Además `::test_a_credential_split_by_the_cut_leaves_no_piece`, `::test_a_turn_the_screen_would_change_is_never_sent` (un token, un NFD, un U+200B) y su control `::test_control_every_ordinary_turn_is_sent_as_shown`. Mutantes R01-R04.
+- [x] 11.14 (dueño) Argumentos acotados dentro de `/agent` (A3-12): `test_mcp_auto_read.py::test_an_argument_is_bounded_only_by_its_declared_type` (siete casos), `test_shell_agent.py::test_a_read_by_rule_with_a_free_text_argument_asks_the_box_in_a_loop` (la caja y su `why:`), su control `::test_control_bounded_reads_by_rule_run_without_the_box_in_a_loop` (la línea `running plan:` dice «every argument is bounded») y `::test_plan_keeps_the_a2_rule_in_a_clean_session`. Mutantes R05-R08, R28, R29.
+- [x] 11.15 (dueño) La conversación guarda los resultados (A3-13): `::test_after_results_were_sent_the_session_says_so_and_plan_needs_bounded_args` (el aviso una vez, `/status`, `/plan` a la caja y, tras `/new`, por regla), `::test_a_loop_that_sent_no_results_leaves_the_session_clean`, `test_plan_cli.py::test_plan_in_a_session_that_holds_results_needs_bounded_arguments`. Mutantes R09-R13, R27.
+- [x] 11.16 (dueño) La caja del primer envío a un proveedor no sintético (A3-14), con un Mock que dice no ser sintético (doble de test; el proveedor real no se toca): `::test_a_provider_outside_the_machine_asks_once_with_the_exact_text` (una caja, antes del primer envío; su hash es el del `Proposal` del texto que recibió el proveedor; el tercer turno sin caja), `::test_a_send_not_approved_sends_nothing_and_stops` (sin decidir, rechazada, Ctrl+C), `::test_a_send_approved_after_it_expired_sends_nothing`, `::test_a_send_on_a_terminal_that_is_not_interactive_is_never_approved`, `::test_a_code_typed_after_ctrl_c_at_the_send_box_grants_nothing`, `::test_a_correction_needs_no_send_approval`, `::test_the_send_box_on_the_full_screen_approves_with_its_button` (Pilot, botón) y `::test_a_synthetic_provider_gets_no_notice` (sin caja con el Mock). Mutantes R14-R19, R30.
+- [x] 11.17 (BAJO) Las tablas del bucle en la migración 013 (A3-7): `::test_a_database_at_the_a2_010_gets_the_loop_tables_from_013` (con la 010 sola, `loop_runs` no existe: lo comprueba el propio test) y `::test_a_database_whose_010_held_the_loops_ends_with_the_same_schema`. Guardas de versión a `[…, 10, 13]` en `test_storage.py` y `test_response_mode.py`. La 011 es de `feature/workspace-tools` (en pausa) y la 012 queda para la rama de velocidad. Mutante R26.
+- [x] 11.18 (BAJO) Un bucle `running` sin su proceso se recupera al abrir la conversación (`_switch_to`): `::test_a_loop_left_running_is_marked_interrupted_when_the_conversation_opens` y `::test_a_loop_left_running_is_marked_interrupted_and_never_resumed` (ahora `interrupted (abandoned), 2 send(s)`, sin duración). Mutantes R20, R21.
+- [x] 11.19 (BAJO) Un bloque `json` sin el nonce del turno es la respuesta dentro del bucle (A3-15): `::test_a_json_block_without_the_turn_s_nonce_is_the_answer_in_a_loop` (antes acababa `stopped (refused)` tras gastar la corrección), `::test_a_block_with_another_nonce_is_still_refused_in_a_loop`, `::test_control_plan_still_refuses_a_block_without_a_nonce`. Mutantes R22-R24.
+- [x] 11.20 (BAJO) `HARNESS_AUTO_READ` vacía o en blanco es el valor por defecto (A3-17): `test_mcp_auto_read.py::test_the_switch_unset_empty_or_blank_is_the_default` (`"  "` antes se rechazaba) y `::test_a_wrong_switch_sends_nothing` (ahora también `o n`, `of`). README, `.env.example`. Mutante R25.
+- [x] 11.21 Demo ampliada: (g) una lectura por regla con un argumento de texto libre pide la caja dentro del bucle; (h) un proveedor no sintético (doble): la caja una vez, después sin preguntar, y sin aprobar no se envía nada; (i) una credencial en el corte, enmascarada igual en pantalla y en lo enviado.
+
+- [x] 11.22 Comprobaciones (macOS arm64, `caffeinate -i`, 2026-11-28, sobre `fa6b6d1` con estas correcciones sin confirmar): `uv run pytest -m "not edge and not copilot"` 2530 passed, 191 deselected (código 0); `openspec validate --all --strict` 28 de 28 (0); `scripts/check_public_safety.py` PASS (0); `scripts/check_sec_matrix.py` PASS, 15 filas, 206 tests (0); `scripts/demo_code_mode_loop.py` y `scripts/demo_code_mode.py` `demo: PASS` (0). Sin la batería de Edge. Windows: NOT RUN.
+
+#### Mutantes de la revisión de `fa6b6d1`
+
+Con `mutate.py` (cada uno se aplica, se corren sus tests con `-x` y se deshace). 30 de 30 muertos; R17 sobrevivió a la primera tanda y lo mató `::test_a_code_typed_after_ctrl_c_at_the_send_box_grants_nothing`, escrito para eso.
+
+| Id | Qué deshace | Lo mata |
+|----|-------------|---------|
+| R01 | la limpieza de cabeza y cola tras el corte | `test_a_credential_the_cut_reveals_is_masked_in_what_is_sent` |
+| R02 | la comprobación `sendable` del turno | `test_a_turn_the_screen_would_change_is_never_sent` |
+| R03 | `normalise_content` en `sendable` | ídem |
+| R04 | `normalise_content` en `clean_piece` | `test_control_every_ordinary_turn_is_sent_as_shown` |
+| R05 | un `string` sin `pattern` cuenta como acotado | `test_an_argument_is_bounded_only_by_its_declared_type` |
+| R06 | el tope de 64 pasa a 65 | ídem |
+| R07 | el bucle no pide argumentos acotados | `test_a_read_by_rule_with_a_free_text_argument_asks_the_box_in_a_loop` |
+| R08 | el motivo no quita la regla | ídem |
+| R09 | `/plan` no mira si la sesión tiene resultados | `test_after_results_were_sent_…` |
+| R10 | `holds_results` cuenta cualquier turno | `test_a_loop_left_running_is_marked_interrupted_and_never_resumed` |
+| R11 | sin el aviso tras el bucle | `test_after_results_were_sent_…` |
+| R12 | el aviso tras cualquier bucle | `test_a_send_not_approved_sends_nothing_and_stops[undecided]` |
+| R13 | `/status` sin la línea `results:` | `test_after_results_were_sent_…` |
+| R14 | sin la caja del primer envío | `test_a_provider_outside_the_machine_asks_once_with_the_exact_text` |
+| R15 | la caja no para el bucle | `test_a_send_not_approved_sends_nothing_and_stops[undecided]` |
+| R16 | sin caducidad | `test_a_send_approved_after_it_expired_sends_nothing` |
+| R17 | un código tras Ctrl+C aprueba | `test_a_code_typed_after_ctrl_c_at_the_send_box_grants_nothing` |
+| R18 | el hash no cubre el último carácter del texto | `test_a_provider_outside_the_machine_asks_once_with_the_exact_text` |
+| R19 | la caja en una terminal no interactiva | `test_a_send_on_a_terminal_that_is_not_interactive_is_never_approved` |
+| R20 | sin recuperar al abrir la conversación | `test_a_loop_left_running_is_marked_interrupted_and_never_resumed` |
+| R21 | `abandoned` con duración | ídem |
+| R22 | un bloque sin nonce sigue siendo rechazo | `test_a_json_block_without_the_turn_s_nonce_is_the_answer_in_a_loop` |
+| R23 | `nonce_mismatch` también pasa a respuesta | `test_a_refused_plan_s_reason_goes_back_once` |
+| R24 | todo rechazo pasa a respuesta | `test_a_correction_needs_no_send_approval` |
+| R25 | `HARNESS_AUTO_READ` en blanco se rechaza | `test_a_plan_of_auto_reads_runs_without_the_box_and_says_so_first` |
+| R26 | la 013 sin `DROP TABLE IF EXISTS` | `test_a_database_whose_010_held_the_loops_ends_with_the_same_schema` |
+| R27 | `main.py plan` no mira la sesión | `test_plan_in_a_session_that_holds_results_needs_bounded_arguments[holds-results]` |
+| R28 | la caja sin su línea `why:` | `test_a_read_by_rule_with_a_free_text_argument_asks_the_box_in_a_loop` |
+| R29 | `running plan:` sin «every argument is bounded» | `test_control_bounded_reads_by_rule_run_without_the_box_in_a_loop` |
+| R30 | la caja en cada turno, no una vez por bucle | `test_a_provider_outside_the_machine_asks_once_with_the_exact_text` |
+
 ## 5. Tramo 3 · Sonda y medición con Copilot real (unos 12 envíos del presupuesto de 100)
 
 - [ ] 5.1 Sonda sin herramientas: un bloque `json` sintético de 80 líneas, comparado byte a byte. 1–2 envíos.

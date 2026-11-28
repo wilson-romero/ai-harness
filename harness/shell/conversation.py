@@ -42,7 +42,14 @@ from harness.core.service import SessionService
 from harness.core.strict_json import decode_text_limited
 from harness.mcp.config import LoadedConfig, load_config
 from harness.mcp.loop import PROVIDERS_ENV, loop_settings
-from harness.mcp.loop_flow import last_loop, run_loop
+from harness.mcp.loop_flow import (
+    HOLDS_RESULTS,
+    IN_THIS_SESSION,
+    holds_results,
+    last_loop,
+    recover_loops,
+    run_loop,
+)
 from harness.mcp.plan_flow import (
     PlanRequest,
     PlanSetting,
@@ -590,6 +597,9 @@ class Conversation:
         self._session, self._lock = taken
         self._attachment = None
         self._notes = ()
+        # A loop left `running` by a process that is gone is marked interrupted as soon as a
+        # conversation opens a session (review of fa6b6d1, finding 6), not at the next /agent.
+        recover_loops(self._deps.conn, self._deps.data_dir)
 
     def _release(self) -> None:
         if self._lock is not None:
@@ -773,6 +783,8 @@ class Conversation:
             f"mode:     {session.response_mode}",
             f"sends: {panel.sends}",
             f"loop: {panel.loop}",
+            *([f"results: {HOLDS_RESULTS}"]
+              if holds_results(self._deps.conn, session.session_id) else []),
             f"memory: {len(panel.notes)} note(s) in the last question",
             *(f"  {terminal_safe(note)}" for note in panel.notes),
             "attachment: " + (self._attachment[0] if self._attachment else "-"),
@@ -949,6 +961,8 @@ class Conversation:
         setting = PlanSetting(
             data_dir=self._deps.data_dir, environ=self._environ(), load_config=load,
             ttl_s=self._deps.skills().approval_ttl_s, auto_read=auto_read,
+            bounded_only=(IN_THIS_SESSION if holds_results(self._deps.conn, self._session_id)
+                          else None),
             **({"clock": clock} if clock is not None else {}),
         )
         await run_plan(

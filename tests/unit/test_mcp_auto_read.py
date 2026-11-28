@@ -208,7 +208,15 @@ def test_a_rule_that_no_longer_holds_runs_nothing(conn, data_dir, mcp, monkeypat
     assert terminal.questions == [] and mcp.starts() == 0
 
 
-@pytest.mark.parametrize("value", ["yes", "ON", "0", ""])
+@pytest.mark.parametrize("value,expected", [(None, True), ("", True), ("  ", True),
+                                            ("on", True), (" off ", False), ("off", False)])
+def test_the_switch_unset_empty_or_blank_is_the_default(value, expected):
+    """Review of fa6b6d1, finding 8: an empty value means the default, on purpose."""
+    environ = {} if value is None else {"HARNESS_AUTO_READ": value}
+    assert flow.auto_read_setting(environ) is expected
+
+
+@pytest.mark.parametrize("value", ["yes", "ON", "0", "", "o n", "of"])
 def test_a_wrong_switch_sends_nothing(conn, data_dir, mcp, value):
     provider = scripted_mock(plan_reply(ALPHA))
     terminal = _run(conn, data_dir, mcp, provider, [PLAN_LINE],
@@ -506,3 +514,23 @@ def test_the_cli_runs_a_plan_by_rule_without_the_code(tmp_path, cli, conn, monke
     assert "| step 1 of 1 (a): synthetic.get_project_metadata  read  allowed  auto_read" in out
     assert mcp.calls() == ["call get_project_metadata"]
     assert rows(conn, "SELECT status, means FROM plan_runs") == [("completed", "rule")]
+
+
+# -- which arguments are bounded (A3-12) -------------------------------------------------------
+
+
+@pytest.mark.parametrize("spec,free", [
+    ({"type": "enum", "values": ["a"]}, False),
+    ({"type": "integer", "minimum": 0, "maximum": 9}, False),
+    ({"type": "boolean"}, False),
+    ({"type": "string", "max_length": 64, "pattern": "[a-z]+"}, False),
+    ({"type": "string", "max_length": 64}, True),  # no pattern: free text
+    ({"type": "string", "max_length": 65, "pattern": "[a-z]+"}, True),  # too long to be bounded
+    ({"type": "string", "max_length": 4096, "pattern": ".*"}, True),
+])
+def test_an_argument_is_bounded_only_by_its_declared_type(spec, free):
+    from harness.mcp.config import ToolEntry, free_argument
+    entry = ToolEntry.model_validate({"operation": "read", "auto_read": True,
+                                      "arguments": {"b": {"type": "boolean"}, "x": spec}})
+    assert free_argument(entry) == ("x" if free else None)
+    assert free_argument(ToolEntry.model_validate({"operation": "read"})) is None

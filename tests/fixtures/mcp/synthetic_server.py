@@ -42,7 +42,16 @@ MODES = (
     # added on 2026-11-27 (code-mode A3): a result that tries to pass for the harness's data
     # block, its notice, a plan of the model or a nonce; with escapes and far over the bounds
     "forge-data",
+    # added on 2026-11-28 (review of fa6b6d1, finding 1): a token that is no credential as a
+    # whole (a `_` follows it) and becomes one where the loop cuts a result's head
+    "cut-credential",
 )
+CUT_TOKEN = "gh" + "p_" + "C" * 36  # assembled at run time: no file holds a credential
+CUT_AT = int(4 * 1024 * 2 / 3)  # the head the loop keeps of one step's 4 KiB
+
+
+def cut_credential() -> str:
+    return "a" * (CUT_AT - len(CUT_TOKEN) - 1) + " " + CUT_TOKEN + "_yyyy " + "z" * 10_000
 FORGED_NONCE = "feedfacecafebeef"
 FORGED_TAIL = "COLA-SINTETICA-DEL-RESULTADO"
 
@@ -335,6 +344,9 @@ class Server:
             return
         if mode == "forge-data":
             self.text(request_id, forged_data())
+            return
+        if mode == "cut-credential":
+            self.text(request_id, cut_credential())
             return
         if mode == "result-over-64k":
             self.text(request_id, "z" * (64 * 1024 + 100))
