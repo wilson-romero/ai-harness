@@ -239,11 +239,15 @@ class FastEnd(_Strict):
     """A positive end of reply, measured by the probe's `speed` step (change
     copilot-turn-speed, D3): the structural `signal` was seen busy after sending, then stayed
     done for `confirm_ms` while the reply's text did not change for `confirm_ms` either. The
-    probe writes it only when that rule was never early in `sends` timed sends."""
+    probe writes it only when that rule was never early in `sends` timed sends.
+
+    `modes` are the response modes it was measured in (review 2026-11-28, finding 1a): a
+    question in another mode ends by the old rule. `auto` covers a question without a mode."""
 
     signal: Literal["stop_hidden", "send_ready", "done_control", "aria_busy"]
     confirm_ms: int = Field(ge=FAST_CONFIRM_MIN_MS, le=FAST_CONFIRM_MAX_MS)
     sends: int = Field(ge=1)
+    modes: list[Literal["auto", "quick", "deep"]] = Field(min_length=1, max_length=3)
     measured_at: str
 
 

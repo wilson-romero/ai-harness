@@ -40,8 +40,10 @@ class Settings:
     deep_timeout_s: float | None = None
     # Change copilot-turn-speed: each optimisation can be switched off, and each one runs
     # only when the probe measured it (`tab_reuse`, `fast_end` in ui.json); `copilot_timings`
-    # adds a line with the time of each phase to every question's warnings.
-    copilot_reuse_tab: bool = True
+    # adds a line with the time of each phase to every question's warnings. Reusing the tab
+    # is off until the owner turns it on after the real measurement (review 2026-11-28,
+    # finding 5): a reused tab does not see a conversation deleted elsewhere.
+    copilot_reuse_tab: bool = False
     copilot_fast_end: bool = True
     copilot_timings: bool = False
     # Questions to Copilot without a window (`HARNESS_COPILOT_HEADLESS=on`), off by default.
@@ -81,7 +83,7 @@ class Settings:
             copilot_max_prompt_chars=_positive_int(env, "HARNESS_COPILOT_MAX_PROMPT_CHARS"),
             browser_headless=env.get("HARNESS_TEST_HEADLESS") == "1",
             answer_notice=answer_notice(env),
-            copilot_reuse_tab=_on_off(env, "HARNESS_COPILOT_REUSE_TAB", True),
+            copilot_reuse_tab=_on_off(env, "HARNESS_COPILOT_REUSE_TAB", False),
             copilot_fast_end=_on_off(env, "HARNESS_COPILOT_FAST_END", True),
             copilot_timings=_on_off(env, "HARNESS_COPILOT_TIMINGS", False),
             copilot_headless=_on_off(env, "HARNESS_COPILOT_HEADLESS", False),

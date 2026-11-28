@@ -607,7 +607,11 @@ class CopilotWebProvider:
         # None: decided per question from the switches and the measurement (`speed_for`). The
         # probe's `speed` step passes one to compare the two paths on the real page.
         self._speed = speed
-        # The phases of the last question (durations only), for whoever shows progress.
+        # Public and stable (the agent loop on develop reads it; keep its name and type): the
+        # timings of the last question that ended, whatever its outcome, set before `ask`
+        # returns or raises. None before the first question. Durations, fixed words and
+        # counts only (`TurnTimings`: path, declined, end, attempts, outcome, phases_ms,
+        # total_ms, early_endings); never text, URL or names.
         self.last_timings: TurnTimings | None = None
 
     # -- resources for a conversation (interactive-shell D5; this change's D3) --------------
@@ -710,9 +714,15 @@ class CopilotWebProvider:
         finally:
             timings.total_ms = round((time.monotonic() - started) * 1000)
             self.last_timings = timings
-            record_timings(self._settings.data_dir, timings)
-            if self._settings.copilot_timings:
-                events.warn(timings.line())
+            # Recording never changes how the question ended (review 2026-11-28, finding 2):
+            # only an Exception is caught, and only around the recording, so a cancellation or
+            # Ctrl+C still goes through and nothing of the request itself is hidden.
+            try:
+                record_timings(self._settings.data_dir, timings)
+                if self._settings.copilot_timings:
+                    events.warn(timings.line())
+            except Exception:  # noqa: BLE001
+                pass
 
     async def _ask(
         self,
@@ -842,6 +852,15 @@ class _Turn:
         self.bound = request.remote_ref is not None
         self.bound_id: str | None = None
         self.stage = "before sending"
+        # The fast end of this question (D3): only in a mode it was measured in (review
+        # 2026-11-28, finding 1a), and never again in this question once it was early (1b).
+        fast = self.speed.fast_end
+        self.fast: FastEnd | None = (
+            fast if fast is not None and request.mode.value in fast.modes else None)
+        self._fired: tuple[float, str] | None = None  # when the fast end fired, and the digest
+        # When the prompt went out and the reply's first text came: kept across an early end,
+        # so `reply_start` and `reply_end` still measure the whole reply.
+        self._clock: tuple[float, float | None] | None = None
 
     def uncertain_reason(self, exc: BaseException | None = None) -> str:
         kind = f" ({type(exc).__name__})" if exc is not None else ""
@@ -857,6 +876,7 @@ class _Turn:
         # (review 2026-11-27, finding 5).
         self.confirmed_mode = None
         self.memory_after = None
+        self._clock = self._fired = None
         timings = self.timings
         timings.attempts += 1
         timings.path = "reload"
@@ -887,14 +907,27 @@ class _Turn:
             await self.put_prompt(page, composer, expected)
         with timings.phase("send"):
             await self.send(composer)
-        self.stage = "while waiting for the answer"
-        text, cut = await self.await_reply(page, composer, users, last_user, assistants)
-        self.stage = "while waiting for the conversation identifier"
-        with timings.phase("identifier"):
-            await self.await_identifier(page)
-        with timings.phase("post"):
-            self.still_this_conversation(page)
-            await self.reread_mode(page)
+        while True:
+            self.stage = "while waiting for the answer"
+            text, cut = await self.await_reply(page, composer, users, last_user, assistants)
+            self.stage = "while waiting for the conversation identifier"
+            with timings.phase("identifier"):
+                await self.await_identifier(page)
+            with timings.phase("post"):
+                self.still_this_conversation(page)
+                await self.reread_mode(page)
+            if timings.end != "signal":
+                break
+            with timings.phase("recheck"):
+                early = await self.early_end(page, composer, assistants)
+            if not early:
+                break
+            # The reply went on after the fast end: never the shorter text. Back to waiting,
+            # by the old rule only, and the attempt says so (review 2026-11-28, 1b and 1c).
+            timings.early_endings += 1
+            self.fast = None
+            for name in ("reply_end", "read"):  # measured again when the reply really ends
+                timings.phases_ms.pop(name, None)
         if self.speed.reuse_tab and self.keep_memory:
             self.memory_after = await self.remember(page, users, assistants)
         if cut:
@@ -1269,13 +1302,12 @@ class _Turn:
         window_s = max(
             self.plan.measurement.stability_window_ms or 0, signal.window_ms or 0
         ) / 1000
-        fast = self.speed.fast_end
+        fast = self.fast
         confirm_s = fast.confirm_ms / 1000 if fast is not None else 0.0
         seen_busy = False
         done_since: float | None = None  # the fast signal done without interruption since then
         timings = self.timings
-        sent_at = time.monotonic()
-        first_text_at: float | None = None
+        sent_at, first_text_at = self._clock or (time.monotonic(), None)
         confirmed = resubmitted = False
         expected = editor_length(self.request.prompt)
         digest, since = None, time.monotonic()
@@ -1292,8 +1324,12 @@ class _Turn:
                 # the signal is at least as complete as it was when the signal was read.
                 turn_now = assistants.nth(answer) if answer is not None else None
                 done = await self.fast_signal_done(page, composer, turn_now, fast)
-                if done is False:
+                # Busy counts only once the reply exists: a signal already busy before
+                # sending (a leftover stop control) says nothing about it (finding 1e).
+                if done is False and turn_now is not None:
                     seen_busy, done_since = True, None
+                elif done is False:
+                    done_since = None
                 elif done is True and seen_busy and done_since is None:
                     done_since = time.monotonic()
             if not confirmed:
@@ -1330,11 +1366,36 @@ class _Turn:
                     end = "signal"
                 if end is not None:
                     timings.end = end
+                    self._fired = (time.monotonic(), now) if end == "signal" else None
+                    self._clock = (sent_at, first_text_at)
                     timings.add("read", read_s)
                     timings.add("reply_end", time.monotonic() - (first_text_at or sent_at))
                     self._new_user = new_user
                     self._answer_index = answer
                     return text, cut
+            await asyncio.sleep(POLL_S)
+
+    async def early_end(self, page: Page, composer: Locator, assistants: Locator) -> bool:
+        """After a fast end and the checks that follow it (review 2026-11-28, finding 1b):
+        True when the reply grew or its signal went busy again, so the end was early.
+
+        It watches until `confirm_ms` has passed since the rule fired. The identifier and the
+        checks after the reply already ran in that time, so only what is left of it is
+        waited: about nothing when they took that long, at most `confirm_ms` when they took
+        nothing. A pause longer than twice `confirm_ms` is not seen here: the probe only
+        writes the rule when none of its timed sends had one (D3)."""
+        assert self._fired is not None and self.fast is not None and self._answer_index is not None
+        fired_at, digest = self._fired
+        until = fired_at + self.fast.confirm_ms / 1000
+        turn = assistants.nth(self._answer_index)
+        while True:
+            if await self.fast_signal_done(page, composer, turn, self.fast) is False:
+                return True
+            text, _ = await read_reply(turn, self.code_label)
+            if _digest(text) != digest:
+                return True
+            if time.monotonic() >= until or self.remaining() <= 0:
+                return False
             await asyncio.sleep(POLL_S)
 
     async def fast_signal_done(self, page: Page, composer: Locator, turn: Locator | None,

@@ -17,6 +17,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from harness.storage.private import FILE_MODE, private_dir, private_file
+
 TIMINGS_FILE = "timings.jsonl"
 KEEP_LINES = 1000  # after trimming
 TRIM_AT_BYTES = 512_000
@@ -38,7 +40,14 @@ PHASES = (
     "read",  # the last read of the reply (within reply_end)
     "identifier",  # wait for the conversation identifier after the reply
     "post",  # the checks after the reply (address, mode read again)
+    "recheck",  # after a fast end: the reply and its signal read again (review 2026-11-28)
 )
+# Bounds of a line read back (review 2026-11-28, finding 4): anything outside is not ours.
+MAX_MS = 24 * 3600 * 1000
+MAX_ATTEMPTS = 2
+MAX_EARLY = 100
+MAX_ID = 64
+MAX_LINE = 4096
 OUTCOMES = ("answered", "failed", "uncertain", "cancelled")
 PATHS = ("reload", "reuse")
 ENDS = ("signal", "window", "none")
@@ -73,6 +82,9 @@ class TurnTimings:
     phases_ms: dict[str, int] = field(default_factory=dict)
     total_ms: int = 0
     at: str = ""
+    # Fast ends that the re-check found early: the reply grew or its signal went busy again
+    # after the rule had fired, and the question went back to waiting (review 2026-11-28).
+    early_endings: int = 0
 
     @contextlib.contextmanager
     def phase(self, name: str) -> Iterator[None]:
@@ -91,7 +103,8 @@ class TurnTimings:
         phases = ", ".join(f"{LABELS.get(name, name)} {self.phases_ms[name] / 1000:.2f}"
                            for name in PHASES if self.phases_ms.get(name))
         why = f" ({self.declined})" if self.declined else ""
-        return (f"timings (s): {self.outcome}, path {self.path}{why}, end {self.end}, "
+        early = f", early endings {self.early_endings}" if self.early_endings else ""
+        return (f"timings (s): {self.outcome}, path {self.path}{why}, end {self.end}{early}, "
                 f"total {self.total_ms / 1000:.2f}" + (f"; {phases}" if phases else ""))
 
 
@@ -100,18 +113,57 @@ def timings_path(data_dir: Path) -> Path:
 
 
 def record(data_dir: Path, timings: TurnTimings) -> None:
-    """Append one question's timings. Never fails the question: an error here is dropped."""
-    timings.at = datetime.now(UTC).isoformat(timespec="seconds")
-    path = timings_path(data_dir)
-    with contextlib.suppress(OSError):
-        path.parent.mkdir(parents=True, exist_ok=True)
+    """Append one question's timings. Never fails the question (review 2026-11-28, finding 2):
+    whatever goes wrong here (a corrupt, unwritable or replaced file) is dropped. Only an
+    `Exception` is caught: a cancellation or Ctrl+C still goes through.
+
+    The folder and the file are owner-only, also the trimmed copy (finding 3)."""
+    try:
+        timings.at = datetime.now(UTC).isoformat(timespec="seconds")
+        path = timings_path(data_dir)
+        private_dir(path.parent)
+        private_file(path)
         with path.open("a", encoding="utf-8") as out:
             out.write(json.dumps(asdict(timings), sort_keys=True) + "\n")
         if path.stat().st_size > TRIM_AT_BYTES:
-            lines = path.read_text(encoding="utf-8").splitlines()[-KEEP_LINES:]
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-KEEP_LINES:]
             tmp = path.with_suffix(".tmp")
+            tmp.unlink(missing_ok=True)
+            private_file(tmp)
             tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            tmp.chmod(FILE_MODE)
             tmp.replace(path)
+    except Exception:  # noqa: BLE001 - recording is never a reason for a question to fail
+        return
+
+
+def _count(value: object, top: int) -> bool:
+    return type(value) is int and 0 <= value <= top
+
+
+def _word(value: object, top: int = MAX_ID) -> bool:
+    return isinstance(value, str) and len(value) <= top and value.isprintable()
+
+
+def _valid(data: object) -> TurnTimings | None:
+    """The line as timings when every field has its type and bounds, else None (finding 4)."""
+    if not isinstance(data, dict) or set(data) - FIELDS or not {"request_id", "session_id"} <= set(data):
+        return None
+    phases = data.get("phases_ms", {})
+    if not (
+        _word(data["request_id"]) and _word(data["session_id"])
+        and data.get("path", "reload") in PATHS and data.get("end", "none") in ENDS
+        and data.get("outcome", "failed") in OUTCOMES
+        and (data.get("declined") is None or data.get("declined") in DECLINED)
+        and _count(data.get("attempts", 0), MAX_ATTEMPTS)
+        and _count(data.get("total_ms", 0), MAX_MS)
+        and _count(data.get("early_endings", 0), MAX_EARLY)
+        and _word(data.get("at", ""))
+        and isinstance(phases, dict)
+        and all(name in PHASES and _count(ms, MAX_MS) for name, ms in phases.items())
+    ):
+        return None
+    return TurnTimings(**data)
 
 
 def read_for(data_dir: Path, request_ids: Iterable[str]) -> dict[str, TurnTimings]:
@@ -122,17 +174,23 @@ def read_for(data_dir: Path, request_ids: Iterable[str]) -> dict[str, TurnTiming
     path = timings_path(data_dir)
     if not wanted or not path.is_file():
         return found
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return found
+    for raw in lines:
+        if len(raw) > MAX_LINE:  # a line of ours is a few hundred characters
+            continue
         try:
             data = json.loads(raw)
-            if data.get("request_id") not in wanted:
-                continue
-            item = TurnTimings(**data)
-            if item.outcome not in OUTCOMES or item.path not in PATHS or item.end not in ENDS \
-                    or (item.declined is not None and item.declined not in DECLINED) or not all(
-                    name in PHASES and isinstance(ms, int) for name, ms in item.phases_ms.items()):
-                continue
-        except (ValueError, TypeError, AttributeError):
+        except (ValueError, RecursionError):
             continue
-        found[item.request_id] = item
+        if not isinstance(data, dict) or data.get("request_id") not in wanted:
+            continue
+        item = _valid(data)
+        if item is not None:
+            found[item.request_id] = item
     return found
+
+
+FIELDS = frozenset(TurnTimings.__dataclass_fields__)

@@ -28,7 +28,7 @@ from tests.copilot_app import CANARY_REPLY, SyntheticCopilot, late_block, make_r
 
 pytestmark = pytest.mark.edge
 
-FAST_END = {"signal": "stop_hidden", "confirm_ms": 500, "sends": 8,
+FAST_END = {"signal": "stop_hidden", "confirm_ms": 500, "sends": 12, "modes": ["auto"],
             "measured_at": "2026-11-27T00:00:00Z"}
 TAB_REUSE = {"questions": 4, "measured_at": "2026-11-27T00:00:00Z"}
 # As on the real page (4 s, measured 2026-11-24): the fallback must be told apart from the
@@ -49,6 +49,8 @@ class Talk:
             "HARNESS_EDGE_PROFILE": str(profile),
             "HARNESS_REQUEST_TIMEOUT_S": "40",
             "HARNESS_TEST_HEADLESS": "1",
+            # Off by default (review 2026-11-28, finding 5); these tests turn it on.
+            "HARNESS_COPILOT_REUSE_TAB": "on",
         } | env
         self.settings = Settings.from_env(self.env)
         self.launcher = EdgeLauncher.from_settings(self.settings)
@@ -95,18 +97,20 @@ def talk(copilot_app: SyntheticCopilot, data_dir: Path, tmp_path: Path):
         made.append(Talk(data_dir, tmp_path / "edge-profile", url or copilot_app.url(), **env))
         return made[-1]
 
+    build.app = copilot_app
+
     yield build
     for t in made:
         t.conn.close()
 
 
 def measured(data_dir: Path, *, reuse: bool = True, fast: bool = True, **changes) -> None:
-    extra = {"stability_window_ms": REAL_WINDOW_MS} | changes
+    extra = {"stability_window_ms": REAL_WINDOW_MS}
     if reuse:
         extra["tab_reuse"] = TAB_REUSE
     if fast:
         extra["fast_end"] = FAST_END
-    write_ui(data_dir, **extra)
+    write_ui(data_dir, **(extra | changes))
 
 
 def user_prompts(app: SyntheticCopilot, conversation: str) -> list[str]:
@@ -210,7 +214,7 @@ def test_a_switch_takes_only_on_or_off():
 
     with pytest.raises(InvalidInput, match="HARNESS_COPILOT_REUSE_TAB"):
         Settings.from_env({"HARNESS_COPILOT_REUSE_TAB": "maybe"})
-    assert Settings.from_env({}).copilot_reuse_tab is True
+    assert Settings.from_env({}).copilot_reuse_tab is False  # off by default (D8)
     assert Settings.from_env({"HARNESS_COPILOT_FAST_END": "OFF"}).copilot_fast_end is False
 
 
@@ -336,11 +340,15 @@ async def test_on_the_reused_tab_the_mode_is_set_and_confirmed_before_typing(
 # -- D3: the end of a reply by a positive signal ------------------------------------------------
 
 
-async def ask_once(talk, data_dir, url: str, *, fast: bool = True, prompt="fin ZQX-END-1"):
-    measured(data_dir, reuse=False, fast=fast)
+async def ask_once(talk, data_dir, url: str, *, fast: bool = True, prompt="fin ZQX-END-1",
+                   **changes):
+    measured(data_dir, reuse=False, fast=fast, **changes)
+    app = talk.app
+    before = app.prompt_count
     async with talk(url) as t:
         r = await t.ask(t.session(), prompt)
     assert r.status is RequestStatus.COMPLETED, r.detail
+    assert app.prompt_count == before + 1  # one send, nothing resent
     return r, t.timings[0]
 
 
@@ -457,3 +465,180 @@ def test_signing_in_always_uses_a_window(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError, match="stop here"):
         asyncio.run(login.manual_login(settings))
     assert seen == [{"window": True}]
+
+
+# -- review 2026-11-28 ----------------------------------------------------------------------
+# Finding 1: an idle gap between two phases of a reply, longer than the short window, ended it
+# with half its text. Each case asserts the FULL text and one send.
+
+WHOLE = make_reply("fin ZQX-END-1")
+
+
+@pytest.mark.parametrize("gap_ms", ["700", "800"])
+async def test_an_idle_gap_between_two_phases_does_not_cut_the_reply(talk, copilot_app,
+                                                                     data_dir, gap_ms):
+    r, timing = await ask_once(talk, data_dir, copilot_app.url(pause_ms="2600", flicker_ms=gap_ms))
+    assert r.text == WHOLE
+    assert timing.early_endings == 1  # the fast end fired, the signal came back: counted
+
+
+async def test_a_late_block_after_an_idle_moment_is_kept(talk, copilot_app, data_dir):
+    """Citations or cards that arrive 0.8 s after the reply looked finished."""
+    r, timing = await ask_once(talk, data_dir, copilot_app.url(late_block_ms="800", late_chunks="3"))
+    assert r.text == WHOLE + "\n\n" + late_block(3)
+    assert timing.early_endings == 1
+
+
+async def test_a_signal_element_removed_and_created_again_does_not_cut_the_reply(
+        talk, copilot_app, data_dir):
+    url = copilot_app.url(pause_ms="2600", flicker_ms="800", recreate="1")
+    r, timing = await ask_once(talk, data_dir, url)
+    assert r.text == WHOLE
+
+
+async def test_an_instant_reply_whose_signal_never_turns_busy_ends_by_the_window(
+        talk, copilot_app, data_dir):
+    r, timing = await ask_once(talk, data_dir, copilot_app.url(steps="1", nostop="1"))
+    assert r.text == WHOLE and timing.end == "window"
+
+
+async def test_a_signal_already_busy_before_sending_does_not_count(talk, copilot_app, data_dir):
+    """The stop control shows before the prompt goes out (left over), hides when the reply
+    appears and never shows again while it streams with a pause."""
+    url = copilot_app.url(stale_stop="1", nostop="1", start_ms="600", pause_ms="1500")
+    r, timing = await ask_once(talk, data_dir, url)
+    assert r.text == WHOLE and timing.end == "window"
+
+
+async def test_the_fast_end_acts_only_in_the_modes_it_was_measured_in(talk, copilot_app,
+                                                                     data_dir):
+    menu = json.loads(MENU.read_text(encoding="utf-8"))
+    r, timing = await ask_once(talk, data_dir, copilot_app.url(modes="menu"), response_mode=menu)
+    assert timing.end == "signal"  # control: measured in auto
+    measured(data_dir, reuse=False, response_mode=menu)
+    async with talk(copilot_app.url(modes="menu")) as t:
+        r = await t.ask(t.session(), "fin ZQX-END-2", mode="deep")
+    assert r.status is RequestStatus.COMPLETED and r.text == make_reply("fin ZQX-END-2")
+    assert t.timings[0].end == "window"
+    measured(data_dir, reuse=False, response_mode=menu, fast_end=FAST_END | {"modes": ["auto", "deep"]})
+    async with talk(copilot_app.url(modes="menu")) as t:
+        r = await t.ask(t.session(), "fin ZQX-END-3", mode="deep")
+    assert t.timings[0].end == "signal"
+
+
+# Finding 2: the timings never change a question's outcome.
+
+
+async def test_a_corrupt_timings_file_does_not_change_the_answer(talk, copilot_app, data_dir,
+                                                                monkeypatch):
+    from harness.providers import copilot_timings
+
+    measured(data_dir, reuse=False, fast=False)
+    monkeypatch.setattr(copilot_timings, "TRIM_AT_BYTES", 1_000)
+    path = timings_path(data_dir)
+    path.write_bytes(b"\xff\xfe not utf-8 \x80" * 200 + b"\n")
+    async with talk() as t:
+        r = await t.ask(t.session(), "fin ZQX-END-1")
+    assert r.status is RequestStatus.COMPLETED, r.detail
+    assert r.text == WHOLE and copilot_app.prompt_count == 1
+
+
+async def test_a_directory_in_place_of_the_timings_file_does_not_change_the_answer(
+        talk, copilot_app, data_dir):
+    measured(data_dir, reuse=False, fast=False)
+    timings_path(data_dir).mkdir()
+    async with talk() as t:
+        r = await t.ask(t.session(), "fin ZQX-END-1")
+    assert r.status is RequestStatus.COMPLETED and r.text == WHOLE
+
+
+async def test_a_recording_that_raises_does_not_change_the_answer(talk, copilot_app, data_dir,
+                                                                 monkeypatch):
+    """Whatever the recording raises, the question that was sent keeps its answer; a
+    cancellation is not an Exception and is never caught there."""
+    from harness.providers import copilot_web
+
+    def boom(*args, **kwargs):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(copilot_web, "record_timings", boom)
+    measured(data_dir, reuse=False, fast=False)
+    async with talk() as t:
+        r = await t.ask(t.session(), "fin ZQX-END-1")
+    assert r.status is RequestStatus.COMPLETED, r.detail
+    assert r.text == WHOLE and copilot_app.prompt_count == 1
+
+
+# Finding 5: reuse stays off until the owner turns it on.
+
+
+async def test_reuse_is_off_unless_switched_on(talk, copilot_app, data_dir):
+    measured(data_dir, fast=False)
+    async with talk(HARNESS_COPILOT_REUSE_TAB="") as t:
+        s = t.session()
+        for n in (1, 2):
+            assert (await t.ask(s, f"q{n} ZQX-END-{n}")).status is RequestStatus.COMPLETED
+    assert t.paths() == ["reload", "reload"] and copilot_app.page_hits == 2
+
+
+# Finding 6: a question that did not end with an answer makes the next one reload; the idle
+# bound at its edge.
+
+
+async def test_after_an_uncertain_question_the_next_one_reloads(talk, copilot_app, data_dir):
+    """The first question answers (the tab is remembered), the second runs out of time after
+    sending: the third reloads in a new tab, not the remembered one."""
+    measured(data_dir, fast=False)
+    async with talk(copilot_app.url(pause_ms="5000")) as t:
+        s = t.session()
+        assert (await t.ask(s, "uno ZQX-END-1")).status is RequestStatus.COMPLETED
+        t.service._timeout_s = 4.0  # this question only: it ends before the reply does
+        second = await t.ask(s, "dos ZQX-END-2")
+        assert second.status is RequestStatus.UNCERTAIN, second.detail
+        t.service._timeout_s = 40.0
+        await t.ask(s, "tres ZQX-END-3")
+    assert t.timings[1].outcome == "uncertain"
+    assert t.timings[2].path == "reload" and t.timings[2].declined == "new tab"
+
+
+async def test_after_a_failed_question_the_next_one_reloads(talk, copilot_app, data_dir):
+    measured(data_dir, fast=False, response_mode=json.loads(MENU.read_text(encoding="utf-8")))
+    async with talk(copilot_app.url(modes="menu", mode_stuck="1")) as t:
+        s = t.session()
+        assert (await t.ask(s, "uno ZQX-END-1")).status is RequestStatus.COMPLETED
+        failed = await t.ask(s, "dos ZQX-END-2", mode="deep")
+        assert failed.status is RequestStatus.FAILED, failed.detail
+        third = await t.ask(s, "tres ZQX-END-3", mode="auto")  # `deep` stays chosen
+    assert third.status is RequestStatus.COMPLETED
+    assert t.timings[1].path == "reuse"  # the failed one still used the trusted tab
+    assert t.timings[2].path == "reload" and t.timings[2].declined == "new tab"
+
+
+async def test_after_a_cancelled_question_the_next_one_reloads(talk, copilot_app, data_dir):
+    import asyncio
+
+    measured(data_dir, fast=False)
+    async with talk(copilot_app.url(pause_ms="3000")) as t:
+        s = t.session()
+        await t.ask(s, "uno ZQX-END-1")
+        task = asyncio.ensure_future(t.service.ask(s, "dos ZQX-END-2"))
+        await wait_until(lambda: copilot_app.prompt_count == 2, 20, "the second prompt")
+        task.cancel()
+        with pytest.raises(BaseException):
+            await task
+        t.timings.append(t.provider.last_timings)
+        assert t.timings[-1].outcome == "cancelled"
+        await t.ask(s, "tres ZQX-END-3")
+    assert t.timings[-1].path == "reload" and t.timings[-1].declined == "new tab"
+
+
+@pytest.mark.parametrize("idle_s, path", [(119.0, "reuse"), (121.0, "reload")])
+async def test_the_idle_bound_at_its_edge(talk, copilot_app, data_dir, idle_s, path):
+    measured(data_dir, fast=False)
+    async with talk() as t:
+        s = t.session()
+        await t.ask(s, "uno ZQX-END-1")
+        t.provider._held.memory.at -= idle_s  # the answer came idle_s seconds ago
+        r = await t.ask(s, "dos ZQX-END-2")
+    assert r.status is RequestStatus.COMPLETED and t.timings[1].path == path
+    assert t.timings[1].declined == (None if path == "reuse" else "idle")

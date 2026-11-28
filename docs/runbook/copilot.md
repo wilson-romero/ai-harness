@@ -216,29 +216,34 @@ El resumen dice `response mode: confirmed auto, quick, deep` (o los que existan)
 
 Después, en la conversación: `/mode deep` y una pregunta. En `history`, la solicitud dice `mode deep` (o `mode quick (asked deep)` si la página cambió de modo sola).
 
-### Velocidad de cada pregunta: medir (`speed`, 8 + 3N envíos fijos)
+### Velocidad de cada pregunta: medir (`speed`, 12 + 3N envíos fijos)
 
-Desde el 2026-11-27 el proveedor puede preguntar en la pestaña ya abierta sin recargarla y terminar una respuesta por una señal medida en lugar de esperar 4 s sin cambios. **Nada de eso actúa sin medirlo**: sin las entradas `tab_reuse` y `fast_end` en `ui.json`, todo va como antes. Se miden con un solo comando, con la sesión iniciada (pasos 0 y 1) y un `ui.json` completo (paso 2):
+Desde el 2026-11-27 el proveedor puede preguntar en la pestaña ya abierta sin recargarla y terminar una respuesta por una señal medida en lugar de esperar 4 s sin cambios. **Nada de eso actúa sin medirlo**: sin las entradas `tab_reuse` y `fast_end` en `ui.json`, todo va como antes. Además, la reutilización de la pestaña está **apagada por defecto** aunque esté medida: se enciende con `HARNESS_COPILOT_REUSE_TAB=on` (ver «Lo que la pestaña reutilizada no ve»). Se miden con un solo comando, con la sesión iniciada (pasos 0 y 1) y un `ui.json` completo (paso 2). Antes de enviar nada, la sonda dice cuántos envíos hará y espera a que pulses Enter (Ctrl+C sale sin enviar):
 
 ```sh
-uv run python scripts/copilot_probe.py speed               # N = 5: 23 envíos
-uv run python scripts/copilot_probe.py speed --questions 3 # N = 3: 17 envíos
+uv run python scripts/copilot_probe.py speed                                         # 27 envíos (29 con deep medido)
+uv run python scripts/copilot_probe.py speed --questions 3                           # 21 envíos (23 con deep)
+uv run python scripts/copilot_probe.py speed --rounds 1 --questions 2 --skip-headless # mínimo que aún escribe las reglas: 10 envíos (12 con deep)
 ```
 
-1. **Reglas de fin (8 envíos):** dos chats nuevos con los cuatro prompts fijos de `measure`, muestreados. Por cada señal estructural y ventana corta (500 y 1000 ms) cuenta si se cumplió y si se adelantó alguna vez al texto completo. Vale solo con 8/8 y 0 adelantos.
-2. **Variantes (N envíos cada una):** N preguntas fijas en un chat nuevo con las optimizaciones **apagadas**, N **encendidas** y N **encendidas sin ventana**. Si una variante falla, las siguientes no se ejecutan.
+1. **Reglas de fin (6 por ronda, `--rounds` 1 o 2; +2 en `deep`):** en cada ronda, un chat nuevo con seis prompts fijos: los cuatro de `measure`, uno que pide una respuesta larga por fases (tres párrafos, una tabla y un bloque de código) y uno que suele traer búsqueda web y citas. Si el selector de modo está medido y tiene `deep`, dos de ellos se envían otra vez en un chat en `deep`. Cada respuesta se muestrea y se vuelve a leer 5 s después de asentarse. Por cada señal estructural y ventana corta (500 y 1000 ms), la regla es **temprana** si se dispara antes del texto completo, si su señal vuelve a «ocupado» en cualquier momento después de dispararse, o si el texto que habría devuelto no es el de la lectura 5 s después. Vale solo si se cumplió en todos los envíos sin ningún adelanto; `fast_end` guarda en qué modos se midió (`modes`) y en los demás modos la respuesta termina como antes.
+2. **Variantes (N envíos cada una, `--questions` 2 a 5):** N preguntas fijas en un chat nuevo con las optimizaciones **apagadas**, N **encendidas** y N **encendidas sin ventana** (esta última se omite con `--skip-headless`; nunca escribe nada en `ui.json`). Si una variante falla, las siguientes no se ejecutan. Si en la variante encendida el proveedor detecta un fin temprano (ver abajo), `fast_end` no se escribe.
 
-Qué guarda (`probe-speed-<fecha>.json`): duraciones por fase, camino, fin, recuentos y hashes; nunca texto, URL ni nombres. El resumen imprime la tabla por fases (mediana de las preguntas 2..N) de `off`, `on` y `headless`, `sends: X used of Y planned` y `headless: usable` o `headless: not usable (…)`, con `n/a` en la tabla en ese caso. En `ui.json` escribe solo lo confirmado (`to ui.json: fast_end, tab_reuse`) y quita lo que no; la variante sin ventana nunca escribe nada. Un `measure` posterior conserva las dos entradas si los localizadores no cambiaron.
+Qué guarda (`probe-speed-<fecha>.json`): duraciones por fase, camino, fin, recuentos y hashes; nunca texto, URL ni nombres. El resumen imprime la tabla por fases (mediana de las preguntas 2..N) de `off`, `on` y `headless`, `sends: X used of Y planned`, `early endings in the questions: N`, cuántos envíos cambiaron en la lectura de 5 s, y `headless: usable`, `headless: not usable (…)` o `headless: skipped`, con `n/a` en la tabla si no hay tiempo. En `ui.json` escribe solo lo confirmado (`to ui.json: fast_end, tab_reuse`) y quita lo que no. Un `measure` posterior conserva las dos entradas si los localizadores no cambiaron.
 
 Variables (todas `on`/`off`):
 
 | Variable | Por defecto | Qué hace |
 |---|---|---|
-| `HARNESS_COPILOT_REUSE_TAB` | `on` | Preguntar en la pestaña de confianza sin recargar (si `tab_reuse` está medido). |
-| `HARNESS_COPILOT_FAST_END` | `on` | Terminar por la señal medida (si `fast_end` está medido). |
+| `HARNESS_COPILOT_REUSE_TAB` | `off` | Preguntar en la pestaña de confianza sin recargar (si `tab_reuse` está medido). Enciéndela tú tras la medición real. |
+| `HARNESS_COPILOT_FAST_END` | `on` | Terminar por la señal medida (si `fast_end` está medido y la pregunta va en uno de sus `modes`). |
 | `HARNESS_COPILOT_TIMINGS` | `off` | Añadir a cada pregunta un aviso con el tiempo de cada fase. |
 | `HARNESS_COPILOT_HEADLESS` | `off` | Preguntar sin ventana. `copilot login` y la sonda siguen con ventana. |
 
-Los tiempos de cada pregunta se ven con `uv run python main.py history SESSION_ID --timings` (`timings (s): answered, path reuse, end signal, total …`). La pestaña solo se reutiliza si es la misma que respondió la pregunta anterior de esa sesión hace menos de 120 s y sigue mostrando exactamente esa conversación; si la tocas (otro chat, otra sesión), la pregunta recarga como antes. Si sin ventana una pregunta termina en `authentication_required` o `not ready in time`, la página no admite el modo sin ventana: quita `HARNESS_COPILOT_HEADLESS`.
+Los tiempos de cada pregunta se ven con `uv run python main.py history SESSION_ID --timings` (`timings (s): answered, path reuse, end signal, total …`; con `early endings N` si hubo fines tempranos). Si sin ventana una pregunta termina en `authentication_required` o `not ready in time`, la página no admite el modo sin ventana: quita `HARNESS_COPILOT_HEADLESS`.
+
+**Fin temprano.** Tras un fin por señal, y tras la espera del identificador y las comprobaciones de después, el proveedor vuelve a leer la respuesta y la señal hasta que pasa la ventana corta desde que la regla se cumplió (lo que ya duraron esas fases no se espera otra vez; como mucho, la ventana corta). Si el texto creció o la señal volvió a «ocupado», no devuelve el texto corto: sigue esperando con la regla antigua (4 s sin cambios) y lo cuenta como `early endings` en los tiempos. Una pausa de la página de más del doble de la ventana corta no se ve ahí: para eso está la medición, que no escribe la regla si alguno de sus envíos la tuvo.
+
+**Lo que la pestaña reutilizada no ve.** La pestaña solo se reutiliza si es la misma que respondió la pregunta anterior de esa sesión hace menos de 120 s y sigue mostrando exactamente esa conversación con los mismos turnos; si la tocas (otro chat, otra sesión), la pregunta recarga como antes. Pero sin recargar no se pregunta a Copilot por la conversación: si la borras en otro dispositivo y la pestaña la sigue mostrando, la pregunta se envía en esa pestaña (sin recarga no aparece la página de «conversación no encontrada», y la sesión no queda `closed`); y si la sesión caducó y un aviso tapa el chat sin el indicador de inicio de sesión medido, la pregunta puede acabar `uncertain` en lugar de `authentication_required`. Por eso está apagada por defecto.
 
 Pruebas reales (opcional, 5 envíos de prompts sintéticos fijos, con ventana): con las variables del paso 0, `uv run pytest -m copilot -p no:cacheprovider`. Sin esas variables se omiten con su motivo.

@@ -16,13 +16,13 @@ Premisas heredadas, comprobadas aquí el 2026-11-27 sobre `a9c51fe`:
 
 ### D1 · Tiempos por fases, solo duraciones
 
-**Qué.** `harness/providers/copilot_timings.py` define `TurnTimings`: `request_id`, `session_id`, `path` (`reload` | `reuse`), `declined` (por qué no se reutilizó la pestaña, una palabra de una lista cerrada), `end` (`window` | `signal` | `none`), `attempts`, `outcome` (`answered` | `uncertain` | `cancelled` | `failed`), `phases_ms` (fase → milisegundos, de una lista cerrada: `reuse_check`, `navigate`, `ready`, `settle`, `history`, `guard`, `mode`, `type`, `send`, `reply_start`, `reply_end`, `read`, `identifier`, `post`) y `total_ms`. El proveedor llena uno por pregunta, lo deja en `last_timings` y lo añade como una línea JSON a `HARNESS_DATA_DIR/copilot/timings.jsonl` (recortado a 1000 líneas al pasar de 512 KB). `history SESSION_ID --timings` muestra, bajo cada solicitud, `timings (s): answered, path reuse, end signal, total 2.3; reuse check 0.04, guard 0.02, …`. Con `HARNESS_COPILOT_TIMINGS=on` la misma línea sale como aviso de la pregunta.
+**Qué.** `harness/providers/copilot_timings.py` define `TurnTimings`: `request_id`, `session_id`, `path` (`reload` | `reuse`), `declined` (por qué no se reutilizó la pestaña, una palabra de una lista cerrada), `end` (`window` | `signal` | `none`), `attempts`, `outcome` (`answered` | `uncertain` | `cancelled` | `failed`), `phases_ms` (fase → milisegundos, de una lista cerrada: `reuse_check`, `navigate`, `ready`, `settle`, `history`, `guard`, `mode`, `type`, `send`, `reply_start`, `reply_end`, `read`, `identifier`, `post`, `recheck`), `total_ms` y `early_endings` (D7). El proveedor llena uno por pregunta, lo deja en `last_timings` y lo añade como una línea JSON a `HARNESS_DATA_DIR/copilot/timings.jsonl` (recortado a 1000 líneas al pasar de 512 KB). `history SESSION_ID --timings` muestra, bajo cada solicitud, `timings (s): answered, path reuse, end signal, total 2.3; reuse check 0.04, guard 0.02, …`. Con `HARNESS_COPILOT_TIMINGS=on` la misma línea sale como aviso de la pregunta.
 
 **Por qué.** Sin desglose no se sabe qué ganó cada optimización ni dónde se va el tiempo en la página real. Un fichero aparte evita una migración (otras ramas tienen la 010 y la 011) y nunca contiene texto: solo números y palabras de listas cerradas. `read_for` vuelve a validar cada línea (tipos, fases y palabras conocidas), así que un fichero manipulado no mete texto en la terminal. Escribirlo nunca hace fallar una pregunta.
 
 **Alternativas rechazadas.** (a) Columnas en `requests` (migración 012): toca `harness/storage/` y `service.py`, que otra rama cambia, por un dato de diagnóstico. (b) Solo un aviso por pregunta: se pierde al cerrar la terminal y no se puede comparar. (c) Guardar los tiempos en el log general: mezcla diagnóstico con eventos y no se puede leer por solicitud.
 
-**Impacto.** Requisito «Tiempos por fases sin texto»; tareas 1.x. La barra de progreso de otra rama lee `provider.last_timings` (sin tocar `harness/shell/` aquí).
+**Impacto.** Requisito «Tiempos por fases sin texto»; tareas 1.x. La barra de progreso y el bucle del agente (ya en `develop`) leen `provider.last_timings`, un atributo **público y estable**: su nombre y su tipo no cambian, vale `None` antes de la primera pregunta y se fija antes de que `ask` devuelva o falle, sea cual sea el resultado (sin tocar `harness/shell/` aquí). Los campos solo se añaden, nunca se quitan ni cambian de tipo.
 
 ### D2 · Preguntar en la pestaña de confianza sin recargar
 
@@ -45,19 +45,19 @@ Si algo falla, la palabra queda en `declined` y la pregunta sigue por el camino 
 
 **Impacto.** Requisito «Pestaña de confianza» y sus escenarios; tareas 2.x.
 
-**Límite (no se arregla aquí).** Un cambio hecho en otro dispositivo que la pestaña abierta **no pinta** (borrar la conversación, añadir un turno) no se ve sin recargar. Si la página real no actualiza la pestaña, el harness escribirá en una conversación que ya no existe o sin el aviso de turnos de más. Lo acotan los 120 s, la comprobación del identificador tras enviar (otra conversación da `uncertain` sin mostrar respuesta, como hoy) y el interruptor. La página sintética con `live=1` imita la conducta que sí actualiza (sale de la conversación borrada, pinta el turno nuevo, muestra la sesión cerrada) y las pruebas comprueban que entonces se rechaza.
+**Límite (no se arregla aquí; por eso D8 la deja apagada por defecto).** Un cambio hecho en otro dispositivo que la pestaña abierta **no pinta** (borrar la conversación, añadir un turno) no se ve sin recargar. Si la página real no actualiza la pestaña, el harness escribirá en una conversación que ya no existe (sin la página de «no encontrada» que da `closed`) o sin el aviso de turnos de más; y un aviso de sesión caducada que tape el chat sin el indicador medido deja la pregunta en `uncertain` en lugar de `authentication_required`. Lo acotan los 120 s, la comprobación del identificador tras enviar (otra conversación da `uncertain` sin mostrar respuesta, como hoy) y el interruptor, apagado por defecto. La página sintética con `live=1` imita la conducta que sí actualiza (sale de la conversación borrada, pinta el turno nuevo, muestra la sesión cerrada) y las pruebas comprueban que entonces se rechaza.
 
 ### D3 · Fin de la respuesta por una señal positiva medida
 
-**Qué.** `ui.json` acepta `fast_end: {signal, confirm_ms, sends, measured_at}`, con `signal` entre las estructurales (`stop_hidden`, `send_ready`, `done_control`, `aria_busy`; el control que vigila tiene que estar medido) y `confirm_ms` entre 300 y 2000. En `await_reply`, cada vuelta lee primero la señal y luego el texto (como la sonda). La respuesta termina por señal si:
+**Qué.** `ui.json` acepta `fast_end: {signal, confirm_ms, sends, modes, measured_at}`, con `signal` entre las estructurales (`stop_hidden`, `send_ready`, `done_control`, `aria_busy`; el control que vigila tiene que estar medido) y `confirm_ms` entre 300 y 2000. En `await_reply`, cada vuelta lee primero la señal y luego el texto (como la sonda). La respuesta termina por señal si:
 
-1. la señal se vio **ocupada** después de enviar (un botón de parar que nunca aparece no vale);
+1. la señal se vio **ocupada** después de enviar **y con la respuesta ya en la página** (un botón de parar que nunca aparece, o uno que ya estaba visible antes de que existiera la respuesta, no vale; D7);
 2. después está **libre sin interrupción** desde `done_since` (un parpadeo a ocupada lo reinicia);
 3. el texto, leído como lo devuelve el proveedor, no ha cambiado desde `since`, y han pasado `confirm_ms` desde el más tardío de `done_since` y `since`.
 
-La condición de siempre (señal medida **y** ventana de estabilidad) se comprueba antes en la misma vuelta y sigue valiendo: si la regla rápida no se cumple nunca, decide la ventana larga.
+La condición de siempre (señal medida **y** ventana de estabilidad) se comprueba antes en la misma vuelta y sigue valiendo: si la regla rápida no se cumple nunca, decide la ventana larga. La regla solo actúa en los modos de `modes`, y tras un fin por señal se vuelve a comprobar (D7).
 
-**Ventana corta: 500 ms (o 1000 ms si la sonda lo decide).** La sonda prueba 500 y 1000 ms por cada señal aplicable. 500 ms son cinco lecturas de 100 ms; la regla rápida añade dos condiciones que la ventana sola no tenía (la señal se vio ocupada y sigue libre), y la medida decide: una regla solo vale si en los 8 envíos se cumplió y nunca terminó antes de la verdad. Por debajo de 300 ms el esquema la rechaza (tres lecturas); por encima de 2000 ms no compensa frente a la ventana larga.
+**Ventana corta: 500 ms (o 1000 ms si la sonda lo decide).** La sonda prueba 500 y 1000 ms por cada señal aplicable. 500 ms son cinco lecturas de 100 ms; la regla rápida añade dos condiciones que la ventana sola no tenía (la señal se vio ocupada y sigue libre), y la medida decide: una regla solo vale si en todos los envíos se cumplió y nunca fue temprana (D7). Por debajo de 300 ms el esquema la rechaza (tres lecturas); por encima de 2000 ms no compensa frente a la ventana larga.
 
 **Por qué.** Esperar 4 s después de que el texto deja de cambiar es caro (Contexto). La ventana corta sola se adelantó en la página real; una señal estructural sola no puede ver un bloque añadido después del fin. Juntas, con la verdad de la sonda (texto completo que ya no cambia, incluido lo que llegue después del marcador), se mide si se adelantan.
 
@@ -69,11 +69,11 @@ La condición de siempre (señal medida **y** ventana de estabilidad) se comprue
 
 ### D4 · Interruptores y sin medida, como hoy
 
-**Qué.** `HARNESS_COPILOT_REUSE_TAB` y `HARNESS_COPILOT_FAST_END` aceptan `on`/`off` (vacío: `on`; otro valor: error de configuración). Cada optimización actúa solo si su entrada está en `ui.json` **y** su interruptor está encendido (`speed_for`). Sin `tab_reuse` ni `fast_end` en `ui.json`, el camino y las esperas son los de hoy: así se ve en los tiempos (`path reload`, `end window`, `settle` ≥ 2 s).
+**Qué.** `HARNESS_COPILOT_REUSE_TAB` y `HARNESS_COPILOT_FAST_END` aceptan `on`/`off` (vacío: `off` para la pestaña, D8, y `on` para el fin rápido; otro valor: error de configuración). Cada optimización actúa solo si su entrada está en `ui.json` **y** su interruptor está encendido (`speed_for`). Sin `tab_reuse` ni `fast_end` en `ui.json`, el camino y las esperas son los de hoy: así se ve en los tiempos (`path reload`, `end window`, `settle` ≥ 2 s).
 
-**Por qué.** Encendido por defecto porque una medida lo respalda; sin medida no hay nada que encender. El interruptor deja apagarlo sin tocar `ui.json` si en la página real algo no cuadra.
+**Por qué.** El fin rápido, encendido por defecto porque una medida lo respalda y su comprobación posterior nunca devuelve un texto más corto (D7); sin medida no hay nada que encender. La pestaña, apagada por defecto por lo que no ve (D8). El interruptor deja apagarlo sin tocar `ui.json` si en la página real algo no cuadra.
 
-**Alternativas rechazadas.** (a) Apagado por defecto: obligaría a configurarlo tras medirlo, y medir ya es la decisión. (b) Un solo interruptor: si una de las dos falla en la página real, se perdería también la otra.
+**Alternativas rechazadas.** (a) El fin rápido apagado por defecto: obligaría a configurarlo tras medirlo, y medir ya es la decisión. (b) Un solo interruptor: si una de las dos falla en la página real, se perdería también la otra.
 
 **Impacto.** Requisito «Interruptores»; tareas 4.x.
 
@@ -91,22 +91,60 @@ Si sin ventana la página se comporta distinto, nada nuevo decide: las guardas d
 
 ### D6 · Un solo comando de medida: `speed`
 
-**Qué.** `uv run python scripts/copilot_probe.py speed [--questions N]` (N de 2 a 5, por defecto 5). Necesita un `ui.json` completo (lo deja `measure`). Hace, en este orden:
+**Qué.** `uv run python scripts/copilot_probe.py speed [--questions N] [--rounds 1|2] [--skip-headless]` (N de 2 a 5, por defecto 5; 2 rondas). Antes de enviar nada dice el número de envíos previsto y espera a que la persona pulse Enter (D7). Necesita un `ui.json` completo (lo deja `measure`). Hace, en este orden:
 
-1. **Reglas de fin rápido**: 2 conversaciones nuevas × los 4 prompts fijos = **8 envíos**, muestreados cada 100 ms como en `measure` y leyendo también el texto como lo lee el proveedor. Por cada señal aplicable y ventana (500, 1000 ms) calcula cuándo dispararía la regla del proveedor (`fast_fire`, la misma lógica que D3) y si fue antes de la verdad (el marcador está y el texto ya no cambia hasta el final del muestreo). Válida = cumplida en 8/8 y 0 adelantos; se elige la de menor retraso medio.
-2. **Variantes**, cada una en una conversación nueva, con el proveedor de verdad y los prompts fijos `PROMPTS[i % 4]`: optimizaciones **apagadas** con ventana (N envíos), **encendidas** con ventana (N) y **encendidas sin ventana** (N). Cada respuesta se comprueba en memoria (marcador presente, no cortada) y se descarta. Una variante se para en la primera pregunta que no llega entera; si una variante falla, no se ejecuta la siguiente.
+1. **Reglas de fin rápido**: R conversaciones nuevas × los 6 prompts fijos de `SPEED_PROMPTS` (los 4 de `measure`, uno largo por fases y uno con búsqueda y citas) = **6R envíos**, más **2 en `deep`** si el selector de modo está medido (D7), muestreados cada 100 ms como en `measure` y leyendo también el texto como lo lee el proveedor. Por cada señal aplicable y ventana (500, 1000 ms) calcula cuándo dispararía la regla del proveedor (`fast_fire`, la misma lógica que D3) y si fue antes de la verdad (el marcador está y el texto ya no cambia hasta el final del muestreo). Válida = cumplida en todos los envíos y ninguno temprano (D7); se elige la de menor retraso medio.
+2. **Variantes**, cada una en una conversación nueva, con el proveedor de verdad y los prompts fijos `PROMPTS[i % 4]`: optimizaciones **apagadas** con ventana (N envíos), **encendidas** con ventana (N) y **encendidas sin ventana** (N; se omite con `--skip-headless`). Cada respuesta se comprueba en memoria (marcador presente, no cortada) y se descarta. Una variante se para en la primera pregunta que no llega entera; si una variante falla, no se ejecuta la siguiente.
 
-Total: **8 + 3N** envíos (23 por defecto); el resumen dice los usados y los previstos. Escribe `probe-speed-<fecha>.json` (solo duraciones, caminos, palabras fijas, recuentos y hashes; nunca texto, URL ni nombres) e imprime la tabla por fases (mediana de las preguntas 2..N) de las tres variantes. En `ui.json` escribe `fast_end` solo si una regla fue válida y las variantes con ventana llegaron enteras, y `tab_reuse` solo si todas las preguntas 2..N de la variante encendida reutilizaron la pestaña y llegaron enteras; lo que no se confirma se **quita**. La variante sin ventana nunca escribe nada: si no llegó entera, el resumen dice `headless: not usable (<error>)` y la tabla `n/a` en lugar de un tiempo.
+Total: **6R + 3N** envíos (27 por defecto, 29 con `deep` medido; el mínimo que aún escribe las reglas, `--rounds 1 --questions 2 --skip-headless`, son 10, o 12 con `deep`); el resumen dice los usados y los previstos. Escribe `probe-speed-<fecha>.json` (solo duraciones, caminos, palabras fijas, recuentos y hashes; nunca texto, URL ni nombres) e imprime la tabla por fases (mediana de las preguntas 2..N) de las tres variantes. En `ui.json` escribe `fast_end` solo si una regla fue válida, las variantes con ventana llegaron enteras y el proveedor no contó ningún fin temprano en ellas, y `tab_reuse` solo si todas las preguntas 2..N de la variante encendida reutilizaron la pestaña y llegaron enteras; lo que no se confirma se **quita**. La variante sin ventana nunca escribe nada: si no llegó entera, el resumen dice `headless: not usable (<error>)` y la tabla `n/a` en lugar de un tiempo.
 
 **Por qué.** Un solo comando que el coordinador ejecuta con el dueño, con un número de envíos conocido antes de empezar, todos de la lista fija. Medir con el proveedor de verdad (no con una imitación) hace que la cifra sea la del código que se usará.
 
-**Alternativas rechazadas.** (a) Medir las variantes con el muestreador de la sonda: mediría otra cosa que el proveedor. (b) Elegir la regla con las variantes: con 5 preguntas no hay muestra suficiente para afirmar 0 adelantos; los 8 envíos muestreados lo miden con la verdad. (c) Más envíos: cada uno es una pregunta real en la cuenta del dueño.
+**Alternativas rechazadas.** (a) Medir las variantes con el muestreador de la sonda: mediría otra cosa que el proveedor. (b) Elegir la regla con las variantes: con 5 preguntas no hay muestra suficiente para afirmar 0 adelantos; los 12 envíos muestreados lo miden con la verdad. (c) Más envíos: cada uno es una pregunta real en la cuenta del dueño.
 
 **Impacto.** Requisito «Medida en un solo comando»; tareas 6.x; runbook.
 
+### D7 · Un fin rápido nunca devuelve un texto más corto (revisión independiente, 2026-11-28)
+
+**Qué.** La revisión independiente midió que con `pause_ms=2000&flicker_ms=800` (el botón de parar se oculta 800 ms entre dos fases) la pregunta terminaba `completed` con 65 de 122 caracteres. Cuatro cambios:
+
+1. **Modos.** `fast_end.modes` dice en qué modos se midió (`auto` cubre la pregunta sin modo). Una pregunta en otro modo termina por la regla de siempre.
+2. **Comprobación posterior.** Tras un fin por señal, y tras la espera del identificador y las comprobaciones de después (`identifier`, `post`), `early_end` vuelve a leer la señal y el resumen del texto hasta que pasa `confirm_ms` desde que la regla se cumplió (fase `recheck`). Si el texto cambió o la señal volvió a «ocupado», el fin fue **temprano**: no devuelve el texto, suma `early_endings` en los tiempos, vuelve a esperar con la regla antigua (la ventana de estabilidad) y la regla rápida no vuelve a actuar en esa pregunta.
+3. **«Ocupado» solo con la respuesta en la página.** Un botón de parar ya visible antes de que exista la respuesta no cuenta como la respuesta ocupada (lo mismo en el proveedor y en `fast_fire`).
+4. **La sonda.** Una regla es temprana si se dispara antes de la verdad, si su señal vuelve a «ocupado» **en cualquier momento** después de dispararse, o si el texto que habría devuelto no coincide con una segunda lectura 5 s después de asentarse. Dos prompts fijos nuevos (uno largo por fases con tabla y código, uno con búsqueda y citas) y dos envíos en `deep` si el modo está medido. Un fin temprano que el proveedor cuente en la variante encendida también impide escribir `fast_end`. Antes de enviar, la sonda dice cuántos envíos hará y espera Enter.
+
+**Coste de la comprobación (≈ 0).** La espera de `recheck` es `max(0, confirm_ms − lo que ya tardaron identifier y post)`. En la página real el identificador llega segundos después de la respuesta, así que la ventana corta ya pasó y `recheck` es una lectura de la señal y del texto (milisegundos). En la página sintética el identificador ya está y `recheck` espera lo que queda de la ventana corta: como mucho `confirm_ms` (500 ms), frente a los 4 s de la ventana antigua. La tabla sintética lo mide (tareas 9.x).
+
+**Por qué.** Un texto cortado es el único fallo que este cambio no puede permitirse: la regla antigua tardaba, pero no cortaba. La comprobación después de la espera del identificador cuesta casi nada porque reutiliza tiempo que ya se gasta, y convierte un corte en una espera más larga. La sonda es la otra mitad: una pausa más larga que el doble de la ventana corta no la ve la comprobación, y por eso la sonda la busca de tres maneras.
+
+**Alternativas rechazadas.** (a) Alargar la ventana corta: a 2 s ya no compensa frente a la ventana larga, y una pausa más larga seguiría cortando. (b) Exigir además la ventana de estabilidad entera: es la regla antigua. (c) Esperar a ciegas tras cada fin rápido: cuesta siempre lo mismo y, sin volver al bucle, solo cambia cuánto se tarda en cortar. (d) Devolver el texto corto con un aviso: un texto incompleto presentado como respuesta.
+
+**Impacto.** Requisito «Fin por señal positiva» (escenarios de pausa entre fases, bloque tardío, señal recreada, respuesta instantánea, señal ocupada antes de enviar, modos) y «Medida en un solo comando»; tareas 9.x.
+
+### D8 · La pestaña reutilizada, apagada por defecto (revisión independiente, 2026-11-28)
+
+**Qué.** `HARNESS_COPILOT_REUSE_TAB` vacío es `off`. Aunque `tab_reuse` esté medido, la pestaña solo se reutiliza si el dueño lo enciende, después de la medida real. El README y el runbook dicen exactamente qué no ve (límite de D2).
+
+**Por qué.** Hay una comprobación barata que no cuesta la recarga (pedir la conversación por su dirección sin navegar), pero la página real no tiene una API medida para ello, y adivinarla sería una suposición. Lo que sí se puede hacer es decir el límite y dejar la decisión al dueño con la cifra delante.
+
+**Alternativas rechazadas.** (a) Una petición a la página para saber si la conversación existe: no está medida, y una petición inventada a un servicio real no es una comprobación. (b) Recargar solo a veces: el caso que importa (una conversación borrada en otro sitio) no avisa de cuándo pasa. (c) Mantenerla encendida con el aviso: el README decía «si ya no existe, no envía nada», y en ese camino no era verdad.
+
+**Impacto.** Requisitos «Pestaña de confianza» e «Interruptores»; README, runbook, `.env.example`; tareas 9.x.
+
+### D9 · Los tiempos nunca cambian el resultado (revisión independiente, 2026-11-28)
+
+**Qué.** `record` captura cualquier `Exception` (nunca `CancelledError` ni `KeyboardInterrupt`, que son `BaseException`) y `ask` vuelve a capturar alrededor de la llamada, solo de la grabación. El recorte lee con `errors="replace"`. La carpeta `copilot/` y el fichero (también la copia recortada) se crean con `private_dir`/`private_file` (0700/0600). Al leer, cada campo se valida por tipo y límites (identificadores imprimibles de hasta 64 caracteres, milisegundos de 0 a 24 h, intentos 0–2, fines tempranos 0–100, fases conocidas, campos conocidos), las líneas de más de 4096 caracteres se saltan y un JSON demasiado anidado (`RecursionError`) también.
+
+**Por qué.** Una pregunta ya enviada que termina `failed` porque el fichero de tiempos estaba corrupto es un resultado falso; y `history --timings` no debe caer por una línea manipulada.
+
+**Alternativas rechazadas.** (a) Capturar alrededor de toda la pregunta: escondería errores de la petición. (b) Borrar el fichero corrupto: es del dueño, y borrarlo esconde que pasó algo.
+
+**Impacto.** Requisito «Tiempos por fases sin texto»; tareas 9.x.
+
 ## Riesgos
 
-- [La página real no pinta un cambio hecho en otro dispositivo] → límite de D2: 120 s de inactividad, identificador comprobado tras enviar, interruptor `HARNESS_COPILOT_REUSE_TAB=off`.
+- [La página real no pinta un cambio hecho en otro dispositivo] → límite de D2: 120 s de inactividad, identificador comprobado tras enviar, y la reutilización apagada por defecto (D8).
+- [Una pausa entre fases más larga que el doble de la ventana corta] → la comprobación posterior no la ve; la sonda sí (señal de vuelta a ocupada, lectura 5 s después) y entonces no escribe `fast_end` (D7).
 - [La página real añade un bloque después de la ventana corta] → la sonda lo cuenta como adelanto y no escribe `fast_end`; interruptor `HARNESS_COPILOT_FAST_END=off`.
 - [La señal medida deja de funcionar tras un rediseño] → sin verla ocupada, la regla rápida no dispara y decide la ventana larga: más lento, nunca cortado.
 - [Sin ventana la página pide verificación] → las guardas lo rechazan antes de escribir; la sonda dice «not usable»; apagado por defecto.

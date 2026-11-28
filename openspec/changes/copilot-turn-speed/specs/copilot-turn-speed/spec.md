@@ -12,8 +12,16 @@ Cada pregunta a Copilot Web SHALL registrar la duración de cada fase, el camino
 - **THEN** cada solicitud muestra una línea con resultado, camino, fin, total y la duración de cada fase, y sin `--timings` esas líneas no aparecen
 
 #### Scenario: Un registro manipulado no llega a la terminal
-- **WHEN** el fichero de tiempos contiene una línea con caracteres de control, una fase desconocida o un motivo que no es de la lista
-- **THEN** esa línea no se muestra
+- **WHEN** el fichero de tiempos contiene una línea con caracteres de control, una fase desconocida, un motivo que no es de la lista, un campo de otro tipo o fuera de sus límites, o un JSON anidado sin fin
+- **THEN** esa línea no se muestra y las demás sí
+
+#### Scenario: Un fichero de tiempos roto no cambia la pregunta
+- **WHEN** el fichero de tiempos no es UTF-8, no se puede escribir o es una carpeta
+- **THEN** la pregunta termina `completed` con su respuesta entera
+
+#### Scenario: Los tiempos solo los lee su dueño
+- **WHEN** el harness crea la carpeta y el fichero de tiempos, o los recorta
+- **THEN** la carpeta es 0700 y el fichero 0600 donde el sistema tiene esos permisos
 
 ### Requirement: Pestaña de confianza
 Con la reutilización medida y encendida, una pregunta SHALL hacerse sin recargar solo si la pestaña es de confianza: la que respondió la pregunta anterior de esta sesión en esta conversación hace menos de 120 s, con su dirección en el host configurado, el chat listo, los mismos turnos que mostraba, sin respuesta en curso y con el editor vacío. Ante cualquier duda SHALL recargar. Toda guarda del camino de siempre SHALL valer también en la pestaña reutilizada.
@@ -48,10 +56,18 @@ Con la reutilización medida y encendida, una pregunta SHALL hacerse sin recarga
 
 #### Scenario: Demasiado tiempo sin usar
 - **WHEN** la pestaña lleva más tiempo sin responder que el límite de inactividad
-- **THEN** la pregunta recarga
+- **THEN** la pregunta recarga, y a 1 s por debajo del límite no recarga
+
+#### Scenario: Tras una pregunta sin respuesta, recarga
+- **WHEN** una pregunta termina `uncertain`, `failed` o cancelada
+- **THEN** la pregunta siguiente de la sesión recarga
+
+#### Scenario: Apagada por defecto
+- **WHEN** la reutilización está medida y `HARNESS_COPILOT_REUSE_TAB` está vacío
+- **THEN** cada pregunta recarga
 
 ### Requirement: Fin por señal positiva
-Con una regla de fin rápido medida en `ui.json` y encendida, una respuesta SHALL darse por terminada antes de la ventana de estabilidad solo si la señal medida se vio ocupada después de enviar, luego libre sin interrupción, y el texto no cambió durante la ventana corta de confirmación. En cualquier otro caso SHALL decidir la ventana de estabilidad de siempre. Una respuesta que aún crece no SHALL devolverse como `completed`.
+Con una regla de fin rápido medida y encendida, en un modo en que se midió, una respuesta SHALL darse por terminada antes de la ventana de estabilidad solo si la señal se vio ocupada con la respuesta ya en la página, luego libre sin interrupción, y el texto no cambió en la ventana corta. Si después el texto crece o la señal vuelve a ocupada, SHALL seguir esperando y contarlo como fin temprano. Nunca SHALL devolver un texto más corto.
 
 #### Scenario: La señal termina antes que la ventana
 - **WHEN** una respuesta termina y su señal medida queda libre
@@ -77,8 +93,32 @@ Con una regla de fin rápido medida en `ui.json` y encendida, una respuesta SHAL
 - **WHEN** la página añade un bloque en varios trozos después de que la señal quede libre
 - **THEN** la respuesta devuelta incluye el bloque entero
 
+#### Scenario: Una pausa libre entre dos fases
+- **WHEN** a mitad de la respuesta la señal queda libre 0,7 u 0,8 s, más que la ventana corta, y luego la respuesta sigue
+- **THEN** la respuesta se devuelve entera, se envió una vez y los tiempos cuentan un fin temprano
+
+#### Scenario: Un bloque tardío tras un momento quieto
+- **WHEN** 0,8 s después de que la respuesta parezca terminada llega un bloque de citas
+- **THEN** la respuesta devuelta incluye el bloque y los tiempos cuentan un fin temprano
+
+#### Scenario: El elemento de la señal se quita y se crea otro
+- **WHEN** a mitad de la respuesta el botón de parar desaparece de la página y vuelve como un elemento nuevo
+- **THEN** la respuesta se devuelve entera
+
+#### Scenario: Una respuesta instantánea
+- **WHEN** la respuesta aparece entera de una vez y la señal nunca se ve ocupada
+- **THEN** decide la ventana de estabilidad y la respuesta se devuelve entera
+
+#### Scenario: La señal ya estaba ocupada antes de enviar
+- **WHEN** el botón de parar se ve antes de enviar, se oculta al aparecer la respuesta y no vuelve
+- **THEN** decide la ventana de estabilidad y la respuesta se devuelve entera
+
+#### Scenario: Un modo en que no se midió
+- **WHEN** la regla se midió solo en `auto` y la pregunta va en `deep`
+- **THEN** decide la ventana de estabilidad, y si se midió también en `deep`, la regla actúa
+
 ### Requirement: Interruptores
-Cada optimización SHALL actuar solo si la sonda la midió y su interruptor (`HARNESS_COPILOT_REUSE_TAB`, `HARNESS_COPILOT_FAST_END`, `on` u `off`, `on` si está vacío) está encendido. Sin la medida, el camino y las esperas SHALL ser los de antes de este cambio. Un valor que no sea `on` ni `off` SHALL rechazarse como error de configuración.
+Cada optimización SHALL actuar solo si la sonda la midió y su interruptor (`HARNESS_COPILOT_REUSE_TAB`, `off` si está vacío; `HARNESS_COPILOT_FAST_END`, `on` si está vacío) está encendido. Sin la medida, el camino y las esperas SHALL ser los de antes de este cambio. Un valor que no sea `on` ni `off` SHALL rechazarse como error de configuración.
 
 #### Scenario: Sin medida, como antes
 - **WHEN** `ui.json` no tiene regla de fin rápido ni reutilización y los interruptores están encendidos
@@ -112,11 +152,11 @@ Las preguntas SHALL hacerse con la ventana de Edge visible salvo que la persona 
 - **THEN** Edge se abre con ventana
 
 ### Requirement: Medida en un solo comando
-El paso `speed` de la sonda SHALL medir en un solo comando las reglas de fin rápido y las preguntas con las optimizaciones apagadas, encendidas y encendidas sin ventana, con prompts de la lista fija y como mucho los envíos que anuncia (8 más 3 por pregunta). SHALL imprimir la tabla por fases y guardar solo duraciones, caminos, recuentos y hashes. En `ui.json` SHALL escribir solo lo confirmado. Sin ventana, una pregunta que no llega entera SHALL dar «not usable», no un tiempo.
+El paso `speed` SHALL medir en un comando las reglas de fin rápido y las preguntas con las optimizaciones apagadas, encendidas y sin ventana, con prompts fijos y como mucho los envíos que anuncia antes de que la persona pulse Enter. Una regla que se adelanta, cuya señal vuelve a ocupada o cuyo texto cambia en una lectura 5 s después SHALL no escribirse. SHALL guardar solo duraciones, recuentos y hashes. Sin ventana, sin respuesta entera SHALL dar «not usable».
 
 #### Scenario: Una medida completa
-- **WHEN** el coordinador ejecuta `speed --questions 2` sobre una página que se comporta bien
-- **THEN** la página recibe exactamente 14 prompts, todos de la lista fija, `ui.json` gana la regla de fin rápido y la reutilización, y ni el resumen ni el resultado contienen texto de las respuestas
+- **WHEN** el coordinador ejecuta `speed --questions 2` sobre una página que se comporta bien y pulsa Enter
+- **THEN** la página recibe exactamente 18 prompts, todos de la lista fija, `ui.json` gana la regla de fin rápido y la reutilización, y ni el resumen ni el resultado contienen texto de las respuestas
 
 #### Scenario: Una regla que cortaría un bloque tardío
 - **WHEN** la página añade un bloque 1,5 s después del fin de cada respuesta
@@ -125,6 +165,22 @@ El paso `speed` de la sonda SHALL medir en un solo comando las reglas de fin rá
 #### Scenario: Sin ventana la página es distinta
 - **WHEN** sin ventana la página pide iniciar sesión o tiene otra estructura
 - **THEN** la variante sin ventana no escribe nada en la página y el resumen dice «not usable» en lugar de un tiempo
+
+#### Scenario: Sin Enter no envía
+- **WHEN** la persona no pulsa Enter tras el anuncio de envíos
+- **THEN** el paso termina sin enviar nada
+
+#### Scenario: Una página que se queda quieta entre fases
+- **WHEN** la página oculta el botón de parar 0,8 s a mitad de cada respuesta
+- **THEN** la regla de 500 ms del botón de parar se adelanta en cada envío y no se elige, y la de 1000 ms, que dura más que la pausa, sigue valiendo
+
+#### Scenario: Un bloque que solo ve la lectura tardía
+- **WHEN** la página añade un bloque 5 s después del fin, cuando el muestreo ya terminó
+- **THEN** la lectura 5 s después lo ve y ninguna regla se escribe
+
+#### Scenario: Con `deep` medido
+- **WHEN** el selector de modo está medido con `deep`
+- **THEN** dos envíos van en `deep` y la regla escrita dice que se midió en `auto` y `deep`
 
 #### Scenario: Sin medida previa no envía
 - **WHEN** no hay `ui.json`

@@ -4,6 +4,8 @@ switches, the timings file and the probe's fast-end rule on sampled sequences.""
 from __future__ import annotations
 
 import json
+import os
+import stat
 
 import pytest
 from pydantic import ValidationError
@@ -18,7 +20,8 @@ from tests.browser.test_copilot_probe import load_probe
 from tests.conftest import REPO_ROOT
 
 SYNTHETIC = REPO_ROOT / "tests" / "fixtures" / "copilot_ui" / "ui.json"
-FAST = {"signal": "stop_hidden", "confirm_ms": 500, "sends": 8, "measured_at": "2026-11-27T00:00:00Z"}
+FAST = {"signal": "stop_hidden", "confirm_ms": 500, "sends": 12, "modes": ["auto"],
+        "measured_at": "2026-11-27T00:00:00Z"}
 REUSE = {"questions": 4, "measured_at": "2026-11-27T00:00:00Z"}
 
 
@@ -58,11 +61,12 @@ def test_without_the_measurement_both_optimisations_stay_off():
 
 def test_each_switch_turns_off_only_its_own_optimisation():
     m = measurement(fast_end=FAST, tab_reuse=REUSE)
-    on = speed_for(Settings.from_env({}), m)
+    on = speed_for(Settings.from_env({"HARNESS_COPILOT_REUSE_TAB": "on"}), m)
     assert on.reuse_tab is True and on.fast_end is not None
     no_reuse = speed_for(Settings.from_env({"HARNESS_COPILOT_REUSE_TAB": "off"}), m)
     assert no_reuse.reuse_tab is False and no_reuse.fast_end is not None
-    no_fast = speed_for(Settings.from_env({"HARNESS_COPILOT_FAST_END": "off"}), m)
+    no_fast = speed_for(Settings.from_env({"HARNESS_COPILOT_FAST_END": "off",
+                                           "HARNESS_COPILOT_REUSE_TAB": "on"}), m)
     assert no_fast.reuse_tab is True and no_fast.fast_end is None
 
 
@@ -75,8 +79,23 @@ def test_a_switch_takes_only_on_or_off(key):
 
 def test_defaults():
     s = Settings.from_env({})
+    # Review 2026-11-28, finding 5: reusing the tab stays off until the owner turns it on.
     assert (s.copilot_reuse_tab, s.copilot_fast_end, s.copilot_timings, s.copilot_headless) == (
-        True, True, False, False)
+        False, True, False, False)
+
+
+def test_tab_reuse_measured_but_not_switched_on_stays_off():
+    assert speed_for(Settings.from_env({}), measurement(tab_reuse=REUSE)).reuse_tab is False
+
+
+def test_a_fast_end_says_in_which_modes_it_was_measured():
+    with pytest.raises(ValidationError):
+        measurement(fast_end={k: v for k, v in FAST.items() if k != "modes"})
+    with pytest.raises(ValidationError):
+        measurement(fast_end=FAST | {"modes": []})
+    with pytest.raises(ValidationError):
+        measurement(fast_end=FAST | {"modes": ["fast"]})
+    assert measurement(fast_end=FAST | {"modes": ["auto", "deep"]}).fast_end.modes == ["auto", "deep"]
 
 
 # -- timings file ------------------------------------------------------------------------------
@@ -178,5 +197,183 @@ def test_on_a_tie_the_signal_measure_chose_wins(probe):
     assert probe.choose_fast(summary, "stop_hidden")["signal"] == "stop_hidden"
 
 
-def test_the_announced_sends(probe):
-    assert probe.speed_sends(5) == 8 + 3 * 5 == 23
+# -- review 2026-11-28: timings never change a question; private; tampered lines skipped ------
+
+owner_only = pytest.mark.skipif(not hasattr(os, "getuid"), reason="no POSIX mode bits here")
+
+
+def answered(request_id: str = "r1") -> TurnTimings:
+    t = TurnTimings(request_id=request_id, session_id="s", outcome="answered")
+    t.add("navigate", 0.25)
+    return t
+
+
+def test_a_corrupt_timings_file_never_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(copilot_timings, "TRIM_AT_BYTES", 1_000)
+    path = timings_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"\xff\xfe not utf-8 \x80" * 200 + b"\n")
+    record(tmp_path, answered())  # no exception, whatever the file holds
+    assert "r1" in read_for(tmp_path, ["r1"])
+    path.read_text(encoding="utf-8")  # the trim still ran: the bytes were read as replaced
+
+
+def test_a_directory_in_place_of_the_timings_file_never_raises(tmp_path):
+    timings_path(tmp_path).mkdir(parents=True)
+    record(tmp_path, answered())
+
+
+@owner_only
+def test_an_unwritable_timings_directory_never_raises(tmp_path):
+    (tmp_path / "copilot").mkdir()
+    (tmp_path / "copilot").chmod(0o500)
+    try:
+        record(tmp_path, answered())
+    finally:
+        (tmp_path / "copilot").chmod(0o700)
+
+
+def test_recording_never_raises_whatever_goes_wrong(tmp_path, monkeypatch):
+    def broken(*args, **kwargs):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(copilot_timings.json, "dumps", broken)
+    record(tmp_path, answered())
+
+
+@owner_only
+def test_the_timings_file_and_its_folder_are_owner_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(copilot_timings, "TRIM_AT_BYTES", 300)
+    previous = os.umask(0o022)
+    try:
+        for n in range(5):  # the third line passes 300 bytes: the trimmed copy too
+            record(tmp_path, answered(f"r{n}"))
+    finally:
+        os.umask(previous)
+    path = timings_path(tmp_path)
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+GOOD = {"request_id": "r1", "session_id": "s", "path": "reload", "declined": None,
+        "end": "window", "attempts": 1, "outcome": "answered", "phases_ms": {"navigate": 400},
+        "total_ms": 400, "at": "2026-11-28T00:00:00+00:00", "early_endings": 0}
+
+
+@pytest.mark.parametrize("change", [
+    {"total_ms": "abc"}, {"total_ms": -1}, {"total_ms": 10**12}, {"total_ms": True},
+    {"attempts": "1"}, {"attempts": 99}, {"phases_ms": {"navigate": "1"}},
+    {"phases_ms": {"navigate": -5}}, {"phases_ms": []}, {"session_id": 7},
+    {"session_id": "\x1b[2J"}, {"at": "\x1b]0;x\x07"}, {"early_endings": "x"},
+    {"request_id": "r1", "extra": 1},
+])
+def test_a_line_with_a_bad_field_is_skipped(tmp_path, change):
+    path = timings_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(GOOD | change) + "\n", encoding="utf-8")
+    assert read_for(tmp_path, ["r1"]) == {}
+
+
+def test_control_a_good_line_is_read(tmp_path):
+    path = timings_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(GOOD) + "\n", encoding="utf-8")
+    assert read_for(tmp_path, ["r1"])["r1"].total_ms == 400
+
+
+def test_a_deeply_nested_line_is_skipped(tmp_path):
+    path = timings_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    # 2000 levels: within the line bound (4096), beyond what json.loads can nest
+    path.write_text("[" * 2000 + "]" * 2000 + "\n" + json.dumps(GOOD) + "\n",
+                    encoding="utf-8")
+    assert list(read_for(tmp_path, ["r1"])) == ["r1"]  # control: the good line still reads
+
+
+def test_nesting_beyond_the_parser_is_skipped(tmp_path, monkeypatch):
+    """Defence in depth behind the line bound: a JSON nested past what the parser can take
+    (RecursionError) is skipped too."""
+    monkeypatch.setattr(copilot_timings, "MAX_LINE", 10**7)
+    path = timings_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("[" * 200_000 + "]" * 200_000 + "\n" + json.dumps(GOOD) + "\n",
+                    encoding="utf-8")
+    assert list(read_for(tmp_path, ["r1"])) == ["r1"]
+
+
+def test_an_overlong_line_is_skipped(tmp_path):
+    path = timings_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(GOOD) + " " * 5000 + "\n", encoding="utf-8")  # valid, too long
+    assert read_for(tmp_path, ["r1"]) == {}
+
+
+# -- review 2026-11-28: the probe's rule ------------------------------------------------------
+
+
+def test_busy_seen_before_the_reply_exists_does_not_count(probe):
+    """The signal already busy before the answer appears (a stale stop button) is not the
+    reply being busy: without busy seen on the reply, the rule never fires."""
+    s = samples(probe, [(0, True, None), (100, False, None), (200, False, "a"),
+                        (800, False, "a END"), (1500, False, "a END")])
+    assert probe.fast_fire(s, "stop_hidden", 500) is None
+
+
+def test_busy_again_after_the_rule_fired_is_early(probe):
+    """The text never changes, so only the signal coming back to busy shows the end was
+    early (an idle gap between two phases of the reply)."""
+    s = samples(probe, [(0, True, "a END"), (100, False, "a END"), (700, False, "a END"),
+                        (900, True, "a END"), (1000, False, "a END"), (5000, False, "a END")])
+    analysis = probe.analyse_fast(s, probe_locators(), late_digest=probe.text_hash("a END"))
+    assert analysis["rules"]["stop_hidden+500"]["early"] is True
+
+
+def test_a_late_read_that_differs_makes_the_rule_early(probe):
+    s = samples(probe, [(0, True, "a"), (100, False, "a END"), (700, False, "a END"),
+                        (5000, False, "a END")])
+    good = probe.analyse_fast(s, probe_locators(), late_digest=probe.text_hash("a END"))
+    assert good["rules"]["stop_hidden+500"]["early"] is False  # control
+    late = probe.analyse_fast(s, probe_locators(), late_digest=probe.text_hash("a END cites"))
+    assert late["rules"]["stop_hidden+500"]["early"] is True
+    assert late["late_changed"] is True
+
+
+def test_the_planned_sends_and_the_smallest_run(probe):
+    assert probe.speed_sends(5) == 2 * 6 + 3 * 5 == 27
+    assert probe.speed_sends(5, deep=True) == 2 * 6 + 2 + 3 * 5
+    assert probe.speed_sends(2, rounds=1, headless=False) == 6 + 2 * 2 == 10
+    assert len(probe.SPEED_PROMPTS) == 6 and set(probe.PROMPTS) < set(probe.SPEED_PROMPTS)
+
+
+def probe_locators():
+    from harness.providers.copilot_ui import Locators
+
+    return Locators.model_validate(json.loads(SYNTHETIC.read_text(encoding="utf-8"))["locators"])
+
+
+def test_last_timings_is_a_stable_public_attribute(tmp_path):
+    """The agent loop on develop reads `provider.last_timings`: None before any question, and
+    a `TurnTimings` with these fields after (fields may be added, never removed)."""
+    from harness.providers.copilot_web import CopilotWebProvider
+
+    provider = CopilotWebProvider(Settings.from_env({"HARNESS_DATA_DIR": str(tmp_path)}))
+    assert provider.last_timings is None
+    assert {"request_id", "session_id", "path", "declined", "end", "attempts", "outcome",
+            "phases_ms", "total_ms", "early_endings"} <= set(TurnTimings.__dataclass_fields__)
+
+
+def arm(early: int = 0, n: int = 2) -> list[dict]:
+    return [{"error": None, "whole": True, "outcome": "answered", "sends": 1,
+             "same_conversation": True, "path": "reload" if q == 0 else "reuse",
+             "early_endings": early if q == 1 else 0} for q in range(n)]
+
+
+@pytest.mark.parametrize("early, written", [(0, True), (1, False)])
+def test_finish_speed_refuses_a_rule_the_provider_found_early(probe, early, written):
+    result = {"questions": 2, "end_sends": [{}] * 12, "end_sends_planned": 12,
+              "fast_end_candidate": {"signal": "stop_hidden", "confirm_ms": 500, "modes": ["auto"]},
+              "measured_at": "2026-11-28T00:00:00Z",
+              "arms": {"off": arm(), "on": arm(early), "headless": arm()}}
+    probe.finish_speed(result)
+    assert ("fast_end" in result["write"]) is written and result["early_endings"] == early
+    assert "tab_reuse" in result["write"]  # the reuse is measured apart
