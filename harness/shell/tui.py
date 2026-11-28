@@ -857,6 +857,7 @@ class SidePanel(Static):
             entry("Last request", self.working or panel.last_request)
             if panel.loop != "-":
                 entry("Loop", panel.loop)
+            entry("Workspace", panel.workspace)
             entry("Memory", f"{len(panel.notes)} note(s) in the last question")
             for note in panel.notes[:PANEL_NOTES]:
                 lines.extend([(f"  {note}", "dim"), "\n"])

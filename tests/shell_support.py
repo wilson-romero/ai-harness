@@ -18,6 +18,7 @@ from harness.providers.base import ProviderError
 from harness.shell.conversation import FOREIGN_PREFIX, Conversation, ConversationDeps
 from harness.shell.terminal import WaitInterrupted
 from harness.skills.config import SkillSettings
+from tests.mcp_support import conversation_environ
 from tests.skill_support import FIXTURES
 
 INTERRUPT = object()  # Ctrl+C while the conversation waits for a line, or at the approval prompt
@@ -154,7 +155,9 @@ def make_conversation(
     engine_options: Mapping | None = None,
     columns: int = 10_000,  # a terminal this wide never cuts a line; the cut is tested apart
     answer_notice: str | None = None,  # `chat` passes CONCISE_NOTICE unless switched off
-    environ: Mapping[str, str] | None = None,  # `/plan`: the MCP servers' environment
+    # `/plan`, `/agent`: settings over this process's environment (`conversation_environ`),
+    # never alone, since the MCP processes start from it. None: `os.environ` itself.
+    environ: Mapping[str, str] | None = None,
     mcp_config=None,  # `/plan`: a callable giving the allowlist
     clock=None,  # `/plan`: the approval's clock
     deep_timeout_s: float | None = None,  # response-mode D6: a `deep` question's deadline
@@ -186,7 +189,7 @@ def make_conversation(
         effects=effects,
         engine_options=engine_options,
         columns=lambda: columns,
-        environ=environ,
+        environ=conversation_environ(environ) if environ is not None else None,
         mcp_config=mcp_config,
         clock=clock,
     ))

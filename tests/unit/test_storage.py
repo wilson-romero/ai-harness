@@ -37,7 +37,7 @@ def test_first_run_creates_the_schema(conn):
     session_core = {"sessions", "requests", "messages", "audit_events", "schema_migrations"}
     assert tables == session_core | {
         "request_context", "skill_runs", "skill_steps", "approvals", "tool_calls",
-        "effect_sources", "plan_runs", "loop_runs", "loop_turns",
+        "effect_sources", "plan_runs", "loop_runs", "loop_turns", "workspace_events", "workspace_consents",
     }
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
 
@@ -52,7 +52,7 @@ def test_migrating_twice_changes_nothing(data_dir):
     assert migrate(second) == []
     after = second.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
     assert [tuple(r) for r in after] == [tuple(r) for r in before]
-    assert [r["version"] for r in after] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13]
+    assert [r["version"] for r in after] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13]
     assert repo.get_session(second, session.session_id) == session
     second.close()
 
@@ -243,7 +243,7 @@ def test_a_database_at_008_upgrades_to_009_and_keeps_its_rows(data_dir, tmp_path
     session = _new_session(conn, "A")
     with transaction(conn):
         conn.execute("UPDATE sessions SET response_mode = 'deep' WHERE name = 'A'")
-    assert migrate(conn) == [9, 10, 13]  # and 010 (A2), which keeps every plan row, and 013
+    assert migrate(conn) == [9, 10, 11, 13]  # and 010 (A2), which keeps every plan row, 011 and 013
     assert conn.execute("SELECT response_mode FROM sessions WHERE session_id = ?",
                         (str(session.session_id),)).fetchone()[0] == "deep"
     assert conn.execute("SELECT COUNT(*) FROM plan_runs").fetchone()[0] == 0
@@ -268,7 +268,7 @@ def test_migration_007_unbinds_every_session_of_a_shared_reference(data_dir, tmp
         repo.bind_remote_ref(conn, a.session_id, "conv-shared")
         repo.bind_remote_ref(conn, b.session_id, "conv-shared")  # allowed before 007
         repo.bind_remote_ref(conn, c.session_id, "conv-own")
-    assert migrate(conn) == [7, 8, 9, 10, 13]  # and 008 (response-mode), 009, 010, 013 (code-mode)
+    assert migrate(conn) == [7, 8, 9, 10, 11, 13]  # and 008, 009, 010, 013 (code-mode), 011 (workspace)
     refs = {r["name"]: r["remote_ref"] for r in conn.execute("SELECT name, remote_ref FROM sessions")}
     assert refs == {"A": None, "B": None, "C": "conv-own"}
     audited = conn.execute(

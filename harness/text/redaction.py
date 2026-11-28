@@ -1,8 +1,10 @@
 """Masking of credentials with a known format (D8, SEC-01).
 
-Formats are matched by provider prefix and exact shape, the same thirteen that
-`claude-memory-system` measured against real prose. Generic heuristics (entropy, `key=`) are
-deliberately absent: they flag prose. A credential of an unknown format passes unchanged.
+Formats are matched by provider prefix and exact shape, the thirteen that
+`claude-memory-system` measured against real prose, plus (review of workspace-tools at
+d0a65d8, finding 3) the password of a URL: the `user:password` of `scheme://...@host`, which is all
+that is masked. Generic heuristics (entropy, `key=`) are deliberately absent: they
+flag prose. A credential of an unknown format passes unchanged.
 
 Every matcher runs in time linear in the text: a note is untrusted input of up to 1 MiB, and
 a pattern that backtracks over it would let a note stall the command. The private key and the
@@ -84,6 +86,20 @@ def _jwt_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
+# The `user:password` of `scheme://...@`: the scheme starts its run (the lookbehind), so each run is tried
+# once; user and password cannot hold `/`, `@` or a space, and the user no `:`, so the parts
+# scanned after one `://` never overlap the next one's: linear. Only `user:password` is masked;
+# a marker left by an earlier pass is not masked again.
+_URL_CREDENTIALS = re.compile(
+    r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*+://(?!\[REDACTED:)"
+    r"(?P<cred>[^\s:/@]*+:[^\s/@]++)@"
+)
+
+
+def _url_credential_spans(text: str) -> list[tuple[int, int]]:
+    return [match.span("cred") for match in _URL_CREDENTIALS.finditer(text)]
+
+
 def _regex(pattern: str) -> Spans:
     compiled = re.compile(pattern)
     return lambda text: [match.span() for match in compiled.finditer(text)]
@@ -107,6 +123,7 @@ PATTERNS: tuple[tuple[str, Spans], ...] = (
     ("digitalocean", _regex(r"\bdo[por]_v1_[a-f0-9]{64}(?![a-f0-9])")),
     ("stripe", _regex(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{24,}(?![A-Za-z0-9])")),
     ("jwt", _jwt_spans),
+    ("url-credentials", _url_credential_spans),
 )
 
 

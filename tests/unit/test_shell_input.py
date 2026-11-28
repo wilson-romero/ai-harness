@@ -15,7 +15,8 @@ TEMPLATES = ["/new {}", "/new --project {}", "/resume {}", "/memory {}", "/skill
              "/skill demo-echo {}", "/skill demo-echo --file {}", "/skill demo-echo --file text={}",
              "/skill demo-echo text={}", "/file {}", "/mode {}",
              "/plan {}",  # code-mode slice 2: with no MCP list, refused before sending
-             "/agent {}"]  # code-mode A3: without HARNESS_LOOP_PROVIDERS, refused the same
+             "/agent {}",  # code-mode A3: without HARNESS_LOOP_PROVIDERS, refused the same
+             "/workspace {}", "/workspace send {}"]  # workspace-tools B2
 
 
 def test_every_command_that_takes_arguments_is_covered():

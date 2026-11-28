@@ -28,8 +28,11 @@ from harness.shell.commands import (
     PROJECT_OR_NAME,
     SESSION,
     SKILL,
+    SEND_WORDS,
     SKILL_INPUT,
     TABLE,
+    WORKSPACE,
+    WORKSPACE_WORDS,
     CommandSpec,
     resolve_name,
 )
@@ -48,6 +51,7 @@ MAX_SESSIONS = 100
 
 COMMAND, OPTION, PROJECT_ITEM, SESSION_ITEM, SKILL_ITEM, INPUT_ITEM, MODE_ITEM = (
     "command", "option", "project", "session", "skill", "input", "mode")
+WORKSPACE_ITEM = "workspace"
 FOLDER, FILE, LINK = "folder", "file", "link"
 
 
@@ -278,6 +282,18 @@ def _for(takes: str | None, spec: CommandSpec, start: int, word: str, args: list
         return Suggestions(start, word, ranked, path=word if one_input else None)
     if takes == PATH:
         return Suggestions(start, word, (), path=word)
+    if takes == WORKSPACE:
+        # workspace-tools B2: `/workspace PATH|off|send on|off`. The first word is a folder
+        # (listed as any path) or one of the words; after `send`, on or off.
+        if args and args[0] == "send" and len(args) == 1:
+            items = [Item(word, "consent to send", WORKSPACE_ITEM) for word in SEND_WORDS]
+            return Suggestions(start, word, tuple(rank(word, items)))
+        if args:
+            return NONE
+        items = [Item(f"{w} " if w == "send" else w, "work folder", WORKSPACE_ITEM)
+                 for w in WORKSPACE_WORDS]
+        return Suggestions(start, word, tuple(rank(word, items, lambda i: i.insert.strip())),
+                           path=word)
     if takes == MODE:
         if args:
             return NONE  # /mode takes one value at most

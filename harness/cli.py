@@ -44,6 +44,7 @@ from harness.skills.commands import add_skill_parser, run_skill_command
 from harness.skills.engine import recover_runs
 from harness.storage.database import open_database
 from harness.text.safe_text import safe_foreign_text
+from harness.workspace.commands import add_workspace_parser, run_workspace_command
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -108,6 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_mcp_parser(commands)
     add_plan_parser(commands)  # code-mode slice 2
     add_chat_parser(commands)
+    add_workspace_parser(commands)  # workspace-tools slice B1
     return parser
 
 
@@ -149,6 +151,8 @@ def _run(args: argparse.Namespace) -> int:
         return run_plan_command(args)
     if args.command == "chat":
         return run_chat(args)
+    if args.command == "workspace":  # workspace-tools slice B1
+        return run_workspace_command(args)
     settings = Settings.from_env(os.environ)
     if args.command == "copilot":
         return _copilot_login(settings)
