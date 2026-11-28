@@ -36,7 +36,7 @@ Nota de honestidad sobre el orden: las pruebas se escribieron después del códi
 - [x] 4.1 `HARNESS_COPILOT_REUSE_TAB`, `HARNESS_COPILOT_FAST_END`, `HARNESS_COPILOT_TIMINGS` (`on`/`off`) y `speed_for`. Oráculo: `test_without_the_measurement_every_question_reloads_and_waits_the_window` (tres preguntas, `reload`/`window`, 3 cargas, 3 prompts), `test_each_switch_turns_its_optimisation_off` (2 casos), `test_each_switch_turns_off_only_its_own_optimisation`, `test_without_the_measurement_both_optimisations_stay_off`, `test_a_switch_takes_only_on_or_off` (control negativo: `maybe`, `1`).
   - Recibo: ver 8.1, 8.2; mutante M8 en 7.1.
 - [x] 4.2 Las pruebas anteriores del proveedor, la conversación, la sonda y el modo pasan con sus aserciones sin cambiar (truncado, sugerencias excluidas, lenguaje de bloques de código, `authentication_required`, plazo de `deep`, `timeout` frente a `uncertain`). Oráculo: `git diff origin/develop -- tests/browser/test_copilot_provider.py tests/browser/test_copilot_conversation.py tests/browser/test_copilot_mode.py tests/browser/test_copilot_probe.py tests/browser/test_copilot_probe_mode.py` vacío y el lote de Edge en verde.
-  - Recibo: ver 8.2 y 8.4.
+  - Recibo: `git diff --stat origin/develop` de esos cinco ficheros vacío; ver 8.2.
 
 ## 5. Sin ventana solo si se pide (D5)
 
@@ -83,13 +83,13 @@ Nota de honestidad sobre el orden: las pruebas se escribieron después del códi
 ## 8. Verificación
 
 - [x] 8.1 Lote sin navegador: `caffeinate -i uv run pytest -m "not edge and not copilot"`.
-  - Recibo: PENDIENTE.
+  - Recibo (2026-11-28, macOS arm64, Python 3.14.8, sobre `a5ddcf7` mezclado con `origin/develop` `d5f7864`): `2392 passed, 223 deselected in 400.12s`, exit 0, sin repeticiones.
 - [x] 8.2 Lote de Edge: `caffeinate -i uv run pytest -m edge`.
-  - Recibo: PENDIENTE.
+  - Recibo (mismo árbol, Edge 158): `221 passed, 2394 deselected in 2091.89s`, exit 0, sin repeticiones.
 - [x] 8.3 `openspec validate --all --strict`, `scripts/check_public_safety.py`, `scripts/check_sec_matrix.py`.
-  - Recibo: PENDIENTE.
-- [x] 8.4 Portabilidad y ficheros compartidos.
-  - Recibo: PENDIENTE.
+  - Recibo (mismo árbol): `Totals: 29 passed, 0 failed`, exit 0; `public-safety: PASS (507 file(s))`, exit 0 (control negativo: el pre-commit rechazó una primera versión de esta tarea porque `158` seguido de tres `.0` parece una IP; se reescribió); `sec-matrix: PASS (15 rows, 177 tests)`, exit 0, con las pruebas nuevas en SEC-02, SEC-06 y SEC-07.
+- [x] 8.4 Portabilidad y ficheros compartidos. Oráculo: `git diff origin/develop -- harness scripts | grep -c "sys.platform\|os.name\|msvcrt\|fcntl"` → 0; `git diff --stat origin/develop -- harness/core harness/mcp harness/shell harness/storage` vacío (ni `service.py`, ni `plan*.py`, ni `conversation.py`, ni migración). Compartidos tocados, solo añadidos: `harness/cli.py` (argumento `--timings` de `history`, la llamada a `_history` partida en dos líneas, y un parámetro con sus líneas en `_history`/`_history_without_content`); `harness/browser/edge.py` (`from_settings` con `window=`); `harness/browser/login.py` (una línea, `window=True`); `docs/security/sec-matrix.md` (15 líneas añadidas en tres filas, sin cambiar estados). Banderas de Edge: solo las que Playwright añade al pedir `headless` (design D5) y solo con `HARNESS_COPILOT_HEADLESS=on`; sandbox y `DROPPED_DEFAULT_ARGS` sin cambios.
+  - Recibo (mismo árbol): grep → `0`; `git diff --stat` de esas carpetas vacío; `tests/unit/test_portability.py` dentro de 8.1.
 - [x] 8.5 Tabla sintética antes/después: el propio paso `speed` contra la página sintética, con la ventana de estabilidad de la página real (4000 ms) y Edge con ventana, de modo que la variante sin ventana es una comparación de verdad. `off` es la conducta de antes (4.1 lo comprueba). **Es la página sintética, no Copilot**: las cifras reales salen de 9.1.
   - Recibo (2026-11-27, macOS arm64, Python 3.14.8, Edge 158.0.4370.45; script de la sesión fuera del repo que arranca `SyntheticCopilot`, escribe el `ui.json` sintético con `stability_window_ms: 4000` y llama a `copilot_probe.main(["speed", "--questions", "5"])`): `complete: yes`, `sends: 23 used of 23 planned`, el servidor recibió 23 prompts, 1 de 9 cargas sin ventana. Las 8 reglas válidas (8/8, 0 adelantos; retraso medio 561 ms con 500 ms, 1064 ms con 1000 ms). Mediana de las preguntas 2..5, en ms:
 
@@ -106,6 +106,8 @@ Nota de honestidad sobre el orden: las pruebas se escribieron después del códi
     | total | **7268** | **1725** | **1720** |
 
     Primera pregunta: 7235 ms `off`, 3812 ms `on`, 3771 ms `headless`. Caminos `on`: `reload` y cuatro `reuse` (`declined: new tab` la primera); finales: cinco `signal`. Sin ventana no cambia nada medible en la página sintética (1720 frente a 1725 ms): la diferencia real, si la hay, la dirá 9.1. Tras esta medida se corrigieron dos detalles de la tabla y la elección (una fase de 0 ms salía como «-»; en un empate entre señales gana la que eligió `measure`), con su prueba `test_on_a_tie_the_signal_measure_chose_wins`.
+
+- [ ] 8.6 Mezclar `bugfix/windows-parity-3` cuando llegue a `develop` (toca `copilot_web.py`: `self.started`, `waited_since`/`not_ready_seen` en `wait_ready`, el mensaje de página no lista). Conservar su diagnóstico estructural también en el camino rápido: una pestaña reutilizada que no sirve se rechaza en `reuse_refusal` y la pregunta sigue por la recarga, que pasa por `wait_ready`, así que el mismo detalle sale sin código nuevo; comprobarlo con su `test_a_readiness_ended_by_the_request_deadline_says_so` y los dos lotes. Estado: **BLOCKED** hasta ese merge.
 
 ## 9. Medida real y demo
 
