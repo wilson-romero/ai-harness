@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import os
 import re
 import sqlite3
 import threading
@@ -21,7 +22,9 @@ from uuid import UUID, uuid7
 import pytest
 
 from harness.providers.base import ProviderError
+from harness.mcp import client
 from harness.mcp.audit import args_key
+from harness.mcp.client import BASE_ENV_NAMES
 from harness.mcp.loop_flow import SEND_FORMAT, SEND_SCOPE
 from harness.mcp.plan_run import PLAN_SKILL_NAME
 from harness.skills.approvals import Proposal
@@ -135,6 +138,41 @@ def _sent_shown(terminal: ScriptedTerminal) -> list[str]:
 
 
 THREE = {turn(1): plan_reply(ALPHA), turn(2): plan_reply(BETA), turn(3): FINAL}
+
+
+# -- the environment the processes start from ----------------------------------------------------
+
+
+def test_a_test_s_settings_reach_the_processes_over_a_full_environment(conn, data_dir, mcp,
+                                                                       monkeypatch):
+    """Windows run of 02b2c09: the tests handed the conversation `{"HARNESS_LOOP_PROVIDERS":
+    "mock"}` alone, so the MCP session process and the server started without SYSTEMROOT, PATH
+    or TEMP, and on Windows a Python child without them fails at its first socket (WinError
+    10106). Through `make_conversation`, as every test and the loop demo build one: each base
+    name this process has reaches both, and the test's own setting still applies."""
+    sessions: list[dict] = []
+    servers: list[dict] = []
+    start, build = client._create_platform_compatible_process, client.build_server_env
+
+    async def recording_start(**options):
+        sessions.append(dict(options["env"]))
+        return await start(**options)
+
+    def recording_build(entry, environ):
+        servers.append(build(entry, environ))
+        return servers[-1]
+
+    monkeypatch.setattr(client, "_create_platform_compatible_process", recording_start)
+    monkeypatch.setattr(client, "build_server_env", recording_build)
+    provider = LoopMock({turn(1): plan_reply(ALPHA), turn(2): FINAL})
+    _run(conn, data_dir, mcp, provider, [AGENT_LINE])
+    assert _loops(conn) == [("completed", "answer", 2, 5, 0)]  # ON applied: the loop ran
+    present = {name: os.environ[name] for name in BASE_ENV_NAMES if name in os.environ}
+    assert present and sessions and servers
+    for what, envs in (("session process", sessions), ("server", servers)):
+        for env in envs:
+            missing = sorted(name for name in present if env.get(name) != present[name])
+            assert not missing, f"the {what} started without {missing}"
 
 
 # -- the three turns -----------------------------------------------------------------------------
