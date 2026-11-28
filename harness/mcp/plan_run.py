@@ -54,6 +54,9 @@ PLAN_SCOPE = "code-mode.plan"
 PLAN_SKILL_NAME = "code-mode"  # the `skill` fields of a Proposal name the plan's reader
 SHOWN_MAX_BYTES = 256 * 1024
 MAX_DEADLINE_S = 300
+# Past the steps' budgets: one step's teardown (the client's tree end, the transport's stop
+# grace and reap: about 8 s), so that a step ends on its own limit first.
+DEADLINE_GRACE_S = 10
 IDENTITY_CHARS = 64
 APPROVAL_STATEMENT = ("only the plan in this box runs: the reply above is the model's text "
                       "and may show something else")
@@ -63,11 +66,17 @@ CUT_NOTICE = "[the plan's results passed {limit} bytes; the rest of this one is 
 
 def deadline_s(plan: Plan, config: LoadedConfig) -> int:
     """The whole plan's deadline (D10): the sum of its steps' session budgets (startup and
-    call of their server), never more than MAX_DEADLINE_S. A read that runs out of it has no
-    effect to reconcile."""
+    call of their server) plus DEADLINE_GRACE_S, never more than MAX_DEADLINE_S. A read that
+    runs out of it has no effect to reconcile.
+
+    The grace lets one step that uses all of its own budget end as that step's `timeout`
+    (its own limit, with its tree ended) rather than as the plan's `deadline`: the plan stops
+    on its first failure, so only one step's teardown can fall inside it. Under the cap the
+    labels can still differ: a plan whose budgets add up to more than MAX_DEADLINE_S ends as
+    `deadline` even when one step is to blame (review of `6b83412`, point 3)."""
     total = sum(config.servers[step.server].startup_timeout_s
                 + config.servers[step.server].call_timeout_s for step in plan.steps)
-    return max(1, min(MAX_DEADLINE_S, total))
+    return max(1, min(MAX_DEADLINE_S, total + DEADLINE_GRACE_S))
 
 
 # -- what is approved ---------------------------------------------------------------------------
@@ -118,13 +127,18 @@ def plan_proposal(plan: Plan, *, session_id: UUID | str, request_id: UUID | str,
 def approval_header(proposal: Proposal, plan: Plan, approval_hash: str, expires_at: str,
                     deadline: int) -> list[str]:
     """The harness's lines above the plan in the box (D9): the statement, what the plan is,
-    the hash and the expiry. None of them comes from the reply."""
+    the hash and the expiry, and for each distinct server that its launch command is not part
+    of what is approved (it comes from the person's local list; A2 binds it). None of them
+    comes from the reply."""
+    servers = dict.fromkeys(step.server for step in plan.steps)  # in the plan's order
     return [
         "Plan approval requested",
         f"  {APPROVAL_STATEMENT}",
         f"  request:  {proposal.step} (the /plan question)",
         f"  plan:     {proposal.run_id}, {len(plan.steps)} step(s), every one a read of the "
         "local MCP list",
+        *(f"  server:   {server} is started by the command in your local MCP list; that "
+          "command is not part of this approval" for server in servers),
         f"  deadline: {deadline} s for the whole plan; the first step that fails stops it",
         "  results:  shown here only; nothing is sent back to the provider",
         f"  hash:     {approval_hash}",
@@ -278,7 +292,16 @@ def execute_plan(
     clocks = _Clocks(now=clock or (lambda: datetime.now(UTC)), monotonic=monotonic)
     conn = open_database(data_dir)
     lock = NamedLock(data_dir, f"plan-{approved.plan_id}")
-    lock.acquire()
+    if not lock.acquire():
+        # Another holder runs (or checks) this plan: fail closed, leaving its row to it.
+        try:
+            with transaction(conn):
+                _audit(conn, "plan.denied", "plan_in_use", None, None,
+                       f"plan={approved.plan_id}")
+        finally:
+            conn.close()
+        return PlanReport(approved.plan_id, "not_run", error_code="plan_in_use",
+                          detail="another process holds this plan; nothing was run")
     try:
         recover_plans(conn, data_dir)
         return _execute(conn, data_dir, approved, load_config, environ, stopper, clocks)

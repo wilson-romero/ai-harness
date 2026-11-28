@@ -145,6 +145,27 @@ def test_an_approval_runs_once(conn, data_dir, mcp, monkeypatch):
     assert mcp.calls() == ["call get_project_metadata"] * 2  # the first run only
 
 
+def test_a_plan_whose_lock_is_held_elsewhere_runs_nothing(conn, data_dir, mcp, monkeypatch):
+    """Review of `6b83412`, point 3: the plan's lock not obtained fails closed; the row is left
+    to its holder (still granted, never consumed here)."""
+    from harness.storage.locks import NamedLock
+
+    def held(approved, data_dir_, *rest):
+        holder = NamedLock(data_dir_, f"plan-{approved.plan_id}")
+        assert holder.acquire()
+        try:
+            return _real(approved, data_dir_, *rest)
+        finally:
+            holder.release()
+
+    _, (report,) = _converse(conn, data_dir, mcp, monkeypatch, held)
+    assert (report.status, report.error_code) == ("not_run", "plan_in_use")
+    assert mcp.starts() == 0
+    assert _plan_row(conn) == [("awaiting_approval", "granted", None)]
+    assert rows(conn, "SELECT outcome FROM audit_events WHERE event_type = 'plan.denied'") == [
+        ("plan_in_use",)]
+
+
 def test_an_approval_never_runs_the_plan_for_another_request(conn, data_dir, mcp, monkeypatch):
     def other_request(approved, *rest):
         return _real(dataclasses.replace(approved, request_id=uuid7()), *rest)

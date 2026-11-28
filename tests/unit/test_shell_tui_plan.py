@@ -53,6 +53,8 @@ async def test_the_box_shows_the_plan_and_approve_runs_it_once(tmp_path, mcp):
         assert "synthetic.get_project_metadata  read  allowed" in shown
         assert isinstance(tui.app.focused, ProposalArea)  # never a button on open
         assert mcp.starts() == 0  # nothing runs while the box is open
+        assert "synthetic is started by the command in your local MCP list" in shown
+        await pilot.press("end")  # the plan's end must be shown before Approve is enabled
         await tui.until(pilot, lambda: not _button(tui, "approve").disabled)
         await pilot.press("tab")
         assert tui.app.focused is _button(tui, "approve")

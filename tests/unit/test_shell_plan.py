@@ -116,6 +116,25 @@ def test_what_the_box_shows_is_what_its_hash_covers(conn, data_dir, mcp):
     assert mcp.calls() == ["call get_project_metadata"] * 2
 
 
+LAUNCH_LINE = ("  server:   synthetic is started by the command in your local MCP list; that "
+               "command is not part of this approval")
+
+
+def test_the_box_says_each_server_command_is_not_approved(conn, data_dir, mcp):
+    """Review of `6b83412`: what the person approves are the steps; the command that starts
+    each server comes from their local list and is not bound by the hash (A2 will bind it).
+    One harness line per distinct server says so, above the rule, outside what is hashed."""
+    from harness.skills.approvals import APPROVAL_RULE
+
+    terminal, _ = _run(conn, data_dir, mcp, scripted_mock(plan_reply(ALPHA, BETA)),
+                       [PLAN_LINE], [CODE])
+    shown = terminal.shown
+    first = shown.index(APPROVAL_RULE)
+    assert shown[:first].count(LAUNCH_LINE) == 1  # two steps, one server: one line
+    assert not any("local MCP list;" in row for row in shown[first:])
+    assert mcp.calls() == ["call get_project_metadata"] * 2
+
+
 def test_the_reply_with_no_plan_is_the_answer(conn, data_dir, mcp):
     provider = scripted_mock("Ningún proyecto necesita herramientas: la respuesta es sí.")
     terminal, _ = _run(conn, data_dir, mcp, provider, [PLAN_LINE])
@@ -418,6 +437,19 @@ def test_the_plan_deadline_ends_a_step_in_course(conn, data_dir, tmp_path, monke
     assert mcp.server.stopped()
     assert _plans(conn) == [("timeout", "consumed", "code", "deadline", 1)]
     assert "ran out of its 1 s deadline at step 1 of 2" in terminal.text
+
+
+def test_a_single_hung_step_ends_as_its_own_timeout(conn, data_dir, tmp_path, hang_guard):  # noqa: F811
+    """Review of `6b83412`, point 3: the plan's deadline is the sum of its steps' budgets, so a
+    step that uses all of its own budget raced it; the step's own timeout must win (the
+    deadline is for a plan, and keeps a grace past that sum)."""
+    mcp = McpList(tmp_path / "mcp", "hang-call", call=1, startup=1)
+    provider = scripted_mock(plan_reply(ALPHA))
+    terminal, _ = _run(conn, data_dir, mcp, provider, [PLAN_LINE], [CODE])
+    assert mcp.calls() == ["call get_project_metadata"]
+    assert mcp.server.stopped()
+    assert _plans(conn) == [("failed", "consumed", "code", "timeout", 1)]
+    assert "deadline" not in terminal.text.split("approved; running")[1]
 
 
 def test_what_is_shown_of_the_results_is_bounded(conn, data_dir, mcp, monkeypatch):

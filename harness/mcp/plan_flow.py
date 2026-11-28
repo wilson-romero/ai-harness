@@ -92,7 +92,8 @@ class PlanRequest:
 class PlanOutcome:
     """How one `/plan` ended: `answer` (the reply held no plan), `refused` (it held one the
     reader refused, or the question did not complete), `not_approved` (rejected, expired or
-    undecided) or `ran` (the executor was called; `report` says what it did)."""
+    undecided), `interrupted` (Ctrl+C at the code prompt: recorded as undecided) or `ran` (the
+    executor was called; `report` says what it did)."""
 
     kind: str
     report: PlanReport | None = None
@@ -173,8 +174,15 @@ async def _approve_and_run(plan: Plan, request: PlanRequest, request_id: UUID,
                          button_question=BUTTON_QUESTION)
     else:
         verdict = Verdict("undecided")
+    interrupted = _withdraw_pending_interrupt()
+    if interrupted:
+        verdict = Verdict("undecided")  # whatever was typed after the Ctrl+C grants nothing
     state = record_verdict(conn, plan_id=plan_id, verdict=verdict,
                            identity=terminal.identity(), now=setting.clock())
+    if interrupted:
+        view.say(f"interrupted: plan {plan_id} was not approved; nothing was run, and this "
+                 "approval cannot be used again")
+        return PlanOutcome("interrupted")
     if state != "granted":
         view.say({
             "rejected": f"plan: {plan_id} was rejected; nothing was run",
@@ -193,6 +201,19 @@ async def _approve_and_run(plan: Plan, request: PlanRequest, request_id: UUID,
     ))
     show_report(view, report, len(plan.steps), deadline)
     return PlanOutcome("ran", report)
+
+
+def _withdraw_pending_interrupt() -> bool:
+    """True if this task was cancelled while the code prompt blocked it (Ctrl+C under
+    `asyncio.run` only marks the task: `input()` keeps waiting). The cancellation is withdrawn
+    so that the caller's cleanup (closing the provider) is not cut by it on its first await;
+    the interruption is reported by the outcome instead."""
+    task = asyncio.current_task()
+    if task is None or not task.cancelling():
+        return False
+    while task.cancelling():
+        task.uncancel()  # at zero this also clears the pending CancelledError (3.13+)
+    return True
 
 
 async def run_in_thread(execute: Callable[..., PlanReport]) -> PlanReport:

@@ -4,7 +4,9 @@ The same flow (`plan_flow.run_plan`), with the typed code as the only approval: 
 interactive terminal on stdin and stdout, and refuses before anything is sent otherwise (a
 plan nobody can approve is never asked for). Harness lines go to stderr, as every command's;
 the reply and the results, which are foreign text, go to stdout, cleaned as `ask` and
-`mcp call` clean theirs; the approval notice and its question go where the code is typed.
+`mcp call` clean theirs and with every line after the bar (`prefixed`, as `mcp call` and
+`chat --plain`), so no line of theirs can pass for one of the harness's; the approval notice
+and its question go where the code is typed.
 The session is held for the whole command, as a conversation holds it.
 """
 
@@ -20,6 +22,7 @@ from contextlib import asynccontextmanager
 from harness.config import Settings
 from harness.core.errors import UsageError
 from harness.core.service import SessionService
+from harness.mcp.commands import prefixed
 from harness.mcp.config import load_config
 from harness.mcp.plan_flow import PlanRequest, PlanSetting, run_plan
 from harness.mcp.plan_prompt import build_catalogue
@@ -34,6 +37,7 @@ from harness.text.safe_text import safe_foreign_text, safe_line
 
 EXIT_OK = 0
 EXIT_ERROR = 1
+EXIT_INTERRUPTED = 130  # as `cli.main` after a Ctrl+C
 MAX_QUESTION_CHARS = 16_000
 
 
@@ -54,11 +58,11 @@ class _Stdio:
         print(safe_line(text).text, file=sys.stderr, flush=True)
 
     def reply(self, text: str) -> None:
-        print(safe_foreign_text(text).text, flush=True)
+        print(prefixed(safe_foreign_text(text).text), flush=True)
 
     def result(self, header: str, text: str) -> None:
         self.say(header)
-        print(safe_foreign_text(text).text, flush=True)
+        print(prefixed(safe_foreign_text(text).text), flush=True)
 
     def approval(self, header: list[str], content: list[str]) -> str:
         return "\n".join([*header, APPROVAL_RULE, *(FOREIGN_PREFIX + line for line in content),
@@ -111,4 +115,6 @@ def run_plan_command(args: argparse.Namespace, *, terminal: TtyTerminal | None =
             lock.release()
     finally:
         conn.close()
+    if outcome.kind == "interrupted":
+        return EXIT_INTERRUPTED
     return EXIT_OK if outcome.ok else EXIT_ERROR
