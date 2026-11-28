@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from uuid import UUID
 
 import pytest
@@ -111,6 +112,57 @@ async def test_provider_timeout_before_sending(conn, make_service):
     response = await service.ask(sid, "q")
     assert response.status == "timeout" and response.detail == "page not ready"
     assert states(conn) == (["timeout"], ("created", None))
+
+
+class ClosesSlowly:
+    """Gives up before sending, then spends longer closing its browser than the request has
+    left: the close is shielded, as `close_owned` does, so the request's own deadline fires
+    while the provider's error is on its way out (Windows parity 3: Edge closing in more than
+    the 2 s that a request of 8 s keeps for it)."""
+
+    name = "slow-close"
+    synthetic_content = False
+
+    def __init__(self, error: BaseException, close_s: float) -> None:
+        self.error, self.close_s = error, close_s
+
+    def check(self, prompt):
+        pass
+
+    async def ask(self, request, on_sent, *, events=None):
+        try:
+            raise self.error
+        finally:
+            closing = asyncio.ensure_future(asyncio.sleep(self.close_s))
+            try:
+                await asyncio.shield(closing)
+            except asyncio.CancelledError:
+                await closing
+                raise
+
+
+async def test_a_reason_given_before_the_deadline_survives_a_close_that_outlasts_it(
+        conn, make_service):
+    """The order is explicit: the provider's reason at once, its close 0.6 s, the request's
+    deadline 0.2 s. The person sees the provider's reason, not the generic one."""
+    provider = ClosesSlowly(ProviderTimeout("page not ready: editor 0 matched"), close_s=0.6)
+    service = make_service({"slow-close": provider}, default="slow-close", timeout_s=0.2)
+    sid = str(service.create_session("S").session_id)
+    response = await service.ask(sid, "q")
+    assert response.status == "timeout"
+    assert response.detail == "page not ready: editor 0 matched"
+    assert states(conn) == (["timeout"], ("created", None))
+
+
+async def test_a_deadline_with_no_reason_before_it_stays_generic(conn, make_service):
+    """Control: a close interrupted with nothing raised before it keeps the generic message;
+    an exception that is not the provider's own is not shown as the reason."""
+    provider = ClosesSlowly(ValueError("not a provider reason"), close_s=0.6)
+    service = make_service({"slow-close": provider}, default="slow-close", timeout_s=0.2)
+    sid = str(service.create_session("S").session_id)
+    response = await service.ask(sid, "q")
+    assert response.status == "timeout"
+    assert response.detail == "the deadline expired before the prompt was sent"
 
 
 async def test_bound_reference_is_stored_and_never_replaced(conn, make_service):

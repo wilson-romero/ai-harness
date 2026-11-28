@@ -444,6 +444,11 @@ def test_leaving_does_not_wait_for_a_stuck_folder_listing(tmp_path):
     assert took < 20, f"the exit waited {took:.1f} s for the listing (it blocks 30 s)"
 
 
+def _listers() -> list[threading.Thread]:
+    """The folder-listing threads alive now, by the name `FolderLister` gives them."""
+    return [t for t in threading.enumerate() if t.name == "completion-listing"]
+
+
 async def test_keys_with_a_stuck_listing_keep_typing_and_bound_the_threads(tmp_path,
                                                                            monkeypatch):
     stuck = threading.Event()
@@ -459,12 +464,16 @@ async def test_keys_with_a_stuck_listing_keep_typing_and_bound_the_threads(tmp_p
     try:
         async with tui.app.run_test(size=SIZE) as pilot:
             prompt, listing = await _open(tui, pilot)
-            before = threading.active_count()
+            before = set(_listers())
+            # An unrelated thread started meanwhile (Windows, under load: the old count of every
+            # thread in the process said 3 for 21 keys) is not a folder listing.
+            unrelated = threading.Thread(target=stuck.wait, args=(30,), daemon=True)
+            unrelated.start()
             await pilot.press(*"/file ", *"abcdefghijklmnopqrst")
             await pilot.pause(0.3)
             assert prompt.value == "/file abcdefghijklmnopqrst"  # every key typed
-            live = threading.active_count() - before
-            assert live <= tui_module.MAX_LISTERS, f"{live} threads for 21 keys"
+            live = len(set(_listers()) - before)
+            assert 1 <= live <= tui_module.MAX_LISTERS, f"{live} listing threads for 21 keys"
             assert len(started) <= tui_module.MAX_LISTERS
             stuck.set()  # the folder answers: the newest request is the one listed
             await tui.until(pilot, lambda: started[-1:] == ["abcdefghijklmnopqrst"])

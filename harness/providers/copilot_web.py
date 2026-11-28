@@ -46,6 +46,7 @@ from harness.browser.edge import SHUTDOWN_S, EdgeLauncher
 from harness.browser.login import recorded_ready_path
 from harness.browser.page_state import (
     PageState,
+    address,
     classify,
     guest_page_advice,
     host_of,
@@ -84,6 +85,7 @@ REPLY_MAX_NODES = 20_000  # and walk at most this many elements of it
 REPLY_MAX_DEPTH = 64  # and this many levels
 POLL_S = 0.1
 STATE_POLL_S = 0.25
+NOT_READY_READ_S = 1.0  # at most, for what the page showed when it was not ready in time
 STATE_PERSIST_S = 3.0  # a sign-in or guest page must stay that long (redirects pass through)
 SETTLE_S = 2.0  # the page's element count unchanged that long before typing
 RESUBMIT_AFTER_S = 4.0  # nothing left the editor and no turn was added: the key press was lost
@@ -751,6 +753,12 @@ class CopilotWebProvider:
                 page = context.pages[0] if context.pages else await context.new_page()
                 text = await turn.run(page)
             return text  # the browser is closed before the answer is handed back
+        except asyncio.CancelledError as cancel:
+            # The request's deadline fired while the browser was closing after the page gave
+            # up: the reason travels with the cancellation, for the service to report it.
+            if turn.gave_up is not None and not turn.sent:
+                cancel.__context__ = turn.gave_up
+            raise
         except ProviderUncertain:
             raise
         except (ProviderError, HarnessError):
@@ -843,6 +851,8 @@ class _Turn:
         self.on_sent = on_sent
         self.events = events
         self.deadline = deadline
+        self.started = time.monotonic()  # before Edge starts: the deadline counts its start
+        self.gave_up: ProviderTimeout | None = None  # the page was not ready in time
         self.host = host_of(plan.url)
         self.locators: Locators = plan.measurement.locators
         label = self.locators.code_language
@@ -1168,6 +1178,7 @@ class _Turn:
     async def wait_ready(self, page: Page, ready_by: float) -> None:
         measurement = self.plan.measurement
         state, since = PageState.UNKNOWN, time.monotonic()
+        waited_since = since
         while True:
             now_state = await classify(page, measurement, self.host)
             if now_state is not state:
@@ -1187,12 +1198,45 @@ class _Turn:
                         guest_page_advice(self.plan.url, recorded_ready_path(self.settings.data_dir))
                         + ". Nothing was sent"
                     )
-                raise ProviderTimeout(
+                self.gave_up = ProviderTimeout(
                     "the Copilot page was not ready in time "
                     f"(HARNESS_COPILOT_READY_TIMEOUT_S is {self.settings.copilot_ready_timeout_s:g} s, "
-                    "within HARNESS_REQUEST_TIMEOUT_S); nothing was sent"
+                    "within HARNESS_REQUEST_TIMEOUT_S); nothing was sent; "
+                    + await self.not_ready_seen(page, state, waited_since, ready_by)
                 )
+                raise self.gave_up
             await asyncio.sleep(STATE_POLL_S)
+
+    async def not_ready_seen(self, page: Page, state: PageState, waited_since: float,
+                             ready_by: float) -> str:
+        """What the page showed when the readiness wait ran out, by structure only: its
+        address without the query, the editor and the user turns found, the state, and which
+        bound ended the wait. Never a text of the page (Windows parity 3)."""
+        now = time.monotonic()
+        bound = ("HARNESS_REQUEST_TIMEOUT_S, which counts the start of Edge"
+                 if ready_by >= self.deadline else "HARNESS_COPILOT_READY_TIMEOUT_S")
+        timing = (f"waited {now - waited_since:.1f} s, {now - self.started:.1f} s since the "
+                  f"request started, ended by {bound}")
+        # Bounded: an element removed between two reads makes Playwright wait for it, and a
+        # busy renderer holds even `count()` (review of windows-parity-3, finding 2). At most
+        # NOT_READY_READ_S and half of what is left before the request's own deadline, so the
+        # rest of the reserve still closes Edge; nothing here may raise instead of the timeout.
+        left = self.started + self.request.timeout_s - now
+        budget = min(NOT_READY_READ_S, max(0.0, left / 2))
+        try:
+            async with asyncio.timeout(budget):
+                editor = self.locators.composer.resolve(page)
+                matched = await editor.count()
+                visible = matched > 0 and await editor.first.is_visible()
+                enabled = visible and await editor.first.is_enabled(timeout=budget * 1000)
+                users = await self.locators.user_turn.resolve(page).count()
+            where = address(page.url)
+        except Exception:  # noqa: BLE001 - a diagnostic that fails says so and nothing more
+            return f"{timing}; the page could not be read"
+        shown = ("visible and enabled" if enabled else "visible, not enabled" if visible
+                 else "not visible")
+        return (f"{timing}; page {where}, state {state}, editor {matched} matched, {shown}, "
+                f"{users} user turns")
 
     async def settle(self, page: Page, ready_by: float) -> None:
         """Wait until the page stops adding elements: a key press on a page still rendering

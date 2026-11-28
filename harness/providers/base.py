@@ -50,6 +50,21 @@ class ProviderTimeout(ProviderError, TimeoutError):
     """The provider gave up waiting before sending (for example, a page that never loads)."""
 
 
+def timeout_on_its_way(exc: BaseException) -> ProviderTimeout | None:
+    """The provider's own ProviderTimeout behind `exc`, if the request's deadline fired while
+    it was on its way out (the provider closing its browser after giving up). The deadline's
+    TimeoutError is raised from the cancellation, and the cancellation, raised during the
+    close, keeps the provider's error as its context (Windows parity 3)."""
+    seen: set[int] = set()
+    link: BaseException | None = exc
+    while link is not None and id(link) not in seen:
+        if isinstance(link, ProviderTimeout):
+            return link
+        seen.add(id(link))
+        link = link.__cause__ or link.__context__
+    return None
+
+
 class ProviderEvents(Protocol):
     """What a provider may tell the service while it works (design D5)."""
 

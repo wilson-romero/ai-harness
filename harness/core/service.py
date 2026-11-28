@@ -39,10 +39,10 @@ from harness.providers.base import (
     LLMProvider,
     ModeUnavailable,
     PromptTooLong,
-    ProviderError,
     ProviderUncertain,
     RemoteConversationLost,
     RemoteConversationTaken,
+    timeout_on_its_way,
 )
 from harness.providers.registry import ProviderFactory
 from harness.storage import repositories as repo
@@ -728,8 +728,8 @@ class SessionService:
             return finish(
                 RequestStatus.TIMEOUT,
                 error_code="timeout_before_send",
-                detail=str(exc)
-                if isinstance(exc, ProviderError)
+                detail=str(reason)
+                if (reason := timeout_on_its_way(exc)) is not None
                 else "the deadline expired before the prompt was sent",
             )
         except asyncio.CancelledError:

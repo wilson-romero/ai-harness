@@ -262,10 +262,79 @@ Wilson ejecutó `develop` en Windows 11 con Edge. En la batería `-m edge` fall�
   - Se mantiene la clasificación. El mensaje conserva siempre la primera línea de Edge, con `<profile>` en lugar de la ruta. En el caso del cierre con artefacto dice además que la causa puede ser un bloqueo de un Edge que se colgó.
   - Oráculo: `test_in_use_by_an_immediate_close_keeps_edges_message_and_names_a_stale_lock` (`lockfile` y `SingletonLock`) y `test_in_use_by_a_named_singleton_keeps_edges_message`.
   - Recibo (2026-11-27, macOS): antes, 3 failed; después, `test_edge_launch_errors.py` → 14 passed.
-- [ ] 9.2 Confirmación en Windows (no es puerta), en PowerShell, sobre la rama: `uv run pytest -m edge tests/browser/test_edge_launcher.py -v -s`.
+- [x] 9.2 Confirmación en Windows (no es puerta), en PowerShell, sobre la rama: `uv run pytest -m edge tests/browser/test_edge_launcher.py -v -s`.
   - Tienen que pasar `test_profile_open_in_another_edge_is_reported_as_in_use` y `test_a_held_profile_carries_a_lock_artefact`.
   - Hay que pegar la línea `lock artefacts while open: [...]`; se espera `lockfile`.
   - Si el primero falla, pegar el mensaje entero de `BrowserLaunchFailed` (sin rutas: el lanzador ya pone `<profile>`).
+  - Estado: **PASS** sobre `develop` = `a9c51fe` (2026-11-27, Windows 11): el perfil en uso se informa bien y el test imprime `lock artefacts while open: ['lockfile']`, la premisa de 9.1.
+
+## 10. Tercera ejecución en Windows (2026-11-27, `develop` = `a9c51fe`)
+
+Wilson ejecutó `develop` en Windows 11 con Edge: 188 pasados y 1 fallo. `tests/browser/test_copilot_mode.py::test_a_history_that_arrives_while_choosing_does_not_block[deep-auto]` (de `response-mode`) falló en la batería completa en su **primera** pregunta con «the Copilot page was not ready in time (HARNESS_COPILOT_READY_TIMEOUT_S is 60 s)». Solo, pasan los dos casos en 31 s. Va aquí porque lo que cambia es la espera de la página del proveedor. Rama `bugfix/windows-parity-3`.
+
+- [x] 10.1 Investigado; **causa sin confirmar**. El fallo se hace diagnosticable.
+  - Aislamiento, leído en los fixtures:
+    - cada test tiene su `SyntheticCopilot`, con un puerto que da el sistema (`("127.0.0.1", 0)`), su `tmp_path` con su perfil (`edge-profile`) y su `HARNESS_DATA_DIR`;
+    - el bloqueo del navegador vive en ese directorio de datos;
+    - la primera pregunta de los dos casos es la misma (`modes=menu`, sin opciones de historia): el orden de los casos no cambia lo que ve la primera pregunta.
+    No hay perfil, puerto ni servidor compartidos entre tests.
+  - Lo que el mensaje no decía: en este test `HARNESS_REQUEST_TIMEOUT_S` es 40 y el proveedor guarda `min(SHUTDOWN_S, 25 %)` = 10 s para cerrar Edge. La espera de la página acaba, pues, como mucho 30 s después de empezar la pregunta, y ese plazo cuenta también la espera del bloqueo y el arranque de Edge con un perfil nuevo. Los «60 s» del mensaje no se pudieron esperar nunca. La hipótesis más probable es carga: un arranque de Edge muy lento en Windows en mitad de la batería. No está medida.
+  - Intento de reproducirlo en macOS (2026-11-27, macOS arm64, Edge instalado), sin un solo fallo:
+    - 4 copias en paralelo de `tests/browser/test_copilot_mode.py`: 4 × 23 passed, de 141 a 165 s;
+    - dos rondas de 8 copias en paralelo de `-k "history or set_and_confirmed"` con 4 procesos que ocupan una CPU cada uno: 16 × 4 passed, de 33 a 38 s;
+    - después, ningún Edge con un perfil de `pytest-of-…` seguía vivo.
+  - Hecho (`harness/providers/copilot_web.py`, `_Turn`): si la espera de la página vence, el mensaje añade solo estructura, nunca texto de la página:
+    - cuánto se esperó y cuánto pasó desde que empezó la pregunta;
+    - qué plazo la cortó: `HARNESS_COPILOT_READY_TIMEOUT_S`, o `HARNESS_REQUEST_TIMEOUT_S, which counts the start of Edge`;
+    - la dirección sin la consulta, el estado clasificado, cuántos elementos casan con el localizador del editor y si está visible y habilitado, y cuántos turnos del usuario hay.
+    No se sube ningún plazo.
+  - Oráculo, en `tests/browser/test_copilot_provider.py`:
+    - `test_page_that_does_not_load_keeps_the_session` comprueba ahora el detalle: `page http://127.0.0.1:<puerto>/c/`, sin `ready_ms`, `editor 1 matched, not visible`, `1 user turns`, `ended by HARNESS_COPILOT_READY_TIMEOUT_S`;
+    - `test_a_readiness_ended_by_the_request_deadline_says_so` (nuevo): con `HARNESS_REQUEST_TIMEOUT_S=8`, el mensaje sigue diciendo `is 60 s` pero añade `ended by HARNESS_REQUEST_TIMEOUT_S, which counts the start of Edge`.
+  - Recibo (2026-11-27, macOS):
+    - antes del cambio, el primero falla (el mensaje acababa en `nothing was sent`); con el cambio, los dos pasan;
+    - control negativo (mutante: el plazo nombrado siempre `HARNESS_COPILOT_READY_TIMEOUT_S`): 1 failed, el nuevo; restaurado, pasa.
+  - Líneas tocadas en el fichero compartido con `feature/copilot-turn-speed`: el import de `address`, una línea en `_Turn.__init__` (`self.started`), dos en `wait_ready` (`waited_since` y el final del mensaje) y el método nuevo `not_ready_seen`, justo antes de `settle`.
+- [x] 10.3 El motivo de la página llega a la persona aunque el plazo de la pregunta venza mientras Edge se cierra.
+  - Hallazgo de la verificación de la rama (coordinador, sobre `a77ae8a`): `test_a_readiness_ended_by_the_request_deadline_says_so` falló 3 de 3 solo, con `the deadline expired before the prompt was sent` en vez del detalle. No era carga.
+  - Causa (medida con la traza, 2026-11-28, macOS):
+    - el proveedor deja de esperar la página en su propio plazo, `HARNESS_REQUEST_TIMEOUT_S` menos la reserva para cerrar Edge, `min(SHUTDOWN_S, 25 %)`: con 8 s, 2 s antes del plazo de la pregunta (`asyncio.timeout` del servicio). Ese orden es fijo, y el `ProviderTimeout` con el detalle se lanza a tiempo;
+    - pero sale atravesando el cierre de Edge (`EdgeLauncher.open` → `close_owned`, protegido con `shield`). Si cerrar tarda más de esos 2 s, el plazo del servicio vence durante el cierre; `asyncio.timeout` convierte la cancelación en un `TimeoutError` nuevo, y el servicio, que solo miraba si la excepción era del proveedor, daba el texto genérico;
+    - la cancelación que llega al cierre no lleva el `ProviderTimeout` como contexto (comprobado en la traza: `TimeoutError` ← `CancelledError`, nada más), así que no basta con recorrer la cadena.
+    En una máquina donde Edge se cierra en menos de 2 s el test pasaba (95f78a7); donde tarda más, fallaba siempre. El caso hermano `test_page_that_does_not_load_keeps_the_session` tiene la misma carrera solo si el cierre tarda más de unos 26 s (plazo de 40 s, la espera corta a los 4 s); con el arreglo da igual.
+  - Decisión: el plazo de fuera puede vencer primero con toda legitimidad (el cierre de Edge no cabe siempre en el 25 %, y subir la reserva dejaría sin tiempo una pregunta corta). El motivo se adjunta a la cancelación y lo informa el servicio:
+    - `harness/providers/copilot_web.py`: `_Turn.gave_up` guarda el `ProviderTimeout` de `wait_ready`; si llega una `CancelledError` antes de enviar y con `gave_up`, `ask` le pone ese error como `__context__` y la vuelve a lanzar (no la traga: Ctrl+C sigue igual);
+    - `harness/providers/base.py::timeout_on_its_way` busca un `ProviderTimeout` en la cadena de causas y contextos;
+    - `harness/core/service.py` (dos líneas en el `except TimeoutError` y el import) usa ese motivo para el detalle de `timeout_before_send`. Antes valía solo si la excepción era el propio `ProviderTimeout`, y eso sigue igual. El estado no cambia: `timeout`, nada enviado, sesión intacta. Solo un `ProviderTimeout` cuenta como motivo; cualquier otro error del proveedor no se muestra como causa de un plazo.
+    Toca `service.py`, que el primer encargo dejaba fuera, porque la persona ve el detalle que escribe el servicio.
+  - Oráculo, con el orden explícito:
+    - `tests/unit/test_provider_states.py::test_a_reason_given_before_the_deadline_survives_a_close_that_outlasts_it`: un proveedor da su motivo enseguida, tarda 0,6 s en cerrar y la pregunta tiene 0,2 s; hay que ver el motivo, con estado `timeout`;
+    - el control `test_a_deadline_with_no_reason_before_it_stays_generic`: un error que no es `ProviderTimeout` deja el texto genérico;
+    - con Edge, `test_a_readiness_ended_by_the_request_deadline_says_so` en dos casos, `[as_it_is]` y `[slower_than_the_deadline]`. En el segundo, el cierre espera 3 s antes de cerrar, así que el plazo de la pregunta vence siempre durante el cierre.
+  - Recibo (2026-11-28, macOS arm64, Python 3.14.8, Edge instalado):
+    - antes: el unitario falla (texto genérico); con el servicio de antes, los dos casos de Edge fallan con `the deadline expired before the prompt was sent`, también `[as_it_is]` en esta máquina ese día. Con el servicio nuevo pero sin adjuntar el motivo en el proveedor, siguen fallando los dos: hacen falta las dos partes;
+    - con el arreglo, los dos casos y el hermano pasan. Repetido: 20 veces solo, `3 passed` las 20; 8 copias en paralelo, `3 passed` las 8. Una de las copias avisó de un `rm_rf` de pytest sobre su carpeta `garbage-…`: es la limpieza de `pytest-of-…` entre procesos paralelos, no el test.
+- [x] 10.4 Revisión independiente de la rama (2026-11-28, sobre `5b3de58`). Se sostiene 10.3: un plazo viejo no convierte en `timeout` una pregunta enviada, Ctrl+C sigue siendo Ctrl+C y el recorrido de la cadena termina. Hallazgos de este change, corregidos con un test visto en rojo antes:
+  - (2) BAJO. Las lecturas de `not_ready_seen` no tenían plazo. `is_enabled()` espera al elemento hasta su plazo (30 s; el harness no fija uno por defecto) y `count()` se bloqueó 5,7 s con el renderizador ocupado. Así el diagnóstico podía pasar de `ready_by`, comerse la reserva para cerrar Edge y perder el detalle que calculaba.
+    - Arreglo: las lecturas van dentro de un `asyncio.timeout` de como mucho `NOT_READY_READ_S` (1 s) y la mitad de lo que queda hasta el plazo de la pregunta; `is_enabled` recibe ese `timeout=`. Si no da tiempo, o falla cualquier lectura, el detalle dice `the page could not be read`; nunca lanza otra cosa. La cancelación de fuera no se captura.
+    - Oráculo: `tests/unit/test_copilot_not_ready.py`, con una página simulada:
+      - `test_reads_that_do_not_answer_end_within_a_second`: casos `editor_removed_between_checks` (`is_enabled` no responde) y `busy_renderer` (`count` no responde); vuelve en menos de 1,5 s;
+      - `test_no_time_left_reads_nothing_and_never_extends_the_deadline`: sin tiempo no lee; con 0,4 s, las lecturas tienen la mitad;
+      - `test_a_read_that_fails_does_not_raise`;
+      - `test_a_page_that_answers_is_described_by_structure_only`: la consulta no sale y `is_enabled` recibe un plazo explícito de 1000 ms como mucho.
+    - La primera versión acotaba con el plazo del proveedor, que en ese momento ya ha vencido: no leía nada, y los dos casos de Edge de 10.3 lo detectaron (`the page could not be read`). Ahora usa el plazo de la pregunta.
+  - (5) Un test unitario de la línea que pone el motivo en la cancelación (`ask`), que antes solo ejercitaba el test con Edge: `test_a_deadline_during_the_close_carries_the_reason_only_before_sending`. El lanzador simulado cierra en 0,6 s con la forma de `close_owned` (una corrutina aparte; la cancelación no conserva el contexto por sí sola) y la pregunta tiene 0,2 s:
+    - antes de enviar, `timeout_on_its_way` encuentra el motivo;
+    - después de enviar, no lo encuentra.
+  - (4) Anotado como deuda, fuera de alcance: `docs/security/known-debt.md`, punto 3.
+  - Recibo (2026-11-28, macOS arm64, Python 3.14.8):
+    - antes del arreglo (2), 4 failed: sin `timeout=`, los dos que no responden y el de sin tiempo;
+    - con el arreglo, `test_copilot_not_ready.py` → 7 passed;
+    - mutantes de (5): sin poner el contexto, falla `[False]`; poniéndolo también tras enviar, falla `[True]`; restaurado, pasa;
+    - con Edge, los tres de 10.2 → 3 passed.
+- [ ] 10.2 Confirmación en Windows (no es puerta), en PowerShell, sobre la rama: la batería `uv run pytest -m edge` completa. Si vuelve a fallar un «not ready in time», pegar la línea entera del error: el detalle no lleva texto de la página, y la dirección es la del servidor sintético local. Con ella se distingue un arranque lento (`ended by HARNESS_REQUEST_TIMEOUT_S` con muchos segundos desde el inicio de la pregunta y pocos de espera) de una página que no llegó a mostrar el editor (`editor 0 matched`). Además:
+  - `uv run pytest -m edge tests/browser/test_copilot_provider.py -k "not_load or readiness_ended" -v`: pasan los tres, `test_page_that_does_not_load_keeps_the_session` y los dos casos de `test_a_readiness_ended_by_the_request_deadline_says_so`, y el segundo caso confirma que en Windows la cancelación lleva el motivo (10.3);
+  - `uv run pytest tests/unit/test_copilot_not_ready.py tests/unit/test_provider_states.py -v`: pasan (10.4).
   - Estado: **NOT RUN**.
 
 ## Workflow follow-up
