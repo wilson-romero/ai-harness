@@ -156,8 +156,10 @@ Lo que el harness garantiza:
 
 - **Qué carpeta acepta.** No hay carpeta por defecto. Se rechaza:
   - una carpeta que es un enlace o una unión;
-  - la carpeta personal misma y la raíz del sistema;
-  - el repo del harness, el directorio de datos y el vault, tanto si la carpeta es uno de ellos como si está dentro o los contiene. Se compara por nombre (NFC y sin distinguir mayúsculas) y por identidad (`st_dev` y `st_ino`) de cada antepasado.
+  - una ruta de red o de dispositivo, es decir, la que empieza por dos separadores (`\\servidor\recurso`, `\\localhost\C$\…`, `\\?\GLOBALROOT\…`, `//x`), escrita así o resuelta así (una unidad de red mapeada en Windows);
+  - la carpeta personal misma, una carpeta que la contiene y la raíz del sistema;
+  - un punto de montaje (su `st_dev` no es el de su carpeta padre): se elige una carpeta de dentro;
+  - el repo del harness, el directorio de datos y el vault, tanto si la carpeta es uno de ellos como si está dentro o los contiene. Se compara por nombre (NFC y sin distinguir mayúsculas), por identidad (`st_dev` y `st_ino`) de cada antepasado y, desde la revisión de `d0a65d8`, buscando un **segundo camino** a ellos: en macOS `/System/Volumes/Data/Users` es `/Users` (un *firmlink* de APFS, con el mismo `st_dev` que `/`), así que `/System/Volumes/Data`, `/System/Volumes` y `/System` daban acceso al repo, al directorio de datos, al vault y a la carpeta personal. Ahora se busca dentro de la carpeta elegida, hasta dos niveles de subcarpetas y sin seguir enlaces, el final de la ruta de cada carpeta protegida con su misma identidad. Límite: se listan como mucho 2 000 carpetas; un segundo camino más profundo o más allá de ese número no se ve.
 - **Qué ruta acepta.** Las rutas son relativas y se comprueban con la misma función pura en macOS y en Windows. Se rechazan:
   - `..`, rutas absolutas de cualquier sistema, `\`, `:` (unidades y flujos alternativos) y `<>"|?*`;
   - invisibles, controles, lo que no está en NFC y los nombres reservados de Windows;
@@ -170,27 +172,32 @@ Lo que el harness garantiza:
   - el fichero se abre sin seguir enlaces (`O_NOFOLLOW` donde existe). Sobre el descriptor se comprueba que sigue siendo el mismo fichero regular, con un solo enlace, y que lo leído no pasa del tope. Después se comprueba que sigue resolviendo dentro de la carpeta.
 - **Qué no se lee nunca,** aunque esté dentro:
   - `.git/`, `.ssh/`, `.aws/` y los demás componentes de la lista;
-  - `.env` y `.env.*` (salvo los de ejemplo), los nombres y extensiones de claves y credenciales de la lista;
-  - un fichero con una credencial de forma conocida;
+  - `.env`, `.env.*`, `.env-*`, `.env_*` y `*.env` (salvo los de ejemplo), `kubeconfig`, el estado y las variables de Terraform (`*.tfstate`, `*.tfstate.backup`, `*.tfvars`), los ficheros de clientes con contraseña (`.npmrc`, `.pypirc`, `.netrc`, `.pgpass`, `.my.cnf`, `.htpasswd`, `.vault-token`, `.dockercfg`) y los nombres y extensiones de claves de la lista (`id_rsa*`, `id_ed25519*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`…). Son **convenciones, no una garantía**: una credencial en un fichero con otro nombre se lee si su contenido no tiene una forma conocida;
+  - un fichero con una credencial de forma conocida, incluida desde la revisión de `d0a65d8` una contraseña dentro de una URL (el `usuario:contraseña` de `esquema://…@host`);
   - un binario, un fichero que no es UTF-8 o uno de más de 256 KiB.
-- **Cómo se muestra.** El texto del fichero sale tras `| `, con cada invisible o control escrito como `<U+XXXX>` y las credenciales enmascaradas. Una línea de un fichero no puede pasar por una del harness: las del harness van por stderr y nunca llevan texto del fichero.
+- **Cómo se muestra.** El texto del fichero sale tras `| `, con cada invisible o control escrito como `<U+XXXX>` y las credenciales enmascaradas antes y después de cortar la línea a 500 caracteres (una credencial que el corte deja reconocible también se tapa). Una línea de un fichero no puede pasar por una del harness: las del harness van por stderr y nunca llevan texto del fichero.
 - **Qué se guarda.** Nada del fichero. La auditoría (`tool_calls` y `workspace_events`) guarda el motivo y la ruta solo como HMAC.
 - **En la conversación (B2):**
   - la carpeta vale para la sesión en curso y vive solo en memoria: no se escribe en la base de datos, y otra sesión (o un `chat` nuevo) empieza sin carpeta. Sin carpeta, `workspace` no está en el catálogo y un plan que lo nombra se rechaza (`server_not_allowed`);
   - el catálogo describe las dos herramientas con texto fijo del harness y nunca lleva la ruta de la carpeta ni un listado;
   - las lecturas pasan por la misma política, el mismo hash de la lista (que ata la carpeta: otra carpeta entre leer y ejecutar el plan da `list_changed`) y la misma tabla `tool_calls` que una herramienta MCP;
   - la ruta que escribe el modelo es un argumento acotado: como mucho 64 caracteres de `[A-Za-z0-9._-]` y `/`, sin `.` ni `..` como componente, y además pasa el confinamiento de arriba. Por eso dentro de `/agent` corren por regla, sin caja;
-  - si la carpeta se sustituye después de elegirla, se suspende (`workspace_changed`) hasta un `/workspace` nuevo, aunque vuelva la misma;
+  - si la carpeta se sustituye después de elegirla, se suspende (`workspace_changed`) hasta un `/workspace` nuevo, aunque vuelva la misma. Se comprueba **al principio de cada llamada**, no durante ella;
+  - cada llamada de un plan espera como mucho 10 s (`call_timeout_s`) y Ctrl+C o el plazo del plan la cortan (`timeout`, `interrupted`), también sobre un disco de red que no contesta;
+  - **cuánto sale por bucle:** de los resultados, como mucho 4 KiB por paso y 12 KiB por envío, y solo llevan resultados las vueltas 2 a N y la de cierre: N × 12 KiB por `/agent`, **60 KiB con 5 vueltas** (el valor por defecto) y **120 KiB con 10** (`HARNESS_LOOP_MAX_TURNS`, el máximo). Medido: 59 280 bytes en los 5 envíos de un bucle que lee tres ficheros de 16 KiB en cada vuelta (`test_what_one_loop_sends_of_the_folder_is_bounded`). Cada envío, además, no pasa de 28 000 caracteres;
   - **consentimiento de envío por carpeta:** con un proveedor que no es sintético, lo que devuelve una lectura de la carpeta solo vuelve al proveedor si diste `/workspace send on` para esa carpeta y ese proveedor, en su caja. Está apagado por defecto; `/workspace send off` lo revoca. Se guarda con un HMAC de la ruta y de la identidad de la carpeta, nunca con la ruta. Sin él, `/plan` solo te muestra el contenido a ti y `/agent` para sin enviar (`not sent: no consent for this folder`). Con él, la caja de `/agent` de la primera vuelta con resultados se sigue pidiendo en cada bucle. Un rechazo (el motivo, sin texto del fichero) sí vuelve. El Mock no lo necesita: su contenido no sale de la máquina.
 
 Lo que **no** garantiza:
 
 - **Secretos.** Un secreto con forma desconocida en un fichero normal se lee y se muestra.
-- **Carreras con otro proceso.** Un proceso con tu cuenta que cambie una carpeta intermedia por un enlace entre la comprobación y la apertura no siempre se detecta: no hay `openat` portable. El harness sí detecta el cambio del fichero mismo y de la carpeta raíz. Quien controla tu cuenta ya puede leer esos ficheros sin el harness (deuda conocida 1 y 15).
+- **Carreras con otro proceso.** Un proceso con tu cuenta que cambie una carpeta intermedia por un enlace entre la comprobación y la apertura no siempre se detecta: no hay `openat` portable. El harness sí detecta el cambio del fichero mismo y el de la carpeta raíz, este al principio de cada llamada. Quien controla tu cuenta ya puede leer esos ficheros sin el harness (deuda conocida 1 y 15).
 - **Lo que un fichero hostil consigue con el consentimiento dado.** Dentro de `/agent`, un fichero puede convencer al modelo de leer otro fichero normal de la carpeta y de mandar su contenido al proveedor en la vuelta siguiente. Lo acotan las reglas fijas, el tope de lo que se envía por paso (4 KiB) y por vuelta, y que cada vuelta se muestra antes de salir. No se impide.
 - **La ruta como canal.** La ruta que el modelo elige es un canal pequeño (64 caracteres de un alfabeto corto) que solo llega al disco local y a la auditoría como HMAC: no sale de la máquina. El canal grande es el contenido devuelto, y ese pasa por el consentimiento.
 - **Nombres que un plan no alcanza.** Un fichero cuyo nombre lleva espacios, acentos u otros caracteres, o cuya ruta pasa de 64 caracteres, no se puede leer desde un plan en esta versión (sí con `main.py workspace read`).
-- **Windows.** Ahí no se ha ejecutado (NOT RUN), ni B1 ni B2. Las uniones, los enlaces duros de NTFS, los nombres cortos y los flujos alternativos se rechazan por regla y se prueban simulados en macOS.
+- **Puntos de montaje dentro de la carpeta.** Se atraviesan sin aviso: un volumen montado en una subcarpeta se lee como el resto (decisión del dueño pendiente, `tasks.md` 3b.8).
+- **Lo ya enviado.** `/workspace send off` evita los envíos siguientes; lo que ya se envió queda en la conversación del proveedor.
+- **Lo que no se acota en el tiempo.** El plazo corta la espera, no la llamada al sistema: una lectura sobre un disco de red que no contesta sigue bloqueada en un hilo hasta que el sistema responde. `main.py workspace` y la elección de la carpeta (`/workspace`, `--root`) no tienen plazo (deuda conocida 15).
+- **Windows.** Ahí no se ha ejecutado (NOT RUN), ni B1 ni B2 ni la revisión de `d0a65d8`. Las uniones, los enlaces duros de NTFS, los nombres cortos y los flujos alternativos se rechazan por regla y se prueban simulados en macOS.
 
 ## Matriz SEC y deuda conocida
 

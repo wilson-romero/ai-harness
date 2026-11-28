@@ -28,12 +28,11 @@ Si la carpeta aceptada deja de ser la misma (otra identidad, o ahora es un enlac
 - **THEN** la siguiente herramienta se rechaza con `workspace_changed` sin leer nada, y la carpeta queda suspendida hasta un `/workspace` nuevo
 
 ### Requirement: Carpetas que no se aceptan
-Una carpeta SHALL rechazarse, con un motivo estable y antes de guardar nada, en cualquiera de estos casos:
-- no es absoluta;
-- ella o uno de sus componentes es un enlace o una unión;
-- no es una carpeta;
-- su forma resuelta es, está dentro de o contiene el repo del harness, el directorio de datos, el vault o el `work_root` de `code-run`;
-- es la carpeta personal misma o la raíz de un sistema de ficheros.
+Una carpeta SHALL rechazarse, con un motivo estable y antes de guardar nada, si:
+- no es absoluta, es una ruta de red o de dispositivo, o un punto de montaje;
+- ella o uno de sus componentes es un enlace o una unión, o no es una carpeta;
+- es, está dentro de o contiene (también por otro camino) el repo del harness, el directorio de datos, el vault o el `work_root` de `code-run`;
+- es o contiene la carpeta personal, o es la raíz de un sistema de ficheros.
 
 #### Scenario: El repo del harness
 - **WHEN** la persona elige la raíz del repo del harness o una subcarpeta suya
@@ -42,6 +41,14 @@ Una carpeta SHALL rechazarse, con un motivo estable y antes de guardar nada, en 
 #### Scenario: Una carpeta que contiene el directorio de datos
 - **WHEN** la carpeta elegida contiene `HARNESS_DATA_DIR`
 - **THEN** se rechaza con `data_dir`
+
+#### Scenario: Un segundo camino a una carpeta protegida
+- **WHEN** la carpeta elegida, o una de sus subcarpetas hasta dos niveles, da por otro nombre a la misma carpeta (misma identidad) que el directorio de datos, como `/System/Volumes/Data` en macOS
+- **THEN** se rechaza con `data_dir`
+
+#### Scenario: Una ruta de red o de dispositivo
+- **WHEN** la persona elige `\\localhost\C$\Users` o `\\?\GLOBALROOT\…`
+- **THEN** se rechaza con `device_path` en cualquier plataforma
 
 #### Scenario: La carpeta personal y la raíz
 - **WHEN** la persona elige su carpeta personal o la raíz del sistema de ficheros
@@ -84,8 +91,16 @@ Aunque estén dentro de la carpeta, SHALL rechazarse para leer y para escribir, 
 - **WHEN** un plan pide `read` de `.env` y de `.git/config`
 - **THEN** los dos pasos se rechazan con su motivo y ninguno de los dos ficheros se abre
 
+#### Scenario: Otros nombres de credenciales por convención
+- **WHEN** se pide `read` de `prod.env`, `.env-local`, `kubeconfig` o `terraform.tfstate`
+- **THEN** cada uno se rechaza con `denied_name` sin abrirlo
+
 ### Requirement: Ficheros prohibidos por contenido o tamaño
 SHALL rechazarse entero, para leer y para editar, un fichero que contiene una credencial con una forma que conoce el redactor, un fichero binario o que no es UTF-8 válido, y un fichero de más de 256 KiB.
+
+#### Scenario: Contraseña dentro de una URL
+- **WHEN** un fichero contiene una URL `postgres://…@host` con su `usuario:contraseña`
+- **THEN** `read` se rechaza con `credential_in_file`
 
 #### Scenario: Credencial dentro de un fichero normal
 - **WHEN** `config.py` contiene una clave con la forma de una credencial conocida
@@ -109,8 +124,20 @@ Toda escritura en una ruta con un componente oculto (que empieza por punto) SHAL
 - **WHEN** se pide `read` de un fichero de 1 000 líneas sin rango
 - **THEN** se devuelven las líneas 1 a 200, y la cabecera dice `lines 1–200 of 1000`
 
+#### Scenario: Una lectura que no contesta
+- **WHEN** un paso de un plan lee de un disco que no contesta
+- **THEN** el paso termina con `timeout` a los 10 s, o antes con Ctrl+C (`interrupted`), y el plan sigue con su informe
+
+#### Scenario: Una credencial que el corte deja a la vista
+- **WHEN** una línea de más de 500 caracteres solo tiene una credencial reconocible una vez cortada
+- **THEN** la línea mostrada lleva la marca de la credencial, no la credencial
+
 ### Requirement: Listado de una carpeta acotado
-`list` SHALL devolver como mucho 500 entradas hasta una profundidad de 3, sin seguir enlaces y sin abrir ficheros, marcando enlaces y entradas prohibidas.
+`list` SHALL devolver como mucho 500 entradas hasta una profundidad de 3, sin seguir enlaces y sin abrir ficheros, marcando enlaces y entradas prohibidas, y SHALL decir cuántas entradas dejó fuera.
+
+#### Scenario: Un listado que pasa del tope
+- **WHEN** se pide `list` de una carpeta con 506 entradas
+- **THEN** salen 500 y el resultado dice que faltan 6
 
 #### Scenario: Un listado con un enlace
 - **WHEN** se pide `list` de una carpeta con un enlace y una carpeta `.git`
@@ -300,6 +327,10 @@ Con un proveedor distinto del Mock, el resultado de una lectura de la carpeta SH
 #### Scenario: Consentimiento dado y revocado
 - **WHEN** la persona aprueba `/workspace send on` en su caja, pide un `/agent` que lee `app.py`, y después escribe `/workspace send off` y pide otro
 - **THEN** el primero envía la lectura tras la caja de su primera vuelta con resultados, y el segundo para con `not sent: no consent for this folder`; el consentimiento se guarda sin la ruta
+
+#### Scenario: Caja del consentimiento caducada o interrumpida
+- **WHEN** la persona responde a la caja de `/workspace send on` después de su plazo, o escribe el código tras pulsar Ctrl+C
+- **THEN** el consentimiento no se da (`expired` o `undecided`), la auditoría lo dice y `/agent` no envía nada de la carpeta
 
 ### Requirement: El contenido de un fichero nunca aprueba
 Un texto dentro de un fichero de la carpeta SHALL tratarse como datos. SHALL NOT aprobar, cambiar un plan, elegir otra carpeta ni dibujar una línea o un botón del harness.

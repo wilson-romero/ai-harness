@@ -22,13 +22,15 @@ uv run python main.py workspace list [<carpeta-relativa>] --root <carpeta> [--de
 ## Qué carpeta se acepta
 
 Se rechazan, con su motivo:
+- una ruta de red o de dispositivo, que empieza por dos separadores: `\\servidor\recurso`, `\\localhost\C$\…`, `\\?\GLOBALROOT\…`, `//x` (`device_path`);
 - una ruta que no es absoluta (`not_absolute`);
 - una que no existe (`root_not_found`);
 - un fichero (`not_a_directory`);
 - un enlace o una unión (`link`);
-- el repo del harness, el directorio de datos o el vault: siendo ellos, estando dentro o conteniéndolos (`harness_repo`, `data_dir`, `vault`);
-- la carpeta personal misma (`home`);
-- la raíz del sistema (`filesystem_root`).
+- el repo del harness, el directorio de datos o el vault: siendo ellos, estando dentro o conteniéndolos, también por un segundo camino a las mismas carpetas, como `/System/Volumes/Data` en macOS (`harness_repo`, `data_dir`, `vault`);
+- la carpeta personal misma o una que la contiene (`home`);
+- la raíz del sistema (`filesystem_root`);
+- un punto de montaje: el disco o volumen mismo, no una carpeta de dentro (`mount_point`).
 
 Una carpeta bajo un enlace del sistema (en macOS, `/tmp` → `/private/tmp`) se acepta y se muestra resuelta.
 
@@ -50,8 +52,8 @@ Cada componente tiene que llamarse **exactamente** como lo lista su carpeta, as�
 ## Lo que nunca se lee
 
 Hay dos grupos de reglas:
-- **Por nombre:** `.git/`, `.ssh/`, `.aws/` y los demás componentes de la lista; `.env` y `.env.*` (salvo `.env.example`, `.env.sample` y `.env.template`); `.npmrc`, `.netrc` y `.pypirc`; `id_rsa*`; `*.pem`, `*.key`, `*.p12` y el resto de la lista de `harness/workspace/rules.py`.
-- **Por contenido o tamaño:** un fichero con una credencial de forma conocida (`credential_in_file`), un binario o un fichero que no es UTF-8 (`binary`) y uno de más de 256 KiB (`too_large`).
+- **Por nombre:** `.git/`, `.ssh/`, `.aws/` y los demás componentes de la lista; `.env`, `.env.*`, `.env-*`, `.env_*` y `*.env` (salvo `.env.example`, `.env.sample` y `.env.template`); `kubeconfig` y `*.kubeconfig`; `*.tfstate`, `*.tfstate.backup`, `*.tfvars` y `*.tfvars.json`; `.npmrc`, `.netrc`, `.pypirc`, `.pgpass`, `.my.cnf`, `.htpasswd`, `.vault-token` y `.dockercfg`; `id_rsa*` e `id_ed25519*`; `*.pem`, `*.key`, `*.p12`, `*.pfx` y el resto de la lista de `harness/workspace/rules.py`. Son convenciones de nombre, no una garantía.
+- **Por contenido o tamaño:** un fichero con una credencial de forma conocida, también una contraseña en una URL, el `usuario:contraseña` de `postgres://…@host` (`credential_in_file`), un binario o un fichero que no es UTF-8 (`binary`) y uno de más de 256 KiB (`too_large`).
 
 **Lo que esto NO protege.** Un secreto con forma desconocida dentro de un fichero normal (una contraseña en `config.py`) se lee y se muestra. En B1 no sale de tu máquina: no hay bucle ni proveedor.
 
@@ -101,7 +103,10 @@ La demo completa, con todos los casos negativos, es `uv run python scripts/demo_
 - Se ve en el panel lateral (`Workspace`) y en `/status` (`workspace: …, send: …`).
 - Con carpeta, el catálogo de `/plan` y `/agent` gana dos líneas fijas: `workspace.list(depth, path)` y `workspace.read(limit, offset, path)`. La ruta va relativa a la carpeta, con `/`, como mucho 64 caracteres de `A-Z a-z 0-9 . _ -`. Las dos son lecturas por regla: corren sin caja (salvo `/plan --box` o `HARNESS_AUTO_READ=off`).
 - **Consentimiento.** Con el Mock no hace falta. Con un proveedor que no es sintético, `/agent` no envía nada de la carpeta hasta `/workspace send on`, y para con `not sent: no consent for this folder`. Dado el consentimiento, la caja de la primera vuelta con resultados de cada `/agent` se sigue pidiendo. `/workspace send off` lo revoca.
-- Si la carpeta se sustituye por otra después de elegirla, queda suspendida (`workspace_changed`) hasta otro `/workspace`.
+- Si la carpeta se sustituye por otra después de elegirla, queda suspendida (`workspace_changed`) hasta otro `/workspace`. Se comprueba al principio de cada llamada.
+- La caja de `/workspace send on` caduca como las demás (`expires:`): una respuesta tardía o escrita tras Ctrl+C no concede nada. Lo concedido no caduca: dura hasta `/workspace send off`.
+- Cada lectura de un plan espera como mucho 10 s; Ctrl+C la corta (`timeout`, `interrupted`). `list` dice cuántas entradas no mostró pasado su tope.
+- **Cuánto sale por `/agent`:** como mucho 12 KiB de resultados por envío y N envíos con resultados (las vueltas 2 a N y la de cierre): 60 KiB con 5 vueltas, 120 KiB con 10 (`HARNESS_LOOP_MAX_TURNS`).
 
 Probarlo a mano con el Mock (zsh), sin red y en una carpeta temporal:
 

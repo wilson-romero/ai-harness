@@ -232,6 +232,84 @@ Leyenda: **oráculo** = qué dice SÍ; **control negativo** = la mutación o el 
   | 20 | el vault de la conversación sin proteger | `test_the_conversation_s_own_vault_is_protected_without_the_variable` |
   | 21 | el panel sin la carpeta | `test_workspace_sets_shows_and_unsets_the_folder` |
 
+## 3b. Revisión independiente (2026-11-28, sobre `d0a65d8`)
+
+Cada arreglo tiene una prueba que se vio fallar sobre el código revisado, antes del arreglo. Ese fallo es su control negativo, y su mutación vuelve a hacerla fallar (3b.7). Las mutaciones se corrieron con `PYTHONDONTWRITEBYTECODE=1`: una mutación del mismo tamaño restaurada en el mismo segundo deja un `.pyc` viejo que pytest sigue usando (pasó una vez en esta revisión y se vio por un fallo que no tocaba).
+
+- [x] 3b.1 Hallazgo 1 (MEDIUM), una carpeta que da a las protegidas por un segundo camino. Medido en macOS 26: `/System/Volumes/Data`, `/System/Volumes` y `/System` se aceptaban. La premisa de la revisión (un punto de montaje tiene otro `st_dev`) **no se cumple** en APFS: `/`, `/Users` y `/System/Volumes/Data` dan el mismo `st_dev`, y `os.path.ismount('/System/Volumes/Data')` es `False`. Arreglo (design B1-6):
+  - búsqueda del final de la ruta de cada carpeta protegida, con su misma identidad, dentro de la carpeta elegida y de sus subcarpetas hasta dos niveles, como mucho 2 000 carpetas (`root._second_path`);
+  - `mount_point` para una carpeta cuyo `st_dev` no es el de su padre;
+  - `device_path` para una ruta, escrita o resuelta, que empieza por dos separadores;
+  - `home` también para una carpeta que contiene la personal.
+
+  Sin `sys.platform` ni `os.name`: `test_portability.py` pasa.
+  - Oráculo: `test_a_folder_that_reaches_a_protected_folder_by_a_second_path_is_refused` (simulado con `_identity`, tres niveles), `test_a_folder_beside_the_second_path_is_still_accepted`, `test_a_folder_containing_the_home_folder_is_refused`, `test_a_mount_point_is_refused` (`st_dev` simulado), `test_a_network_or_device_path_is_refused_on_every_platform` (seis formas, sin `skip`), `test_a_resolved_network_path_is_refused` y `test_the_real_data_volume_is_refused_where_the_machine_has_one` (las tres rutas reales; se omite por capacidad si la máquina no muestra el repo o el directorio de datos otra vez bajo `/System/Volumes/Data`).
+  - Recibo (2026-11-28, macOS 26 arm64): antes del arreglo → `15 failed, 26 passed`, también las tres rutas reales (`DID NOT RAISE`); después → `41 passed`. Con el código arreglado, `check_root` rechaza `/System/Volumes/Data`, `/System/Volumes`, `/System` y `/System/Volumes/Data/Users` con `harness_repo`. Mutaciones M1 a M6 → muertas.
+  - Windows: `\\?\GLOBALROOT\…` y `\\localhost\C$\…` se rechazan por su forma, probado en macOS con las cadenas. **NOT RUN en Windows**.
+- [x] 3b.2 Hallazgo 2 (LOW), el corte de línea iba después de la redacción. Ahora `render.shown_line` redacta otra vez tras cortar, como `loop.results_block`. Arregla la salida de la CLI, la pantalla de `/plan` y los nombres de `list`, que pasan por la misma función.
+  - Oráculo: `test_a_credential_that_the_cut_makes_recognisable_is_masked` (459 `x`, un espacio, `ghp_` y 36 caracteres, y `_suffix`).
+  - Recibo (2026-11-28): antes → `failed` (el token en claro, `masked == 0`); después → pasa. M7 → muerta.
+- [x] 3b.3 Hallazgo 3 (LOW), nombres de credenciales que se leían y contraseñas en URL sin tapar.
+  - Nombres nuevos en `rules.py`:
+    - `*.env`, `.env-*`, `.env_*`, `kubeconfig` y `*.kubeconfig`;
+    - `*.tfstate`, `*.tfstate.backup`, `*.tfvars` y `*.tfvars.json`;
+    - `.pgpass`, `.my.cnf`, `.htpasswd`, `.vault-token`, `.dockercfg` y `secrets.toml`.
+
+    `.npmrc`, `.pypirc`, `.netrc`, `id_rsa*`, `id_ed25519*`, `*.pem`, `*.key`, `*.p12` y `*.pfx` ya estaban.
+  - La contraseña de una URL (el `usuario:contraseña` de `esquema://…@host`) es el formato 14 de `harness/text/redaction.py`. Se tapa solo `usuario:contraseña`, en todas las superficies que redactan (vault, stderr MCP, resultados, carpeta). En la carpeta, como cualquier credencial conocida, rechaza el fichero (`credential_in_file`). Patrón lineal: el esquema empieza su tramo, y ni el usuario ni la contraseña admiten `/`, `@` ni espacios.
+  - Documentado que los nombres son convenciones, no una garantía.
+  - Oráculo: `test_the_review_s_credential_names_are_refused` (18 nombres), `test_the_review_s_look_alikes_are_still_read`, `test_a_file_with_credentials_in_a_url_is_not_read`, `test_a_password_in_a_url_is_masked_and_the_rest_is_kept` (cuatro esquemas), `test_url_look_alikes_are_unchanged` (siete casos) y `test_the_url_pattern_is_linear`.
+  - Recibo (2026-11-28): antes → `21 failed, 111 passed`; después → pasan, junto con `test_stream_redaction.py`. `test_thirteen_formats` pasa a `test_thirteen_formats_and_the_url_password` (14 patrones). M8 a M13 → muertas; M9 (sin la condición de inicio de tramo) vuelve cuadrático el patrón y hace fallar la prueba de tiempo.
+- [x] 3b.4 Hallazgo 4 (LOW), la caja de `/workspace send on` no caducaba ni retiraba un Ctrl+C. Ahora copia el control de `loop_flow._Loop._consent`: muestra `expires:`, una respuesta tardía queda `expired` y lo escrito tras un Ctrl+C queda `undecided` (design B2-3, revisado).
+  - Oráculo: `test_a_consent_answered_after_it_expired_grants_nothing` (reloj de test, 901 s) y `test_a_code_typed_after_ctrl_c_at_the_consent_box_grants_nothing`. En los dos, ninguna fila en `workspace_consents` y un solo envío al proveedor.
+  - Recibo (2026-11-28): antes → `2 failed` (el segundo concedía el consentimiento); después → pasan. M14 y M15 → muertas.
+- [x] 3b.5 Hallazgo 5 (LOW), `call_timeout_s` no se aplicaba y la parada se ignoraba. Ahora `WorkspaceServer.call` corre la herramienta en un hilo y espera como mucho `call_timeout_s`, o hasta la `StopSignal` que el gateway le pasa ahora (design B2-9). Cortada por el plazo, la llamada da `timeout`; por la parada, `KeyboardInterrupt` con su `outcome`, como `run_session`. Los códigos nuevos `timeout` e `interrupted` están en `CALL_CODES` y en el `CHECK` de la migración 011, que no ha salido de esta rama.
+  - Oráculo: `test_a_read_that_does_not_answer_ends_at_its_call_timeout`, `test_a_stop_cuts_a_read_that_does_not_answer` (los dos con un `run_tool` que se bloquea, en menos de 5 s) y `test_the_gateway_hands_its_stop_to_the_work_folder`.
+  - Recibo (2026-11-28): antes → `3 failed`; después → pasan. M17, M18 y M19 → muertas.
+  - **Lo que no queda acotado** (deuda conocida 15):
+    - la llamada al sistema sigue bloqueada en su hilo hasta que el disco responde;
+    - `main.py workspace` y la elección de la carpeta (con su búsqueda de un segundo camino) no tienen plazo.
+- [x] 3b.6 Hallazgo 6, el texto y el código no coincidían:
+  - **Tope total por bucle**, escrito en `SECURITY.md`, el runbook y design B2-9: N × 12 KiB de resultados, 60 KiB con 5 vueltas y 120 KiB con 10. La revisión estimó unos 72 y 132 KiB, contando también el primer envío, que no lleva resultados. Medido con `test_what_one_loop_sends_of_the_folder_is_bounded`: **59 280 bytes** en 5 envíos.
+  - **«El cambio de la carpeta se detecta»** ahora dice «al principio de cada llamada» en `SECURITY.md`, `known-debt.md` 15, el runbook y design B2-6.
+  - **D4 y la cuenta de lo que falta.** `list` sigue contando pasado su tope, como mucho 5 000 entradas más (`LIST_COUNT_MAX`): `[listing stopped at 500 entries; N more not listed]`. El servidor dice `M more not shown` cuando corta a 16 KiB, y la CLI lo dice en su aviso. Oráculo: `test_list_says_how_many_entries_it_left_out`, `test_the_count_of_what_was_left_out_is_bounded` y `test_a_listing_says_how_many_entries_it_did_not_show`. Antes → `3 failed`; M20 y M21 → muertas.
+  - **`workspace_changed` en la auditoría.** Encontrado por una llamada que la política permitió, se guarda `allowed`, `failed` y `tool_error`, lo que ve el plan. El rechazo de `--root` en la CLI sigue siendo `denied`/`server_not_allowed`. Oráculo: `test_a_replaced_folder_is_audited_as_what_the_plan_saw` y el caso revisado de `test_each_outcome_leaves_its_rows`. Antes → `failed`; M16 → muerta.
+- [x] 3b.7 Mutaciones de esta revisión. Cada una se aplica a un fichero de producto y se restaura al momento, con `PYTHONDONTWRITEBYTECODE=1`.
+
+  Recibo (2026-11-28, macOS): **21 mutaciones, 0 supervivientes**. M6 sobrevivió en la primera pasada, porque la búsqueda del segundo camino también rechaza una carpeta que contiene la personal. Se mató añadiendo a su test el caso con `_second_path` anulado: son dos capas.
+
+  | # | Mutación | Test que falla (el primero) |
+  |---|---|---|
+  | M1 | sin buscar el segundo camino | `test_a_folder_that_reaches_a_protected_folder_by_a_second_path_is_refused` y las 3 rutas reales |
+  | M2 | la búsqueda sin bajar de nivel | los mismos, niveles 1 y 2, y `/System/Volumes`, `/System` reales |
+  | M3 | sin `mount_point` | `test_a_mount_point_is_refused` |
+  | M4 | sin `device_path` sobre lo escrito | `test_a_network_or_device_path_is_refused_on_every_platform` (6) |
+  | M5 | sin `device_path` sobre lo resuelto | `test_a_resolved_network_path_is_refused` |
+  | M6 | `home` sin «contiene» | `test_a_folder_containing_the_home_folder_is_refused` |
+  | M7 | sin redactar tras el corte | `test_a_credential_that_the_cut_makes_recognisable_is_masked` |
+  | M8 | sin el patrón de URL | `test_a_password_in_a_url_is_masked_and_the_rest_is_kept` (4) y `test_a_file_with_credentials_in_a_url_is_not_read` |
+  | M9 | el patrón de URL sin la condición de inicio | `test_the_url_pattern_is_linear` |
+  | M10 | `*.env` legible | `test_the_review_s_credential_names_are_refused` |
+  | M11 | `.env-*` y `.env_*` legibles | `test_the_review_s_credential_names_are_refused` |
+  | M12 | estado y variables de Terraform legibles | `test_the_review_s_credential_names_are_refused` |
+  | M13 | `kubeconfig` legible | `test_the_review_s_credential_names_are_refused` |
+  | M14 | la caja del consentimiento sin plazo | `test_a_consent_answered_after_it_expired_grants_nothing` |
+  | M15 | sin retirar el Ctrl+C | `test_a_code_typed_after_ctrl_c_at_the_consent_box_grants_nothing` |
+  | M16 | `workspace_changed` otra vez `denied` | `test_a_replaced_folder_is_audited_as_what_the_plan_saw` |
+  | M17 | el gateway sin pasar la parada | `test_the_gateway_hands_its_stop_to_the_work_folder` |
+  | M18 | sin plazo | `test_a_read_that_does_not_answer_ends_at_its_call_timeout` |
+  | M19 | la parada sin despertar la espera | `test_a_stop_cuts_a_read_that_does_not_answer` |
+  | M20 | `list` sin contar lo que falta | `test_list_says_how_many_entries_it_left_out` |
+  | M21 | el servidor sin sumar lo que falta | `test_a_listing_says_how_many_entries_it_did_not_show` |
+- [ ] 3b.8 **Decisiones del dueño, pendientes.** No las tomó esta revisión; el código hace hoy lo que dice cada punto:
+  1. el consentimiento es persistente por carpeta y proveedor, sin plazo sobre lo concedido: dura hasta `/workspace send off` (la caja que lo pide sí caduca, 3b.4);
+  2. un fichero con más de un enlace duro se rechaza (`hard_link`), así que no se leen los `node_modules` de pnpm, que son enlaces duros a su almacén;
+  3. un punto de montaje dentro de la carpeta se atraviesa sin aviso (solo se rechaza la carpeta que es un punto de montaje);
+  4. tras `/workspace send off`, lo ya enviado se queda en la conversación del proveedor: el harness no puede retirarlo.
+
+  Hecho: cada punto dice «tomada por el dueño el …», o se edita la decisión en `design.md`.
+- [ ] 3b.9 Integración con `develop` y la tanda sin Edge sobre el árbol mergeado. Recibo: pendiente.
+
 ## 4. B3 · Escrituras con diff y aprobación
 
 - [ ] 4.1 Medir si `plan_runs` (migración 009) guarda la aprobación de una lista de efectos sin columnas nuevas. Hecho: la respuesta y, si hace falta, la columna en la migración nueva. Recibo.

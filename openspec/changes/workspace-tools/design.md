@@ -48,7 +48,7 @@ Lo que hacen OpenCode, Claude Code y Codex con sus herramientas de ficheros est�
     4. la resuelta no es, ni está dentro de, ni contiene: la raíz del repo del harness (la carpeta que contiene el paquete `harness`, resuelta), `HARNESS_DATA_DIR`, `HARNESS_VAULT_ROOT` (si está puesta) y el `work_root` de `code-run` (si existe su configuración);
     5. no es la carpeta personal (`Path.home()` resuelta) ni la raíz de un sistema de ficheros (`path == Path(path.anchor)`). Una subcarpeta de la carpeta personal sí vale.
 
-    La comparación usa `is_within` de `memory/paths.py` en los dos sentidos. Cada rechazo tiene un motivo estable: `not_absolute`, `link`, `not_a_directory`, `harness_repo`, `data_dir`, `vault`, `code_run_root`, `home`, `filesystem_root`.
+    La comparación usa `is_within` de `memory/paths.py` en los dos sentidos. Cada rechazo tiene un motivo estable: `not_absolute`, `link`, `not_a_directory`, `harness_repo`, `data_dir`, `vault`, `code_run_root`, `home`, `filesystem_root`. **Revisado tras la revisión de `d0a65d8` (B1-6):** además `device_path` (una ruta que empieza por dos separadores, escrita o resuelta), `mount_point` (su `st_dev` no es el de su padre), `home` también para una carpeta que **contiene** la personal, y la búsqueda de un segundo camino a las carpetas protegidas.
   - **Qué se guarda.** ~~La ruta resuelta y su identidad (`st_dev`, `st_ino`) en una tabla nueva de la sesión.~~ **Revisado en B2 (2026-11-28, B2-1):** la ruta resuelta y su identidad viven solo en la memoria de la conversación; en la base de datos no se escribe la ruta. En cada uso se vuelve a hacer `lstat` de la raíz: si la identidad cambió o ahora es un enlace, la carpeta queda **suspendida** (`workspace_changed`) hasta un `/workspace` nuevo.
   - **Qué ve la persona:**
     - el panel lateral gana una línea `workspace: <ruta resuelta>` o `workspace: -`;
@@ -163,7 +163,7 @@ Lo que hacen OpenCode, Claude Code y Codex con sus herramientas de ficheros est�
     - como mucho 500 entradas, por orden de nombre, carpetas con `/` al final;
     - nunca sigue un enlace: los enlaces, las uniones y lo prohibido salen con su marca (`[link]`, `[denied: .git]`);
     - no abre ningún fichero;
-    - el tope se dice (`… 120 more entries not listed`).
+    - el tope se dice. **Revisado tras la revisión de `d0a65d8`:** antes solo decía `[listing stopped at 500 entries]`, sin la cuenta. Ahora, pasado el tope, el paseo sigue solo para contar, como mucho 5 000 entradas más (`LIST_COUNT_MAX`): `[listing stopped at 500 entries; 120 more not listed]`, o `more than 5000`. Si lo corta el tope de 16 KiB del servidor, `[listing cut at 16384 bytes after N entries; M more not shown; list a subfolder]`.
   - **Para la pantalla:** el resultado es texto ajeno, pasa por `safe_foreign_text` (saneado y redactado) y va en un bloque plegable marcado como ajeno. Nada se guarda en SQLite ni en disco.
   - **Para el modelo (con A3):** lo mismo, con `neutralise_delimiters` y dentro del marco de datos de A3. Además se aplica su tope de envío, muy por debajo de los 32 000 caracteres del proveedor (requisito A3).
 - **Por qué.**
@@ -564,12 +564,29 @@ El dueño contestó el 2026-11-27 y autorizó solo el tramo **B1**. Lo que sigue
 
 - **Qué.** Migración **011** (`011_workspace_events.sql`): la 009, la 010 y la 013 son de `code-mode` y la 012 está reservada para otra rama (revisado el 2026-11-28, tras el merge de `develop` = `8a8afbd`). El ejecutor de migraciones aplica cada versión que falte, así que un hueco no estorba: la 011 entra igual en una base que está en la 010 que en una que ya tiene la 013 (`test_011_applies_on_a_database_at_010_and_at_013`). Qué deja cada caso:
   - un rechazo por la forma de la ruta o por las reglas de nombre (se decide sin tocar el disco): fila `denied` con `argument_invalid`;
-  - un rechazo de la carpeta: fila `denied` con `server_not_allowed`;
+  - un rechazo de la carpeta en la CLI (`--root`, antes de cualquier llamada): fila `denied` con `server_not_allowed`. **Revisado tras la revisión de `d0a65d8`:** la carpeta sustituida que encuentra una llamada de un plan (`workspace_changed`) se guardaba igual, `denied`/`server_not_allowed`, mientras el plan veía `tool_error`. La política sí la permitió: ahora es `allowed`, `failed` con `tool_error`, lo mismo que ve el plan;
+  - una llamada de un plan cortada por su plazo o por Ctrl+C (B2-9): `timeout`/`timeout` o `failed`/`interrupted`, con el código `timeout` o `interrupted` en `workspace_events`;
   - lo que se descubre en el disco (enlace, binario, credencial, tamaño, nombre inexacto): fila `allowed` y `failed` con `tool_error`;
   - una lectura correcta: fila `completed` con `result_bytes`.
 
   En todos los casos hay además una fila en `workspace_events` con el código exacto (o `ok`) y el HMAC de la ruta. La clave es la de `mcp-args.key`, con un dominio propio (`ai-harness/workspace-path/v1`). Las lecturas no dejan fila `running`: no tienen efecto que reconciliar.
 - **Impacto.** `harness/workspace/audit.py`; tests de `test_workspace_audit.py`.
+
+### B1-6. Un segundo camino a las carpetas protegidas (revisión de `d0a65d8`, hallazgo 1)
+
+- **Qué.** Medido en macOS 26 (2026-11-28): `/System/Volumes/Data`, `/System/Volumes` y `/System` se aceptaban como carpeta, y por ellas se leían el repo, el directorio de datos, el vault y la carpeta personal. `/System/Volumes/Data/Users` es `/Users` (un *firmlink* de APFS: mismo `st_dev` y `st_ino`), pero los antepasados de `/Users/…` suben hasta `/` sin pasar por `/System/Volumes/Data`, así que ni el nombre ni la identidad de los antepasados lo ven. Y la premisa de la revisión, «es un punto de montaje porque su `st_dev` difiere», **no se cumple aquí**: `os.stat` da el mismo `st_dev` (`16777232`) para `/`, `/Users` y `/System/Volumes/Data`, y `os.path.ismount('/System/Volumes/Data')` es `False`. Por eso se añaden tres reglas:
+  1. **Segundo camino:** se buscan, dentro de la carpeta elegida y de sus subcarpetas hasta dos niveles (`MIRROR_SEARCH_DEPTH`), sin seguir enlaces, los finales de la ruta de cada carpeta protegida (`Users/<nombre>/…`, `<nombre>/…`…) que tengan su misma identidad. Encontrar uno rechaza la carpeta con el motivo de la protegida. Se listan como mucho 2 000 carpetas (`MIRROR_SEARCH_DIRS`). Con `/System`, el primer nombre del final está dos niveles más abajo (`Volumes/Data/Users`).
+  2. **Punto de montaje:** una carpeta cuyo `st_dev` no es el de su padre se rechaza (`mount_point`). Cubre un disco externo, un volumen de Linux o de Windows montado en una carpeta; no cubre el caso de APFS, que lo cubre la regla 1.
+  3. **Rutas de red y de dispositivo:** una ruta que empieza por dos separadores (`\\servidor\recurso`, `\\localhost\C$\…`, `\\?\GLOBALROOT\…`, `\\.\…`, `//x`), escrita así o resuelta así, se rechaza (`device_path`), en todas las plataformas por la misma función de cadenas. La forma larga de una unidad local (`\\?\C:\…`, que `resolve` puede dar para una ruta larga en Windows) se admite.
+
+  Además, `home` rechaza también una carpeta que **contiene** la personal (por nombre y por identidad), no solo la personal misma.
+- **Por qué.** Comparar el volumen (`statvfs().f_fsid`) sí distingue los volúmenes de APFS, pero `os.statvfs` no existe en Windows y la regla sería distinta por plataforma. La búsqueda por identidad usa solo `os.scandir` y `os.stat`, igual en las dos.
+- **Alternativas rechazadas.**
+  - Solo la regla del punto de montaje (lo que proponía la revisión): no rechaza `/System/Volumes/Data` en este Mac, como se midió arriba.
+  - Recorrer toda la carpeta elegida: sin tope, una carpeta grande tardaría mucho en aceptarse.
+  - Una lista de rutas del sistema (`/System`, `/Volumes`…): depende de la plataforma y se queda vieja.
+- **Límites que no se arreglan.** Un segundo camino a más de tres niveles de la carpeta elegida, o tras 2 000 carpetas listadas, no se ve. Los puntos de montaje **dentro** de la carpeta se atraviesan sin aviso (decisión del dueño pendiente). En Windows no se ha ejecutado (NOT RUN): que `\\?\GLOBALROOT` y `\\localhost\C$` sean los únicos caminos de ese tipo es plausible, no comprobado.
+- **Impacto.** `harness/workspace/root.py`, `codes.py` (`device_path`, `mount_point`), la migración 011 (que no ha salido de esta rama); tests nuevos de `tests/unit/test_workspace_root.py`; SEC-04.
 
 ## Lo que enseñó el tramo B2 (2026-11-28)
 
@@ -603,6 +620,7 @@ Medido sobre `develop` = `8a8afbd` (tarea 3.1): la marca de lectura por regla se
 - **Qué.**
   - **Dónde vive.** Una tabla `workspace_consents (folder_hmac, provider, state, approval_hash, decided_at)` en la migración 011, que no ha salido de esta rama. `folder_hmac` es el HMAC (clave `mcp-args.key`, dominio `ai-harness/workspace-folder/v1`) de la ruta resuelta **y** de su identidad: otra carpeta con el mismo nombre no hereda el consentimiento.
   - **Cómo se da.** `/workspace send on` abre la caja (botones en la pantalla completa, código tecleado en el modo plano) con el texto «file contents of <ruta> will be sent to <proveedor>», ligado al hash de una `Proposal` de alcance `workspace-tools.send-consent`. Se decide con `approvals.decide`; `ApprovalScreen`, `ApprovalButton` y `ProposalArea` no cambian. Rechazado, sin decidir o caducado: no se da y la auditoría lo dice.
+  - **Revisado tras la revisión de `d0a65d8` (hallazgo 4).** «Caducado» no existía en el código: la caja no tenía plazo y `decide` nunca devuelve `expired`, y tampoco se retiraba un Ctrl+C pendiente. Ahora la caja copia el control de `loop_flow._Loop._consent`: muestra `expires:`, una respuesta después del plazo de las aprobaciones (`approval_ttl_s`) queda `expired`, y lo escrito tras un Ctrl+C (`withdraw_pending_interrupt`) queda `undecided`. Lo concedido sigue sin caducar: dura hasta `/workspace send off` (decisión del dueño pendiente, `tasks.md` 3b.8).
   - **Cómo se revoca.** `/workspace send off` deja la fila en `revoked`.
   - **Qué hace.** En `/agent`, con un proveedor no sintético, antes de componer una vuelta con resultados el bucle pregunta a `PlanSetting.withhold`: si algún paso **completado** de `workspace` está en el informe y no hay consentimiento para esa carpeta y ese proveedor, se ve `not sent: no consent for this folder`, no se envía nada y el bucle termina `stopped (send_not_approved)`. Se comprueba en cada vuelta. Con consentimiento, la caja de A3-14 se sigue pidiendo una vez por bucle. Un paso rechazado (solo el motivo del harness) no necesita consentimiento. `/plan` nunca envía resultados: el contenido solo se muestra a la persona. El Mock no lo necesita.
 - **Por qué.**
@@ -635,12 +653,23 @@ Medido sobre `develop` = `8a8afbd` (tarea 3.1): la marca de lectura por regla se
 ### B2-6. Una carpeta sustituida queda suspendida
 
 - **Qué.** Si una llamada encuentra la raíz cambiada (`workspace_changed`), el `Folder` queda suspendido: las siguientes llamadas se rechazan igual aunque vuelva la misma carpeta, hasta un `/workspace` nuevo. El panel y `/workspace` lo dicen.
+- **Precisión (revisión de `d0a65d8`).** El cambio se detecta **al principio de cada llamada** (`check_root_unchanged` en `locate`), no durante ella: una carpeta sustituida a mitad de una lectura se ve en la llamada siguiente.
 - **Impacto.** Requisito «Carpeta suspendida si cambia»; test `test_a_folder_replaced_after_it_was_chosen_stays_suspended`.
 
 ### B2-7. `workspace_busy` es una segunda capa
 
 - **Qué.** La conversación hace una sola acción a la vez: con una caja abierta, lo que se escribe es la respuesta de la caja, no una orden. Aun así, `/workspace` se rechaza con `workspace_busy` mientras corre un `/plan` o un `/agent`.
 - **Impacto.** Test `test_the_folder_cannot_change_while_a_plan_is_in_course`.
+
+### B2-9. El plazo de una llamada (revisión de `d0a65d8`, hallazgos 5 y 6)
+
+- **Qué.**
+  - `InternalServer.call_timeout_s = 10` se declaraba y no se aplicaba, y el servidor ignoraba la señal de parada: un `read` o un `list` sobre un disco de red que no contesta bloqueaba el plan, y Ctrl+C no lo cortaba. Ahora `WorkspaceServer.call` corre la herramienta en un hilo aparte (`server.bounded`) y espera como mucho `call_timeout_s`, o hasta que la `StopSignal` del plan se activa (Ctrl+C o el plazo del plan), que el gateway le pasa como a un servidor MCP (`run_session`). Cortada por el plazo, la llamada es `timeout` (como el `timeout` de MCP); por la parada, lanza `KeyboardInterrupt` con su `outcome`, como `run_session`, y el plan la cuenta `interrupted` o `deadline`. Las dos dejan su fila y su código en `workspace_events`.
+  - **Cuánto sale por bucle.** No estaba escrito. Solo llevan resultados las vueltas 2 a N y la de cierre: como mucho N × 12 KiB (`RESULTS_SEND_MAX_BYTES`) de resultados por `/agent`, **60 KiB con 5 vueltas** y **120 KiB con 10** (el máximo de `HARNESS_LOOP_MAX_TURNS`). La revisión estimó unos 72 y 132 KiB contando también el primer envío, que no lleva resultados. Medido (2026-11-28, macOS): 59 280 bytes de líneas de fichero en los 5 envíos con resultados de un bucle que lee tres ficheros de 16 KiB en cada vuelta (`test_what_one_loop_sends_of_the_folder_is_bounded`).
+- **Por qué.** Es el mismo control que la ruta MCP: un plazo por llamada y la parada del plan.
+- **Alternativas rechazadas.** Un proceso aparte por llamada, para poder matarlo: cuesta un arranque por lectura y otra frontera que auditar, para un caso (el disco de red colgado) que el hilo ya acota para el plan.
+- **Límites que no se arreglan.** Se acota la **espera**, no la llamada al sistema: el hilo sigue bloqueado dentro del sistema hasta que el disco responde, y lo que lee después se descarta; no tiene cerrojos ni escribe nada. `main.py workspace` y la elección de la carpeta (`--root`, `/workspace`) no tienen plazo. Queda en `known-debt.md` 15.
+- **Impacto.** `harness/workspace/server.py` (`call`, `bounded`), `harness/mcp/gateway.py` (pasa `stop`), `harness/mcp/config.py` (`InternalServer.call`), `codes.py` (`CALL_CODES`), `audit.py`, la migración 011; tests de `tests/unit/test_workspace_shell.py`; SEC-15.
 
 ### B2-8. Sin herramienta de escritura en B2
 
