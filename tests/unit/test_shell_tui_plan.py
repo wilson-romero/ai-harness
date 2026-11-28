@@ -31,9 +31,7 @@ def _tui(tmp_path, mcp, reply) -> tuple[Tui, object]:
 
 async def _box(tui, pilot) -> ApprovalScreen:
     await tui.send(pilot, PLAN_LINE)
-    await tui.until(pilot, lambda: isinstance(tui.app.screen, ApprovalScreen))
-    await pilot.pause(0.05)
-    return tui.app.screen
+    return await tui.approval_box(pilot)
 
 
 def _button(tui, name: str) -> Button:

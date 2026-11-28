@@ -14,7 +14,7 @@ En la pantalla completa, la caja de aprobación SHALL decidir con dos botones de
 - **THEN** la aprobación se concede y se consume una sola vez
 
 ### Requirement: Nada aprueba al abrirse la caja
-Al abrirse la caja, el foco SHALL estar en la propuesta y no en un botón. Los dos botones SHALL estar deshabilitados durante un intervalo mínimo desde que la caja se abrió. Enter, Espacio, un pegado, `ctrl+v`, lo escrito antes de que la caja existiera y los clics de ese intervalo SHALL NOT decidir.
+Al abrirse la caja, el foco SHALL estar en la propuesta y no en un botón. Los botones SHALL habilitarse solo tras un intervalo mínimo sin teclas, pegados ni clics desde que la caja se muestra; cada entrada anterior SHALL reiniciarlo. Una entrada leída antes de habilitarse los botones SHALL NOT decidir, aunque se procese después. Enter, Espacio, un pegado o `ctrl+v` sobre la propuesta SHALL NOT decidir.
 
 #### Scenario: Teclas y pegados al abrir
 - **WHEN** con la caja abierta y la propuesta entera mostrada, llegan Enter, Espacio, `ctrl+v` y un pegado de varias líneas
@@ -27,6 +27,22 @@ Al abrirse la caja, el foco SHALL estar en la propuesta y no en un botón. Los d
 #### Scenario: Escrito por adelantado
 - **WHEN** la persona envía la línea del Skill y, en la misma ráfaga, Tab y Enter repetidos
 - **THEN** la caja se abre y la aprobación sigue pendiente
+
+#### Scenario: Escritura que sigue al abrirse la caja
+- **WHEN** llegan teclas a los 154, 250, 350, 450, 550 y 601 ms de abrirse la caja, y después Tab a los 656 ms y Enter a los 702 ms
+- **THEN** la caja no se ha habilitado y la aprobación sigue pendiente
+
+#### Scenario: Entrada leída antes y procesada después
+- **WHEN** Tab y Enter, o un clic en aprobar, se leen antes de que los botones se habiliten y se procesan después
+- **THEN** no deciden y la aprobación sigue pendiente
+
+#### Scenario: Bucle detenido mientras se escribe
+- **WHEN** llegan teclas cada 100 ms desde la apertura, el bucle se detiene hasta 0,7 s o 2 s, el armado corre antes que esas teclas y la escritura sigue con Tab y Enter, o con un clic en aprobar
+- **THEN** la caja se desarma, no se habilita hasta medio segundo después de la última entrada leída y la aprobación sigue pendiente
+
+#### Scenario: Tras el silencio
+- **WHEN** no llega ninguna entrada durante el intervalo mínimo desde que la caja se muestra, y después llegan Tab y Enter o un clic en aprobar
+- **THEN** la aprobación se concede una vez
 
 ### Requirement: Aprobar solo tras mostrar la propuesta entera
 El botón de aprobar SHALL estar deshabilitado mientras el final de la propuesta no se haya mostrado en pantalla. Desplazarse hasta el final con el teclado, con la rueda o con la barra SHALL contar como mostrado. La caja SHALL decir cuántas líneas quedan por debajo, o que la propuesta se ha mostrado entera.
@@ -52,6 +68,10 @@ El botón de rechazar SHALL abrir dentro de la caja una pregunta de confirmació
 
 #### Scenario: Doble clic en rechazar
 - **WHEN** el segundo clic de un doble clic sobre rechazar cae en la confirmación
+- **THEN** no se rechaza y la aprobación sigue pendiente
+
+#### Scenario: Confirmación leída justo después de aparecer
+- **WHEN** Tab y Enter se leen 10 ms después de aparecer la confirmación y se procesan 0,6 s después
 - **THEN** no se rechaza y la aprobación sigue pendiente
 
 ### Requirement: Salir de la caja sin decidir

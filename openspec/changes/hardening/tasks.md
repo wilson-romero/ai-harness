@@ -93,6 +93,26 @@ Revisión sobre `develop` = `5af28ed`; el informe vive fuera del repositorio. Ca
 - [ ] 7.4 Confirmación opcional en Windows de lo que solo existe en esta rama (grupo 5 y `check_sec_matrix.py`). Estado: NOT RUN.
 - [ ] 7.5 **Demo de `hardening`.** Wilson reproduce en macOS, con el SHA final y `scripts/verify.sh` en PASS: (a) `scripts/demo_hardening.py` → `demo: PASS`; (b) abre `docs/security/sec-matrix.md`, elige dos SEC y ejecuta los tests citados con `uv run pytest <id>`; (c) `uv run pytest tests/security/test_audit_findings.py`; (d) lee la deuda conocida y confirma que cada decisión es la suya. Evidencia: log de la demo y salida de (b) y (c). Estado: NOT RUN.
 
+## 8. Segunda ejecución en Windows (2026-11-27, `develop` = `79cde60`)
+
+Wilson ejecutó `develop` en Windows 11: la batería sin navegador dio 5 fallos y la de Edge 1. Este grupo es el de F-08. Los de la caja de aprobación van en `approval-buttons` 7 y el del perfil de Edge en `copilot-web-provider` 9. Rama `bugfix/windows-parity-2`. La demo del change sigue siendo 7.5.
+
+- [x] 8.1 `private_file` y `private_dir` con el mismo resultado en los dos sistemas (D7, F-08 revisado).
+  - Causa: `test_a_lock_error_that_is_not_busy_is_retried_then_raised` y su gemelo `_async` fallaban siempre en Windows con `PermissionError [Errno 13]` desde `harness/storage/private.py`. Windows responde así a `os.open(carpeta, O_CREAT | O_EXCL)`, y solo se capturaba `FileExistsError`. Por eso `NamedLock.acquire` fallaba antes de su bucle de reintentos.
+  - Revisados todos los llamadores:
+    - `harness/storage/locks.py`, `harness/storage/database.py` y `harness/browser/login.py` usan `private_file`;
+    - `harness/mcp/audit.py`, `harness/mcp/commands.py` y `harness/browser/profile.py` usan solo `private_dir`;
+    - los otros `O_EXCL` del producto (`_create_key` en `harness/mcp/audit.py` y `_write_temp` en `harness/memory/decisions.py`) usan nombres aleatorios y tratan cualquier `OSError`; no cambian.
+    - Anotado sin cambiar: si `copilot/login.json` fuera una carpeta, su `write_text` daría `IsADirectoryError` en POSIX y `PermissionError` en Windows, las dos `OSError`.
+  - Oráculo:
+    - `tests/unit/test_storage_private.py`: fichero, carpeta, enlace a fichero, enlace a carpeta, enlace roto, padre que falta y sin permiso. Cada caso que depende de cómo responde `os.open` corre dos veces, con el sistema tal cual y con la respuesta de Windows simulada (`os.open` lanza `PermissionError` sobre una carpeta);
+    - en `tests/unit/test_locks.py`, `test_a_lock_error_that_is_not_busy_is_retried_then_raised_where_open_says_denied` y su gemelo `_async`: la misma simulación y el resultado de POSIX (`sqlite3.OperationalError` tras reintentar hasta el plazo).
+  - Recibo (2026-11-27, macOS arm64, Python 3.14.8):
+    - antes del cambio, 7 failed: los dos tests de bloqueo con el `PermissionError [Errno 13]` de Windows, los casos «carpeta» y «enlace a carpeta» con la respuesta simulada, y los tres de `private_dir` (`DID NOT RAISE NotADirectoryError`);
+    - con el cambio, `test_storage_private.py`, `test_locks.py` y `tests/security/test_audit_findings.py` → 67 passed; `tests/unit/test_portability.py` en verde, sin ramas por plataforma.
+    - Control negativo (mutante: tragar todo `PermissionError`): 2 failed, `test_permission_denied_with_nothing_there_is_raised` y `test_a_directory_the_account_cannot_write_is_an_error`; restaurado, pasa.
+- [ ] 8.2 Confirmación en Windows (no es puerta): `uv run pytest tests/unit/test_locks.py tests/unit/test_storage_private.py -v` en PowerShell sobre la rama. Tienen que pasar los dos `..._retried_then_raised` originales. Los casos de enlaces y de carpeta sin permiso se omiten con su motivo si la cuenta no puede crearlos. Estado: **NOT RUN**.
+
 ## Workflow follow-up
 
 - Abrir el PR de `feature/hardening` contra `develop` con descripción en español; el merge lo aprueba Wilson.

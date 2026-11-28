@@ -347,7 +347,7 @@ def _skill_tui(tmp_path, provider=None, **options) -> tuple[Tui, WriteEffect]:
 
 async def _approval(tui, pilot) -> None:
     await tui.send(pilot, SKILL_LINE)
-    await tui.until(pilot, lambda: isinstance(tui.app.screen, ApprovalScreen))
+    await tui.approval_box(pilot)  # painted: its widgets exist (not just pushed)
     await pilot.pause(0.05)
 
 

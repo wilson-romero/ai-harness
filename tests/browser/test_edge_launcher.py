@@ -11,7 +11,12 @@ from pathlib import Path
 import pytest
 from playwright.async_api import async_playwright
 
-from harness.browser.edge import DROPPED_DEFAULT_ARGS, EdgeLauncher, edge_version
+from harness.browser.edge import (
+    DROPPED_DEFAULT_ARGS,
+    PROFILE_LOCK_ARTEFACTS,
+    EdgeLauncher,
+    edge_version,
+)
 from harness.browser.errors import BrowserBusy, BrowserLaunchFailed, ProfileInUse, ProfileRejected
 from harness.storage.locks import NamedLock
 from tests.conftest import REPO_ROOT
@@ -165,6 +170,31 @@ async def test_profile_open_in_another_edge_is_reported_as_in_use(launcher):
             assert str(launcher.profile_dir) not in str(error.value)
         finally:
             await by_hand.close()
+
+
+async def test_a_held_profile_carries_a_lock_artefact(launcher):
+    """The premise of the launcher's 'in use' rule (P8, revised 2026-11-27): while an Edge
+    holds the profile, at least one of the artefacts the rule looks for is in it, and none is
+    left once that Edge has closed. The names found are printed for the Windows receipt."""
+    async with launcher.open():
+        pass
+    held = lambda: [name for name in PROFILE_LOCK_ARTEFACTS  # noqa: E731
+                    if os.path.lexists(launcher.profile_dir / name)]
+    async with async_playwright() as playwright:
+        by_hand = await playwright.chromium.launch_persistent_context(
+            str(launcher.profile_dir), channel="msedge", headless=True
+        )
+        try:
+            while_open = held()
+        finally:
+            await by_hand.close()
+    print(f"lock artefacts while open: {while_open}")
+    assert while_open
+    for _ in range(50):  # the holder may take a moment to remove its artefact
+        if not held():
+            break
+        await asyncio.sleep(0.1)
+    assert held() == []
 
 
 async def test_users_edge_survives_when_the_harness_loses_its_own(

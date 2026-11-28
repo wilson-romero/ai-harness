@@ -54,6 +54,17 @@ El sistema SHALL tener como máximo un Edge abierto sobre el perfil dedicado en 
 - **WHEN** una pregunta tiene el navegador abierto y el usuario ejecuta `copilot login`
 - **THEN** `copilot login` termina con código distinto de 0 indicando que el navegador está en uso
 
+### Requirement: Perfil abierto por otro Edge
+Si otro Edge, que el comando no abrió, tiene abierto el perfil dedicado, el lanzamiento SHALL fallar informando de que el perfil ya está abierto en otra ventana, en macOS y en Windows, sin mostrar la ruta del perfil. Un fallo de arranque con el perfil libre SHALL NOT informarse como perfil en uso.
+
+#### Scenario: Perfil abierto en otro Edge
+- **WHEN** un Edge abierto a mano tiene el perfil dedicado y el harness intenta abrirlo
+- **THEN** el comando informa de que el perfil ya está abierto en otra ventana, sin la ruta del perfil
+
+#### Scenario: El navegador se cierra al arrancar con el perfil libre
+- **WHEN** Edge se cierra nada más arrancar y ningún otro Edge tiene el perfil
+- **THEN** el comando informa de que Edge no se pudo iniciar, no de que el perfil esté en uso
+
 ### Requirement: Solo se liberan recursos propios
 Al terminar una pregunta, con éxito, con error, por plazo, por Ctrl+C o por caída del navegador, el sistema SHALL cerrar el navegador que abrió y SHALL NOT cerrar ni afectar a ningún otro proceso de Edge del usuario.
 
