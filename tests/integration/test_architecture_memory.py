@@ -611,8 +611,15 @@ def test_active_obsidian_content_from_the_model_is_written_inert(conn, data_dir,
         assert forbidden.encode("utf-8") not in raw, forbidden
     context = build_context(vault.resolve(), "demo-alpha", 64_000).text
     assert outcome.applied[0] in header_paths(context)
+    # The decision's own section: since memory-format-conformance (2026-11-28) the fixture's
+    # project and session notes have the capture's real layout, with ``` blocks and [[links]]
+    # written by the capture, not by the model.
+    header = note_header(outcome.applied[0])
+    assert context.count(header) == 1
+    section = context.split(header, 1)[1].split("\n--- ", 1)[0]
+    assert "## Decisión" in section and len(section) > 200  # the hostile text is there
     for forbidden in ("<%", "%%", "<!--", "<script", "```", "![", "[["):
-        assert forbidden not in context, forbidden
+        assert forbidden not in section, forbidden
 
 
 # -- 7.3 the run is bound to the vault it started with ----------------------------------------------

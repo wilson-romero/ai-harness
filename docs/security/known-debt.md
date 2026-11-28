@@ -25,8 +25,12 @@ Decisiones posibles: **aceptado** (se convive con ello, escrito), **arreglar** (
   - Segunda ejecución, sobre `develop` = `79cde60` (2026-11-27, Windows 11, con Edge): 5 fallos sin navegador y 1 con Edge.
     - Tres son del producto: `private_file` ante una carpeta (otro error que en POSIX), el armado de la caja de aprobación solo por reloj (unas teclas llegadas tras el plazo aprobaron en una máquina lenta) y el perfil de Edge en uso, que en Windows no se reconocía.
     - Dos son tests que no esperaban a la caja montada.
-    - Las correcciones están en `bugfix/windows-parity-2` y su ejecución en Windows está **NOT RUN**.
-  - Lo que solo existe en `feature/hardening` (la comprobación de la matriz, los tests de la revisión independiente del 2026-11-25 y las correcciones de la revisión de seguridad del 2026-11-27) no se ha ejecutado en Windows (NOT RUN).
+    - Las correcciones (`bugfix/windows-parity-2`) se sostienen en Windows en la tercera ejecución.
+  - Tercera ejecución, sobre `develop` = `a9c51fe` (2026-11-27, Windows 11, con Edge y con `feature/hardening` mergeado): 2321 pasados y 3 fallos sin navegador; 188 pasados y 1 fallo con Edge. `sec-matrix: PASS` y las 10 demos en `demo: PASS`.
+    - Uno es del producto: una recogida de `scripts/check_sec_matrix.py` fuera de plazo terminaba en `PermissionError` y dejaba su carpeta temporal, porque el lanzador de uv deja vivo unos milisegundos al intérprete real con el fichero abierto.
+    - Uno es un test que contaba todos los hilos del proceso, y otro un test de plazo del plan con un servidor sintético lento en arrancar (lo corrige otra rama).
+    - El de Edge (la página no estuvo lista a tiempo en la primera pregunta de un caso de `response-mode`) no se ha reproducido y su causa no está confirmada; el mensaje dice ahora qué mostraba la página y qué plazo cortó la espera.
+    - Las correcciones de esta ronda están en `bugfix/windows-parity-3`: su ejecución en Windows está **NOT RUN**.
   - El defecto de `v0.2.0` con la clave de los HMAC MCP está corregido en `0.2.1`. Para recuperar una instalación de `0.2.0` afectada, con ningún proceso del harness en marcha se borra `keys/mcp-args.key` y el siguiente `mcp call` crea otra; los HMAC guardados antes no se pueden comparar con los nuevos.
   - Probado solo en macOS, porque en Windows esos tests se omiten por capacidad: el rechazo de enlaces simbólicos, el informe de carpetas ilegibles y las comprobaciones de permisos (`0600`/`0700`, dueño de la lista MCP). Las uniones de directorio no las crea ningún test. **En Windows los modos `0600`/`0700` no se usan y el harness no fija ni comprueba ACL** (clave HMAC, logs, lista MCP, directorio de datos, base de datos, bloqueos y `copilot/login.json`): lo creado hereda los permisos de la carpeta padre.
   - Confirmaciones opcionales en Windows sin hacer: `mcp-gateway` 5.3, `skill-engine` 7.6, `architecture-skills-llm` 6.6 y 7.11 (vault en OneDrive), `copilot-web-provider` 7.4.
@@ -121,7 +125,17 @@ Una revisión de seguridad de `develop` (sobre `5af28ed`, con datos sintéticos 
 - **Decisión:** pendiente de Wilson: cada uno, si se aborda, en un change propio.
 - **Dueño:** Wilson.
 
-## 15. Carpeta de trabajo: la carrera que queda abierta y Windows sin ejecutar (rama `feature/workspace-tools`)
+## 15. Un motivo del proveedor anterior al envío se pierde si el plazo vence mientras Edge se cierra
+
+- **Qué:**
+  - Condición exacta: el proveedor de Copilot Web lanza, antes de enviar nada, `AuthenticationRequired` (`_sign_in_needed`: la página pide iniciar sesión) o el `ProviderError` de la página de invitado. Al salir, ese error atraviesa el cierre de Edge (`close_owned`), y el cierre dura más que lo que queda hasta el plazo de la pregunta, que es la reserva de `min(SHUTDOWN_S, 25 %)` de `HARNESS_REQUEST_TIMEOUT_S`, 2 s con 8 s.
+  - El plazo del servicio vence durante el cierre, y la pregunta termina en `timeout` con «the deadline expired before the prompt was sent» en vez de su motivo. Un `AuthenticationRequired` debería terminar en `authentication_required`, con la sesión en ese estado y el consejo de `copilot login`.
+  - Solo el «not ready in time» (`ProviderTimeout`) viaja con la cancelación desde `bugfix/windows-parity-3` (`copilot-web-provider` 10.3).
+- **Riesgo:** no se envía nada y no se reintenta solo, así que no hay duplicado ni pérdida de datos. La persona ve un plazo genérico en vez de «inicia sesión» o «la dirección es la página de invitado», y la sesión no queda marcada como `authentication_required`.
+- **Decisión:** pendiente de Wilson; fuera del alcance de la ronda de paridad con Windows, que solo cubre el motivo de `timeout`. El arreglo natural es llevar cualquier motivo previo al envío con la cancelación y que el servicio lo clasifique por su tipo.
+- **Dueño:** Wilson.
+
+## 16. Carpeta de trabajo: la carrera que queda abierta y Windows sin ejecutar (rama `feature/workspace-tools`)
 
 - **Qué:**
   - **La carrera.** Entre el paseo componente a componente y la apertura de un fichero de la carpeta de trabajo, otro proceso con la cuenta de la persona puede cambiar una carpeta intermedia por un enlace. El harness detecta:

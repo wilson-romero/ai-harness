@@ -190,13 +190,13 @@ Lo que el harness garantiza:
 Lo que **no** garantiza:
 
 - **Secretos.** Un secreto con forma desconocida en un fichero normal se lee y se muestra.
-- **Carreras con otro proceso.** Un proceso con tu cuenta que cambie una carpeta intermedia por un enlace entre la comprobación y la apertura no siempre se detecta: no hay `openat` portable. El harness sí detecta el cambio del fichero mismo y el de la carpeta raíz, este al principio de cada llamada. Quien controla tu cuenta ya puede leer esos ficheros sin el harness (deuda conocida 1 y 15).
+- **Carreras con otro proceso.** Un proceso con tu cuenta que cambie una carpeta intermedia por un enlace entre la comprobación y la apertura no siempre se detecta: no hay `openat` portable. El harness sí detecta el cambio del fichero mismo y el de la carpeta raíz, este al principio de cada llamada. Quien controla tu cuenta ya puede leer esos ficheros sin el harness (deuda conocida 1 y 16).
 - **Lo que un fichero hostil consigue con el consentimiento dado.** Dentro de `/agent`, un fichero puede convencer al modelo de leer otro fichero normal de la carpeta y de mandar su contenido al proveedor en la vuelta siguiente. Lo acotan las reglas fijas, el tope de lo que se envía por paso (4 KiB) y por vuelta, y que cada vuelta se muestra antes de salir. No se impide.
 - **La ruta como canal.** La ruta que el modelo elige es un canal pequeño (64 caracteres de un alfabeto corto) que solo llega al disco local y a la auditoría como HMAC: no sale de la máquina. El canal grande es el contenido devuelto, y ese pasa por el consentimiento.
 - **Nombres que un plan no alcanza.** Un fichero cuyo nombre lleva espacios, acentos u otros caracteres, o cuya ruta pasa de 64 caracteres, no se puede leer desde un plan en esta versión (sí con `main.py workspace read`).
 - **Puntos de montaje dentro de la carpeta.** Se atraviesan sin aviso: un volumen montado en una subcarpeta se lee como el resto (decisión del dueño pendiente, `tasks.md` 3b.8).
 - **Lo ya enviado.** `/workspace send off` evita los envíos siguientes; lo que ya se envió queda en la conversación del proveedor.
-- **Lo que no se acota en el tiempo.** El plazo corta la espera, no la llamada al sistema: una lectura sobre un disco de red que no contesta sigue bloqueada en un hilo hasta que el sistema responde. `main.py workspace` y la elección de la carpeta (`/workspace`, `--root`) no tienen plazo (deuda conocida 15).
+- **Lo que no se acota en el tiempo.** El plazo corta la espera, no la llamada al sistema: una lectura sobre un disco de red que no contesta sigue bloqueada en un hilo hasta que el sistema responde. `main.py workspace` y la elección de la carpeta (`/workspace`, `--root`) no tienen plazo (deuda conocida 16).
 - **Windows.** Ahí no se ha ejecutado (NOT RUN), ni B1 ni B2 ni la revisión de `d0a65d8`. Las uniones, los enlaces duros de NTFS, los nombres cortos y los flujos alternativos se rechazan por regla y se prueban simulados en macOS.
 
 ## Matriz SEC y deuda conocida

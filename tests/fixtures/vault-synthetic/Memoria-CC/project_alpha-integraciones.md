@@ -1,10 +1,10 @@
 ---
 type: project
 machine: equipo-sintetico
-project_slug: demo-alpha
 created: 2026-10-12
 updated: 2026-11-15
 tags: [demo-alpha, integraciones]
+description: "Integraciones de demo-alpha: dos API internas y un catálogo"
 ---
 # Integraciones de Alpha
 

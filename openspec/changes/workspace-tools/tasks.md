@@ -80,7 +80,7 @@ Leyenda: **oráculo** = qué dice SÍ; **control negativo** = la mutación o el 
 
 - [x] 2.10 Documentación de B1: `docs/runbook/workspace-tools.md` (elegir la carpeta, qué se rechaza y por qué, el ejemplo con el fixture) y la sección «Carpeta de trabajo» de `SECURITY.md`, con «qué NO protege» de D3 y D16. Oráculo: los comandos del runbook se ejecutan tal cual en una carpeta temporal y dan la salida citada. Recibo.
 
-  Recibo (2026-11-27, macOS 26 arm64, Python 3.14, commit del tramo B1): `docs/runbook/workspace-tools.md`, la sección «Carpeta de trabajo» de `SECURITY.md` (con «Lo que no garantiza») y la entrada 15 de `docs/security/known-debt.md`. Se añadieron a SEC-01, 03 y 04 los requisitos y tests nuevos, sin cambiar ningún estado. Los comandos del runbook se ejecutaron tal cual en zsh, sobre una carpeta de `mktemp -d`, y dieron la salida citada.
+  Recibo (2026-11-27, macOS 26 arm64, Python 3.14, commit del tramo B1): `docs/runbook/workspace-tools.md`, la sección «Carpeta de trabajo» de `SECURITY.md` (con «Lo que no garantiza») y la entrada 15 de `docs/security/known-debt.md` (16 desde el merge de `develop` = `02b2c09`, que trae su propia entrada 15). Se añadieron a SEC-01, 03 y 04 los requisitos y tests nuevos, sin cambiar ningún estado. Los comandos del runbook se ejecutaron tal cual en zsh, sobre una carpeta de `mktemp -d`, y dieron la salida citada.
 
 - [x] 2.11 Demo B1: `scripts/demo_workspace.py` con el fixture: acepta la carpeta, rechaza el repo y la carpeta personal, lee `src/app.py` (rango), lista con marcas y rechaza `.env`, `../x`, el enlace y la credencial. Termina en `demo: PASS`. Estado: PASS, FAIL, NOT RUN o BLOCKED, con el SHA y el log.
 
@@ -266,12 +266,12 @@ Cada arreglo tiene una prueba que se vio fallar sobre el código revisado, antes
 - [x] 3b.5 Hallazgo 5 (LOW), `call_timeout_s` no se aplicaba y la parada se ignoraba. Ahora `WorkspaceServer.call` corre la herramienta en un hilo y espera como mucho `call_timeout_s`, o hasta la `StopSignal` que el gateway le pasa ahora (design B2-9). Cortada por el plazo, la llamada da `timeout`; por la parada, `KeyboardInterrupt` con su `outcome`, como `run_session`. Los códigos nuevos `timeout` e `interrupted` están en `CALL_CODES` y en el `CHECK` de la migración 011, que no ha salido de esta rama.
   - Oráculo: `test_a_read_that_does_not_answer_ends_at_its_call_timeout`, `test_a_stop_cuts_a_read_that_does_not_answer` (los dos con un `run_tool` que se bloquea, en menos de 5 s) y `test_the_gateway_hands_its_stop_to_the_work_folder`.
   - Recibo (2026-11-28): antes → `3 failed`; después → pasan. M17, M18 y M19 → muertas.
-  - **Lo que no queda acotado** (deuda conocida 15):
+  - **Lo que no queda acotado** (deuda conocida 16):
     - la llamada al sistema sigue bloqueada en su hilo hasta que el disco responde;
     - `main.py workspace` y la elección de la carpeta (con su búsqueda de un segundo camino) no tienen plazo.
 - [x] 3b.6 Hallazgo 6, el texto y el código no coincidían:
   - **Tope total por bucle**, escrito en `SECURITY.md`, el runbook y design B2-9: N × 12 KiB de resultados, 60 KiB con 5 vueltas y 120 KiB con 10. La revisión estimó unos 72 y 132 KiB, contando también el primer envío, que no lleva resultados. Medido con `test_what_one_loop_sends_of_the_folder_is_bounded`: **59 280 bytes** en 5 envíos.
-  - **«El cambio de la carpeta se detecta»** ahora dice «al principio de cada llamada» en `SECURITY.md`, `known-debt.md` 15, el runbook y design B2-6.
+  - **«El cambio de la carpeta se detecta»** ahora dice «al principio de cada llamada» en `SECURITY.md`, `known-debt.md` 16, el runbook y design B2-6.
   - **D4 y la cuenta de lo que falta.** `list` sigue contando pasado su tope, como mucho 5 000 entradas más (`LIST_COUNT_MAX`): `[listing stopped at 500 entries; N more not listed]`. El servidor dice `M more not shown` cuando corta a 16 KiB, y la CLI lo dice en su aviso. Oráculo: `test_list_says_how_many_entries_it_left_out`, `test_the_count_of_what_was_left_out_is_bounded` y `test_a_listing_says_how_many_entries_it_did_not_show`. Antes → `3 failed`; M20 y M21 → muertas.
   - **`workspace_changed` en la auditoría.** Encontrado por una llamada que la política permitió, se guarda `allowed`, `failed` y `tool_error`, lo que ve el plan. El rechazo de `--root` en la CLI sigue siendo `denied`/`server_not_allowed`. Oráculo: `test_a_replaced_folder_is_audited_as_what_the_plan_saw` y el caso revisado de `test_each_outcome_leaves_its_rows`. Antes → `failed`; M16 → muerta.
 - [x] 3b.7 Mutaciones de esta revisión. Cada una se aplica a un fichero de producto y se restaura al momento, con `PYTHONDONTWRITEBYTECODE=1`.
