@@ -7,40 +7,56 @@ import pytest
 from harness.core.errors import InvalidProject
 from harness.memory.paths import is_within, validate_project_slug
 
-REJECTED = [
-    "..",
-    ".",
-    "../../etc",
-    "..\\otro",
-    "a/b",
-    "a\\b",
-    "C:\\vault",
-    "C:",
-    "\\\\servidor\\recurso",
-    "CON",
-    "con",
-    "nul.txt",
-    "COM1",
-    "lpt9.md",
-    "demo.",
-    "demo ",
-    "a:b",
-    "",
-    ".oculto",
-    "-guion",
-    "x" * 129,
-    "demo\x1balpha",
-    "demo\u00e9",
-]
+SEPARATOR = "it contains a path separator"
+RESERVED = "it is a reserved Windows device name"
+OTHER = "it contains a character other than letters, digits, '.', '_' and '-'"
+# Input -> the reason the message names (memory-format-conformance D3, 2026-11-28).
+REJECTED = {
+    "..": "it is a relative path part",
+    ".": "it is a relative path part",
+    "../../etc": SEPARATOR,
+    "..\\otro": SEPARATOR,
+    "a/b": SEPARATOR,
+    "a\\b": SEPARATOR,
+    "C:\\vault": SEPARATOR,
+    "C:": OTHER,
+    "\\\\servidor\\recurso": SEPARATOR,
+    "CON": RESERVED,
+    "con": RESERVED,
+    "nul.txt": RESERVED,
+    "COM1": RESERVED,
+    "lpt9.md": RESERVED,
+    "demo.": "it ends with a dot or a space",
+    "demo ": "it ends with a dot or a space",
+    "a:b": OTHER,
+    "": "it is empty",
+    ".oculto": "it does not start with a letter or a digit",
+    "-guion": "it does not start with a letter or a digit",
+    "x" * 129: "it is longer than 128 characters",
+    "demo\x1balpha": OTHER,
+    "demo\u00e9": "it contains a character that is not ASCII",
+    # The forms a `vault_slug` of claude-memory-system takes from a real path (its
+    # `scripts/lib/common.sh` at 92b19ea keeps spaces and accents): refused, with the reason.
+    "srv-equipo-Mis Proyectos-demo": "it contains a space",
+    "srv-equipo-Código-demo": "it contains a character that is not ASCII",
+    "srv-" + "carpeta-" * 16 + "demo": "it is longer than 128 characters",
+    # Independent review of 2026-11-28: an accent at the start is "not ASCII", the reason
+    # the README promises, not "does not start with a letter or a digit".
+    "Ébano-x": "it contains a character that is not ASCII",
+    "Mi Ébano": "it contains a space",
+}
 
 
-@pytest.mark.parametrize("raw", REJECTED)
-def test_rejected_project_identifiers(raw):
+@pytest.mark.parametrize(("raw", "reason"), REJECTED.items())
+def test_rejected_project_identifiers(raw, reason):
     with pytest.raises(InvalidProject) as caught:
         validate_project_slug(raw)
-    # One message shape for every platform: it names the input and the rule, nothing else.
+    # One message shape for every platform: it names the input, why it is refused and the
+    # rule, nothing else.
     assert str(caught.value) == (
-        f"invalid project identifier {raw!r}: use the plain name of a folder under projects/"
+        f"invalid project identifier {raw!r}: {reason}; use the plain name of a folder under "
+        "projects/ (letters, digits, '.', '_' and '-', starting with a letter or a digit, at "
+        "most 128 characters)"
     )
 
 

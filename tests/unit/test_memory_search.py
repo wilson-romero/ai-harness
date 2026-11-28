@@ -76,14 +76,16 @@ def test_same_query_same_output(vault, data_dir):
     assert first.returncode == second.returncode == 0, first.stderr
     assert first.stdout.encode() == second.stdout.encode()
     assert first.stderr.encode() == second.stderr.encode()
-    assert len(first.stdout.splitlines()) == 18
+    # 17 since memory-format-conformance (2026-11-28): the real `_index.md` is links only,
+    # without the "Nota sintética" sentence the fixture's one had.
+    assert len(first.stdout.splitlines()) == 17
 
 
 def test_result_limit(search):
     code, out, err = search("sintética", "--limit", "3")
     assert code == 0
     assert len(_rows(out)) == 3
-    assert "warning: 15 more result(s) omitted" in err
+    assert "warning: 14 more result(s) omitted" in err  # 17 notes, as above
 
 
 def test_other_project_excluded(search):
