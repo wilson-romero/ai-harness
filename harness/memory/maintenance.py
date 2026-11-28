@@ -124,7 +124,7 @@ def maintenance_report(root: Path) -> MaintenanceReport:
         kinds_by_path[relative] = Counter(safe_line(relative).kinds)
     for note in notes:
         if not _is_index(note.relative):
-            problem = frontmatter_problem(note.frontmatter)
+            problem = frontmatter_problem(note.frontmatter, note.relative)
             if problem:
                 findings["invalid_frontmatter"].append(f"{note.relative} ({problem})")
         kinds_by_path[note.relative] += Counter(safe_text(note.text).kinds)
@@ -137,7 +137,7 @@ def maintenance_report(root: Path) -> MaintenanceReport:
     link_budget, pair_budget = _Budget(MAX_NAME_COMPARISONS), _Budget(MAX_NAME_COMPARISONS)
     findings["broken_links"] += _broken_links(notes, known, link_budget)
     curated = [n.relative for n in notes if _in_curated(n.relative) and not _is_index(n.relative)]
-    dangling, orphans = _index_audit(indexes, curated)
+    dangling, orphans = _index_audit(indexes, curated, all_files)
     findings["index_dangling"] += dangling
     findings["index_orphans"] += orphans
     findings["duplicate_candidates"] += _duplicate_candidates(curated, pair_budget)
@@ -184,7 +184,12 @@ def _is_conflict(relative: str) -> bool:
 
 
 def _in_curated(relative: str) -> bool:
-    return relative.startswith(CURATED_MEMORY + "/")
+    """A note directly in `Memoria-CC/`. The original looks at that folder's first level only
+    (`os.listdir` in `scripts/memoria-dream.sh` at 92b19ea, lines 147-174), so a note in a
+    sub-folder is neither an orphan nor half of a duplicate pair (memory-format-conformance
+    D4)."""
+    parts = relative.split("/")
+    return len(parts) == 2 and parts[0] == CURATED_MEMORY
 
 
 def _is_index(relative: str) -> bool:
@@ -222,7 +227,11 @@ def _broken_links(notes: list[Note], known: list[str], budget: _Budget) -> list[
         if note.relative.split("/")[0] in LINK_ROOTS_NOT_CHECKED:
             continue
         for match in _WIKI_LINK_RE.finditer(note.body):
-            target = match.group(1).split("|", 1)[0].split("#", 1)[0].strip()
+            # Inside a Markdown table the alias pipe is escaped, `[[a/b\|alias]]`, as the
+            # capture writes `agents/_skills-index.md`: the `\` belongs to the table, not to
+            # the target (memory-format-conformance D6).
+            target = match.group(1).split("|", 1)[0].removesuffix("\\")
+            target = target.split("#", 1)[0].strip()
             if not target:
                 continue  # a link to a heading of the same note
             key = target.casefold().removesuffix(".md")
@@ -249,9 +258,18 @@ def _link_fix(name: str, candidates: dict[str, list[str]], budget: _Budget) -> s
     return "(no unique candidate)"
 
 
-def _index_audit(indexes: list[Note], curated: list[str]) -> tuple[list[str], list[str]]:
-    """Index entries that name no note, and curated notes that no index names."""
-    present = set(curated)
+def _index_audit(
+    indexes: list[Note], curated: list[str], known: list[str]
+) -> tuple[list[str], list[str]]:
+    """Index entries that name no file of the vault, and curated notes that no index names.
+
+    An entry is a path relative to `Memoria-CC/`, as Markdown and the original read it: `../`
+    goes up (`../Lecciones/x.md` names `Lecciones/x.md`) and a branch `MEMORY-<tema>.md` is a
+    file like any other (memory-format-conformance D5). `known` is every file the confined
+    walk saw, so the answer never depends on anything outside the vault: an entry that climbs
+    out of it names nothing the harness may look at, and is reported as dangling.
+    """
+    present = set(known)
     named: set[str] = set()
     dangling: list[str] = []
     for index in indexes:
@@ -259,12 +277,27 @@ def _index_audit(indexes: list[Note], curated: list[str]) -> tuple[list[str], li
             match = _INDEX_ENTRY_RE.match(line)
             if not match or "://" in match.group(1):
                 continue
-            target = f"{CURATED_MEMORY}/{match.group(1).removeprefix('./')}"
+            target = _index_target(match.group(1))
             named.add(target)
             if target not in present:
                 dangling.append(f"{index.relative} -> {target}")
     orphans = [relative for relative in curated if relative not in named]
     return dangling, orphans
+
+
+def _index_target(entry: str) -> str:
+    """The vault path an index entry names, with `.` and `..` resolved as text (nothing on
+    disk is looked at). One that climbs out of the vault keeps a leading `..` and so names no
+    file of the walk."""
+    parts: list[str] = []
+    for part in f"{CURATED_MEMORY}/{entry.split('#', 1)[0]}".split("/"):
+        if part in ("", "."):
+            continue
+        if part == ".." and parts and parts[-1] != "..":
+            parts.pop()
+        else:
+            parts.append(part)
+    return "/".join(parts)
 
 
 def _duplicate_candidates(curated: list[str], budget: _Budget) -> list[str]:

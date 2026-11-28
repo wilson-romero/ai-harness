@@ -106,10 +106,14 @@ def test_every_fixture_note_is_valid_and_loads():
     walked = walk_vault(VAULT_FIXTURE.resolve())
     notes = [load_note(f) for f in walked.files]
     assert len(notes) >= 19
+    # The indexes `Memoria-CC/MEMORY*.md` have no frontmatter in the real format (the branch
+    # MEMORY-tecnico.md joined MEMORY.md on 2026-11-28); the notes the capture rewrites are
+    # checked with their path, which lets them leave out `created` (memory-format-conformance
+    # D1).
     problems = {
-        n.relative: frontmatter_problem(n.frontmatter)
+        n.relative: frontmatter_problem(n.frontmatter, n.relative)
         for n in notes
-        if n.relative != "Memoria-CC/MEMORY.md"  # an index, not a note
+        if not (n.relative.startswith("Memoria-CC/MEMORY") and n.relative.endswith(".md"))
     }
     assert {k: v for k, v in problems.items() if v} == {}
     assert all(len(n.sha256) == 64 and n.size > 0 for n in notes)

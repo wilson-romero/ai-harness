@@ -60,13 +60,53 @@ SKIP_REASONS = (
 # -- pure validation ----------------------------------------------------------------------------
 
 
+SLUG_MAX_CHARS = 128
+SLUG_RULE = (
+    "use the plain name of a folder under projects/ (letters, digits, '.', '_' and '-', "
+    f"starting with a letter or a digit, at most {SLUG_MAX_CHARS} characters)"
+)
+
+
 def validate_project_slug(raw: str) -> str:
-    """Accept only a simple folder name. Same answer and message on every platform."""
+    """Accept only a simple folder name. Same answer and message on every platform.
+
+    The rule is not relaxed for real vaults (memory-format-conformance D3): the identifier is
+    stored with the session and written into the decision note's frontmatter, so a project
+    folder whose name breaks it (a `vault_slug` of `claude-memory-system` keeps the spaces and
+    accents of the path it comes from) is refused, and the message says why.
+    """
     if not _is_valid_slug(raw):
         raise InvalidProject(
-            f"invalid project identifier {raw!r}: use the plain name of a folder under projects/"
+            f"invalid project identifier {raw!r}: {slug_problem(raw)}; {SLUG_RULE}"
         )
     return raw
+
+
+def slug_problem(raw: str) -> str:
+    """Why `raw` is not a valid project identifier, in words; the same on every platform.
+
+    Only called for a name `_is_valid_slug` refused. The checks go from the most specific
+    reason to the most general one, so that each name gets the one that explains it best.
+    """
+    if not raw:
+        return "it is empty"
+    if "/" in raw or "\\" in raw:
+        return "it contains a path separator"
+    if raw in (".", ".."):
+        return "it is a relative path part"
+    if len(raw) > SLUG_MAX_CHARS:
+        return f"it is longer than {SLUG_MAX_CHARS} characters"
+    if raw.endswith((".", " ")):
+        return "it ends with a dot or a space"
+    if not raw[0].isascii() or not raw[0].isalnum():
+        return "it does not start with a letter or a digit"
+    if " " in raw:
+        return "it contains a space"
+    if not raw.isascii():
+        return "it contains a character that is not ASCII"
+    if not _PROJECT_RE.fullmatch(raw):
+        return "it contains a character other than letters, digits, '.', '_' and '-'"
+    return "it is a reserved Windows device name"
 
 
 def is_safe_name(raw: str) -> bool:

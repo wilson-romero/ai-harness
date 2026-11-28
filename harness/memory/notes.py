@@ -130,15 +130,24 @@ def _parse_block(lines: list[str]) -> dict[str, FieldValue] | None:
                 return None
             inner = value[1:-1].strip()
             fields[key] = tuple(_unquote(p.strip()) for p in inner.split(",")) if inner else ()
-        else:
+        elif _is_quoted(value):
             fields[key] = _unquote(value)
+        elif ": " in value or value.endswith(":"):
+            # YAML reads `key: a: b` as a mapping inside a plain scalar, which is an error:
+            # Obsidian and `claude-memory-system` stop indexing that note, so it is not valid
+            # here either (memory-format-conformance D2). Quoted, the same text is fine.
+            return None
+        else:
+            fields[key] = value
     return fields
 
 
+def _is_quoted(value: str) -> bool:
+    return len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'"
+
+
 def _unquote(value: str) -> str:
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-        return value[1:-1]
-    return value
+    return value[1:-1] if _is_quoted(value) else value
 
 
 def as_list(value: FieldValue | None) -> tuple[str, ...]:
@@ -160,8 +169,25 @@ def date_prefix(value: FieldValue | None) -> str | None:
     return value[:10]
 
 
-def frontmatter_problem(frontmatter: Frontmatter) -> str | None:
-    """Why a note's frontmatter is not valid for maintenance (D10), or None."""
+def created_is_optional(relative: str) -> bool:
+    """Whether the note is one the capture of `claude-memory-system` rewrites whole on every
+    turn without a `created` field: `projects/<slug>/_project.md`, `_index.md` and
+    `agents/_skills-index.md` (`scripts/memoria-capture.sh` at 92b19ea, lines 277-287 and
+    405-440). Every other note keeps the standard frontmatter, `created` included."""
+    parts = relative.split("/")
+    return (
+        (len(parts) == 3 and parts[0] == PROJECTS_DIR and parts[2] == "_project.md")
+        or parts == ["_index.md"]
+        or parts == ["agents", "_skills-index.md"]
+    )
+
+
+def frontmatter_problem(frontmatter: Frontmatter, relative: str | None = None) -> str | None:
+    """Why a note's frontmatter is not valid for maintenance (D10), or None.
+
+    `relative` is the note's vault path: the notes of `created_is_optional` may leave
+    `created` out (memory-format-conformance D1); a `created` they do carry is checked.
+    """
     if not frontmatter.present:
         return "missing"
     if not frontmatter.syntax_ok:
@@ -169,6 +195,9 @@ def frontmatter_problem(frontmatter: Frontmatter) -> str | None:
     if not isinstance(frontmatter.fields.get("type"), str) or not frontmatter.fields["type"]:
         return "missing type"
     for key in ("created", "updated"):
+        if (key == "created" and key not in frontmatter.fields and relative is not None
+                and created_is_optional(relative)):
+            continue
         value = frontmatter.fields.get(key)
         if not isinstance(value, str) or not _DATE_RE.fullmatch(value) or not date_prefix(value):
             return f"{key} is not YYYY-MM-DD"

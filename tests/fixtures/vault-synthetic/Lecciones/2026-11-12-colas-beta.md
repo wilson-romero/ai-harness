@@ -1,5 +1,5 @@
 ---
-type: leccion
+type: lesson
 machine: equipo-sintetico
 created: 2026-11-12
 updated: 2026-11-12
