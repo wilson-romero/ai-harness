@@ -6,6 +6,7 @@ import sqlite3
 from uuid import UUID, uuid7
 
 from harness.core.contracts import IN_FLIGHT, HistoryEntry, RequestStatus, Session, SessionStatus
+from harness.core.response_mode import ResponseMode
 from harness.storage.database import utc_now
 
 
@@ -24,6 +25,9 @@ def insert_session(conn: sqlite3.Connection, session: Session) -> None:
             session.updated_at.isoformat(),
         ),
     )
+    # A new session starts in `auto`, the column's default (migration 008).
+    if session.response_mode is not ResponseMode.AUTO:
+        set_session_mode(conn, session.session_id, session.response_mode)
 
 
 def get_session(conn: sqlite3.Connection, session_id: UUID) -> Session | None:
@@ -52,10 +56,33 @@ def set_session_status(conn: sqlite3.Connection, session_id: UUID, status: Sessi
     )
 
 
-def insert_request(conn: sqlite3.Connection, request_id: UUID, session_id: UUID) -> None:
+def set_session_mode(conn: sqlite3.Connection, session_id: UUID, mode: ResponseMode) -> None:
     conn.execute(
-        "INSERT INTO requests (request_id, session_id, status, started_at) VALUES (?, ?, ?, ?)",
-        (str(request_id), str(session_id), RequestStatus.PENDING.value, utc_now()),
+        "UPDATE sessions SET response_mode = ?, updated_at = ? WHERE session_id = ?",
+        (mode.value, utc_now(), str(session_id)),
+    )
+
+
+def insert_request(
+    conn: sqlite3.Connection,
+    request_id: UUID,
+    session_id: UUID,
+    mode: ResponseMode | None = None,
+) -> None:
+    conn.execute(
+        "INSERT INTO requests (request_id, session_id, status, started_at, requested_mode)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (str(request_id), str(session_id), RequestStatus.PENDING.value, utc_now(),
+         mode.value if mode is not None else None),
+    )
+
+
+def set_confirmed_mode(conn: sqlite3.Connection, request_id: UUID, mode: ResponseMode) -> None:
+    """The mode the provider confirmed on its page; a later report replaces it (the page
+    changed mode during the answer, response-mode D4)."""
+    conn.execute(
+        "UPDATE requests SET confirmed_mode = ? WHERE request_id = ?",
+        (mode.value, str(request_id)),
     )
 
 
@@ -104,7 +131,8 @@ def insert_message(
 
 def history(conn: sqlite3.Connection, session_id: UUID) -> list[HistoryEntry]:
     rows = conn.execute(
-        "SELECT m.request_id, r.status AS request_status, m.role, m.content, m.created_at"
+        "SELECT m.request_id, r.status AS request_status, m.role, m.content, m.created_at,"
+        " r.requested_mode, r.confirmed_mode"
         " FROM messages m JOIN requests r ON r.request_id = m.request_id"
         " WHERE m.session_id = ? ORDER BY m.created_at, m.message_id",
         (str(session_id),),
@@ -201,6 +229,23 @@ def completed_requests(conn: sqlite3.Connection, session_id: UUID) -> int:
         (str(session_id), RequestStatus.COMPLETED.value),
     ).fetchone()
     return int(row[0])
+
+
+def request_modes(
+    conn: sqlite3.Connection, session_id: UUID
+) -> dict[str, tuple[ResponseMode | None, ResponseMode | None]]:
+    """(requested, confirmed) mode of every request of a session, by request id."""
+    rows = conn.execute(
+        "SELECT request_id, requested_mode, confirmed_mode FROM requests WHERE session_id = ?",
+        (str(session_id),),
+    )
+    return {
+        row["request_id"]: (
+            ResponseMode(row["requested_mode"]) if row["requested_mode"] else None,
+            ResponseMode(row["confirmed_mode"]) if row["confirmed_mode"] else None,
+        )
+        for row in rows
+    }
 
 
 def session_requests(conn: sqlite3.Connection, session_id: UUID) -> list[tuple[str, str, str]]:

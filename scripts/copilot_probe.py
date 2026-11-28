@@ -11,6 +11,8 @@ Usage (see docs/runbook/copilot.md):
     uv run python scripts/copilot_probe.py structure    # sanitised page structure, no sends
     uv run python scripts/copilot_probe.py code-language --session SESSION_ID
                                                         # a code block's label element, no sends
+    uv run python scripts/copilot_probe.py response-mode
+                                                        # the response-mode selector, no sends
 
 The probe sends only the fixed prompts below and accepts no prompt of its own from arguments,
 environment or standard input. It writes its measurements only under
@@ -24,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import hashlib
 import json
 import math
@@ -78,6 +81,19 @@ from harness.providers.copilot_ui import (  # noqa: E402
 )
 from harness.providers.copilot_ui import load_measurement, measurement_path  # noqa: E402
 from harness.providers.copilot_web import REPLY_MAX_CHARS, REPLY_TEXT_JS  # noqa: E402
+from harness.core.response_mode import ResponseMode  # noqa: E402
+from harness.providers.copilot_web import (  # noqa: E402
+    MODE_CONFIRM_S,
+    STATE_POLL_S,
+    _ModeSelector,
+    _NotConfirmed,
+)
+from harness.providers.copilot_ui import (  # noqa: E402
+    MODE_LABEL_MAX,
+    LocatorSpec,
+    ResponseModeControl,
+)
+from harness.text.safe_text import safe_line  # noqa: E402
 from harness.storage import repositories as repo  # noqa: E402
 from harness.storage.database import connect  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
@@ -634,7 +650,7 @@ class Probe:
 
 
 def merge_locators(discovered: dict, overrides: dict) -> tuple[Locators | None, list[str]]:
-    data = discovered | overrides
+    data = {k: v for k, v in (discovered | overrides).items() if k != MODE_TRIGGER_OVERRIDE}
     missing = [name for name in REQUIRED_LOCATORS if name not in data]
     if data.get("send_with", "button") == "button" and "send" not in data:
         missing.append("send")
@@ -1137,6 +1153,257 @@ def add_code_language(out_dir: Path, data_dir: Path, locator: dict) -> str:
     return "written"
 
 
+# -- the response-mode selector (change response-mode, design D7) ---------------------------------
+
+MODE_TRIGGER_OVERRIDE = "response_mode_trigger"  # candidates.json: a trigger written by hand
+MODES = ("auto", "quick", "deep")
+# The open selector, by structure: the one visible element with aria-expanded=true and the one
+# visible list of modes, with the role, accessible name (cut) and checked state of each option,
+# and, of the opener, its role, data-testid, aria-label and name. Labels of the control only.
+OPEN_SELECTOR_JS = r"""
+(max) => {
+  const visible = (e) => {
+    const r = e.getBoundingClientRect(), s = getComputedStyle(e);
+    return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none";
+  };
+  const nameOf = (e) => (e.getAttribute("aria-label") || e.innerText || e.textContent || "")
+    .replace(/\s+/g, " ").trim().slice(0, max);
+  const roleOf = (e) => e.getAttribute("role") || (e.tagName === "BUTTON" ? "button" : null);
+  const lists = [...document.querySelectorAll("[role=menu],[role=listbox]")].filter(visible);
+  const openers = [...document.querySelectorAll("[aria-expanded=true]")].filter(visible);
+  const found = { lists: lists.length, openers: openers.length, options: [] };
+  if (lists.length !== 1 || openers.length !== 1) return found;
+  const OPTION = "[role=menuitemradio],[role=menuitemcheckbox],[role=menuitem],[role=option],[role=radio]";
+  found.list_role = lists[0].getAttribute("role");
+  found.options = [...lists[0].querySelectorAll(OPTION)].filter(visible).map((o) => ({
+    role: o.getAttribute("role"),
+    name: nameOf(o),
+    checked: ["aria-checked", "aria-selected", "aria-current"].some((a) => o.getAttribute(a) === "true"),
+  }));
+  const t = openers[0];
+  found.opener = { role: roleOf(t), test_id: t.getAttribute("data-testid"),
+                   aria_label: (t.getAttribute("aria-label") || "").slice(0, max) || null,
+                   name: nameOf(t) };
+  return found;
+}
+"""
+
+
+def choose_modes(options: list[dict]) -> dict[str, int]:
+    """Ask the person which option is which mode. Only digits are read, and never sent."""
+    say("Options of the selector:")
+    for number, option in enumerate(options, start=1):
+        say(f"  {number}. {option['name']} ({option['role']})")
+    chosen: dict[str, int] = {}
+    for mode in MODES:
+        while True:
+            say(f"number of the option for {mode} (Enter if there is none): ")
+            answer = sys.stdin.readline().strip()
+            if not answer:
+                break
+            if answer.isascii() and answer.isdigit() and 1 <= int(answer) <= len(options) and (
+                int(answer) - 1 not in chosen.values()
+            ):
+                chosen[mode] = int(answer) - 1
+                break
+            say(f"  a number from 1 to {len(options)}, not used for another mode")
+    return chosen
+
+
+def mode_trigger_candidates(opener: dict, override: dict | None) -> list[dict]:
+    """Locators of the opener to try, most stable first; never a guess beyond what was read."""
+    found: list[dict] = [override] if override else []
+    if opener.get("test_id"):
+        found.append({"test_id": opener["test_id"]})
+    if opener.get("role") and opener.get("aria_label"):
+        found.append({"role": opener["role"], "name": opener["aria_label"], "exact": True})
+    if opener.get("role") and opener.get("name"):
+        found.append({"role": opener["role"], "name": opener["name"], "exact": True})
+    unique: list[dict] = []
+    for candidate in found:
+        if candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+async def _read_both(selectors: dict) -> dict:
+    seen = {}
+    for name, selector in selectors.items():
+        try:
+            seen[name] = await selector.read()
+        except (_NotConfirmed, PlaywrightError):
+            seen[name] = None
+    return seen
+
+
+async def confirm_modes(page: Page, trigger: dict, options: dict, labels: dict,
+                        order: list[str], others: tuple = ()) -> dict[str, list[str]]:
+    """Choose each mode with this opener and read it back both ways. Returns, per readback,
+    the modes it confirmed. A reading confirms a mode only if it read something else just
+    before the mode was chosen (review 2026-11-27, finding 3): a reading that never changes
+    tells no mode apart."""
+    spec = LocatorSpec.model_validate(trigger)
+    opts = {m: LocatorSpec.model_validate(o) for m, o in options.items()}
+    checked = _ModeSelector(page, ResponseModeControl(
+        trigger=spec, options=opts, readback="checked_option"), others)
+    selectors = {"checked_option": checked}
+    if len(set(labels.values())) == len(labels):
+        selectors["trigger_label"] = _ModeSelector(page, ResponseModeControl(
+            trigger=spec, options=opts, labels=labels, readback="trigger_label"), others)
+    confirmed: dict[str, list[str]] = {"checked_option": [], "trigger_label": []}
+    for mode in order:
+        before = await _read_both(selectors)
+        try:
+            await checked.choose(mode)
+        except (_NotConfirmed, PlaywrightError):
+            await checked.close()
+            continue
+        until = time.monotonic() + MODE_CONFIRM_S
+        while True:
+            seen = await _read_both(selectors)
+            if any(value == mode for value in seen.values()) or time.monotonic() >= until:
+                break
+            await asyncio.sleep(STATE_POLL_S)
+        for name, value in seen.items():
+            if value == mode and before.get(name) != mode:
+                confirmed[name].append(mode)
+        await checked.close()
+    return confirmed
+
+
+async def step_response_mode(probe: Probe, result: dict) -> None:
+    """Measure the response-mode selector with the person, sending nothing (D7): how it opens,
+    its options, which is which mode (the person says), and how the current mode is read
+    back; each mode is chosen and read back, and the page is left in the mode it was in."""
+    measured = None
+    with contextlib.suppress(MeasurementError, OSError):
+        measured = load_measurement(probe.settings.data_dir).locators
+    if measured is None:
+        # Without the measured user turns, whether choosing a mode changes the conversation
+        # cannot be checked (review 2026-11-27, finding 8).
+        result["mode_status"] = ("no ui.json yet: measure first, then measure the selector "
+                                 "(the turns of the conversation are checked with it)")
+        return
+    user_turn = measured.user_turn
+    others = tuple(spec for spec in (measured.composer, measured.send, measured.stop,
+                                     measured.new_conversation) if spec is not None)
+    async with probe.launcher().open() as context:
+        result["edge_version"] = edge_version(context)
+        page = first_page(context)
+        await page.goto(probe.url)
+        if not await settle_page(page, probe.copilot_host, probe.settings.copilot_ready_timeout_s):
+            result["stopped"] = "not on the Copilot host (sign-in page?)"
+            raise ProbeFailure("the Copilot page did not open (signed out?): run `probe login`")
+        if await signed_out_hints(page):
+            raise ProbeFailure(probe.guest_advice())
+        say("In the Edge window, open the response-mode selector (where the automatic, quick and "
+            "deep modes are chosen) WITHOUT choosing anything, then press Enter here.")
+        if not await wait_for_person(context):
+            raise ProbeFailure("the Edge window was closed")
+        page = first_page(context)
+        found = await page.evaluate(OPEN_SELECTOR_JS, MODE_LABEL_MAX)
+        options = [{"role": o["role"], "name": safe_line(o["name"]).text, "checked": o["checked"]}
+                   for o in found.get("options") or [] if o.get("role") and o.get("name")]
+        result["selector"] = {"lists": found["lists"], "openers": found["openers"],
+                              "list_role": found.get("list_role"), "options": options}
+        if not options or not found.get("opener"):
+            result["mode_status"] = "no open selector found"
+            return
+        opener = {k: (safe_line(v).text if isinstance(v, str) else v)
+                  for k, v in found["opener"].items()}
+        result["selector"]["opener"] = {"role": opener.get("role"),
+                                        "has_test_id": bool(opener.get("test_id")),
+                                        "has_aria_label": bool(opener.get("aria_label"))}
+        mapping = await asyncio.to_thread(choose_modes, options)
+        mapping = {m: i for m, i in mapping.items() if m in MODES and 0 <= i < len(options)}
+        result["mapped"] = sorted(mapping)
+        if not mapping:
+            result["mode_status"] = "no option was mapped to a mode"
+            return
+        specs = {m: {"role": options[i]["role"], "name": options[i]["name"], "exact": True}
+                 for m, i in mapping.items()}
+        labels = {m: options[i]["name"] for m, i in mapping.items()}
+        start = next((m for m, i in mapping.items() if options[i]["checked"]), None)
+        result["mode_at_start"] = start
+        await page.keyboard.press("Escape")  # the list the person opened
+        if start is None:
+            # Nothing is chosen: the page could not be put back in the mode it was in.
+            result["mode_status"] = ("the starting mode is not among the mapped ones, so the "
+                                     "page could not be left as found: not measured")
+            return
+        order = sorted(mapping, key=lambda m: m == start)  # the starting mode last: restored
+        url_before = page.url
+        turns_before = await user_turn.resolve(page).count()
+        override = probe.overrides().get(MODE_TRIGGER_OVERRIDE)
+        tried = []
+        chosen = None
+        candidates = mode_trigger_candidates(opener, override)
+        for candidate in candidates:
+            try:
+                confirmed = await confirm_modes(page, candidate, specs, labels, order, others)
+            except ValueError:  # not a valid locator or control
+                continue
+            kind = next(iter(k for k in candidate if k != "exact" and k != "name"))
+            tried.append({"kind": kind, "confirmed": {k: sorted(v) for k, v in confirmed.items()}})
+            for readback in ("trigger_label", "checked_option"):
+                if set(confirmed[readback]) == set(mapping):
+                    chosen = (candidate, readback)
+                    break
+            if chosen:
+                break
+        result["triggers_tried"] = tried
+        result["url_changed_on_select"] = page.url != url_before
+        result["turns_changed_on_select"] = await user_turn.resolve(page).count() != turns_before
+        # Leave the page in the mode it was in, with the confirmed reading or, when none was
+        # confirmed, with the marked option and each opener tried (finding 8).
+        restore_with = [chosen] if chosen else [(c, "checked_option") for c in candidates]
+        result["restored"] = False
+        for trigger, readback in restore_with:
+            with contextlib.suppress(ValueError, _NotConfirmed, PlaywrightError):
+                control = ResponseModeControl.model_validate({
+                    "trigger": trigger, "options": specs, "readback": readback, "labels": labels})
+                back = await _ModeSelector(page, control, others).select(ResponseMode(start))
+                if back == start:
+                    result["restored"] = True
+                    break
+        if result["url_changed_on_select"] or result["turns_changed_on_select"]:
+            result["mode_status"] = "choosing a mode changed the conversation: not written"
+            return
+        if chosen is None:
+            result["mode_status"] = "not confirmed with any locator of the opener"
+            return
+        if not result["restored"]:
+            result["mode_status"] = "the page was not left in the mode it was in: not written"
+            return
+        trigger, readback = chosen
+        control = ResponseModeControl.model_validate({
+            "trigger": trigger, "options": specs, "readback": readback, "labels": labels})
+        result["response_mode"] = control.model_dump(mode="json", exclude_none=True)
+        result["mode_status"] = "confirmed " + ", ".join(m for m in MODES if m in mapping)
+
+
+def add_response_mode(out_dir: Path, data_dir: Path, control: dict) -> str:
+    """Put the measured selector into the current ui.json (the old one is kept, dated)."""
+    target = measurement_path(data_dir)
+    if not target.is_file():
+        return "no ui.json yet: it gets the selector when measure writes it"
+    data = json.loads(target.read_text(encoding="utf-8"))
+    data["response_mode"] = control
+    final = UiMeasurement.model_validate(data)
+    dated = datetime.fromtimestamp(target.stat().st_mtime, UTC).strftime("%Y%m%dT%H%M%SZ")
+    target.replace(out_dir / f"ui-{dated}.json")
+    write_json(out_dir, MEASUREMENT_FILE, final.model_dump(mode="json"))
+    return "written"
+
+
+def response_mode_of(out_dir: Path) -> dict:
+    """The selector of the latest complete `response-mode` step, as a ui.json entry."""
+    found = latest(out_dir, "response-mode")
+    if found and found.get("complete") and found.get("response_mode"):
+        return {"response_mode": found["response_mode"]}
+    return {}
+
+
 # -- results ------------------------------------------------------------------------------------
 
 
@@ -1222,7 +1489,7 @@ def assemble(out_dir: Path) -> tuple[UiMeasurement | None, str]:
         "longest_response_ms": measure.get("longest_response_ms"),
         "recommended_timeout_s": measure.get("recommended_timeout_s"),
         "login": login.model_dump(mode="json") if login else None,
-    }
+    } | response_mode_of(out_dir)
     draft = UiMeasurement.model_validate(data)
     missing = draft.missing_parts()
     if missing:
@@ -1310,6 +1577,20 @@ def print_summary(step: str, result: dict, ui_status: str | None) -> None:
             f"{result.get('fences_with_language_without_locator')})  checked: "
             f"{yes_no(result.get('checked'))}"
         )
+    if step == "response-mode":
+        selector = result.get("selector") or {}
+        lines.append(
+            f"response mode: {result.get('mode_status') or 'not measured'}  lists open: "
+            f"{selector.get('lists')}  openers: {selector.get('openers')}  options: "
+            f"{len(selector.get('options') or [])}  mapped: {', '.join(result.get('mapped') or []) or '-'}"
+        )
+        lines.append(
+            f"  readback: {(result.get('response_mode') or {}).get('readback') or '-'}  "
+            f"locators of the opener tried: {len(result.get('triggers_tried') or [])}  "
+            f"URL changed: {yes_no(result.get('url_changed_on_select'))}  turns changed: "
+            f"{yes_no(result.get('turns_changed_on_select'))}  left as found: "
+            f"{yes_no(result.get('restored'))}"
+        )
     if step == "login":
         lines.append(
             f"P1 controllable: {yes_no(result.get('controllable'))}  "
@@ -1388,6 +1669,7 @@ STEPS: dict[str, Callable] = {
     "discover": step_discover,
     "sizes": step_sizes,
     "code-language": step_code_language,
+    "response-mode": step_response_mode,
 }
 
 
@@ -1407,6 +1689,9 @@ def build_parser() -> argparse.ArgumentParser:
         "code-language", help="which element of a code block holds its language; sends nothing")
     code.add_argument("--session", required=True,
                       help="a session whose conversation already shows a code block")
+    steps.add_parser(
+        "response-mode",
+        help="the response-mode selector, with the person; chooses modes, sends nothing")
     return parser
 
 
@@ -1466,6 +1751,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.step == "code-language":
         result["complete"] = bool(result.get("code_language"))
         result["missing"] = [] if result["complete"] else ["code_language"]
+    elif args.step == "response-mode":
+        result["complete"] = bool(result.get("response_mode"))
+        result["missing"] = [] if result["complete"] else ["response_mode"]
     else:
         result["complete"] = result.get("controllable") is True and bool(result.get("confirmed_by_person"))
         result["missing"] = [] if result["complete"] else ["login"]
@@ -1475,6 +1763,8 @@ def main(argv: list[str] | None = None) -> int:
         _, ui_status = assemble(probe.out_dir)
     elif args.step == "code-language" and result["complete"]:
         ui_status = add_code_language(probe.out_dir, probe.settings.data_dir, result["code_language"])
+    elif args.step == "response-mode" and result["complete"]:
+        ui_status = add_response_mode(probe.out_dir, probe.settings.data_dir, result["response_mode"])
     print_summary(args.step, result, ui_status)
     if code == EXIT_OK and not result["complete"]:
         code = EXIT_ERROR

@@ -7,6 +7,8 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
+from harness.core.response_mode import ResponseMode
+
 
 class SessionStatus(StrEnum):
     CREATED = "created"
@@ -42,6 +44,8 @@ class Session(_Contract):
     status: SessionStatus
     created_at: AwareDatetime
     updated_at: AwareDatetime
+    # Remembered for the session (response-mode D5); a session from before it is `auto`.
+    response_mode: ResponseMode = ResponseMode.AUTO
 
     @field_validator("name")
     @classmethod
@@ -60,6 +64,8 @@ class LLMRequest(_Contract):
     # session's requests completed (design D5).
     remote_ref: str | None = None
     completed_turns: int = Field(default=0, ge=0)
+    # The response mode the provider sets before sending (response-mode D1).
+    mode: ResponseMode = ResponseMode.AUTO
 
 
 class LLMResponse(_Contract):
@@ -81,3 +87,7 @@ class HistoryEntry(_Contract):
     role: str
     content: str | None
     created_at: AwareDatetime
+    # The mode the request asked for and the one the provider confirmed (response-mode D5);
+    # None for requests from before migration 008.
+    requested_mode: ResponseMode | None = None
+    confirmed_mode: ResponseMode | None = None

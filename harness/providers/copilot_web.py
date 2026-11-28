@@ -16,6 +16,9 @@ Rules this module keeps:
   is repeated once (the prompt cannot leave twice when it never left).
 - The remote identifier is learned from the URL when the platform assigns it, reported at once
   with `events.bound`, and checked in the URL before anything is typed when reopening.
+- A response mode is set with the measured selector before anything is typed and read back
+  from the page; one that cannot be confirmed fails before typing (change response-mode, D3).
+  Setting it must leave the page in the same conversation with the same turns.
 - Page text is untrusted: the reply is read with a size cap, cleaned of control, escape and
   invisible characters, and only returned. No message of this module carries page text, a URL
   of the page or an exception's text: they are fixed sentences with counts.
@@ -45,10 +48,12 @@ from harness.browser.page_state import (
 )
 from harness.config import Settings
 from harness.core.contracts import LLMRequest
+from harness.core.response_mode import ResponseMode
 from harness.core.errors import HarnessError, InvalidInput
 from harness.text.safe_text import safe_foreign_text
 from harness.providers.base import (
     AuthenticationRequired,
+    ModeUnavailable,
     ProviderError,
     ProviderEvents,
     ProviderTimeout,
@@ -59,7 +64,9 @@ from harness.providers.base import (
 from harness.providers.copilot_ui import (
     ConversationRef,
     Locators,
+    LocatorSpec,
     MeasurementError,
+    ResponseModeControl,
     UiMeasurement,
     load_measurement,
 )
@@ -81,6 +88,10 @@ HELD_RESERVE_S = 2.0
 PAGE_CLOSE_S = 5.0  # bound on closing a tab that is no longer trusted
 HISTORY_WAIT_S = 15.0  # a reopened conversation shows none of its turns that long: it is gone
 RETRY_MIN_S = 10.0  # a lost tab is tried again only with at least this much of the deadline left
+MODE_CONFIRM_S = 5.0  # after choosing a mode, how long the page may take to show it
+MODE_OPEN_S = 3.0  # after clicking the selector, how long its list may take to appear
+MODE_CLOSE_S = 1.0  # after Escape, how long the list may take to go away
+MODE_REREAD_S = 5.0  # bound on reading the mode again after the answer
 
 # Characters in the editor: a field's value, else the text content. Zero-width characters do
 # not count (a rich editor keeps some as cursor anchors) and neither do line breaks, which a
@@ -316,6 +327,177 @@ class _TabGone(ProviderError):
     """The question's tab or window was gone before anything was typed."""
 
 
+class ModeNotConfirmed(ProviderError):
+    """The response mode could not be confirmed on the page. Nothing was typed or sent."""
+
+
+class _NotConfirmed(Exception):
+    """Inside the mode selector: why the mode could not be read or set (fixed text)."""
+
+
+# Whether an option is marked as the current one.
+OPTION_CHECKED_JS = (
+    "e => ['aria-checked', 'aria-selected', 'aria-current']"
+    ".some((a) => e.getAttribute(a) === 'true')"
+)
+# The label of the control that opens the list: its aria-label and its visible text.
+TRIGGER_LABEL_JS = (
+    "e => (e.getAttribute('aria-label') || '') + ' ' + (e.innerText || e.textContent || '')"
+)
+
+
+# Whether the element is one of `others`, or holds one, or is inside one.
+SAME_OR_NESTED_JS = "(e, others) => others.some((o) => o === e || o.contains(e) || e.contains(o))"
+# Whether a user turn came after `previous` (the last one before the mode was chosen): turns
+# inserted above it are a history that arrived late, not a new question (review 2026-11-27,
+# finding 1). A `previous` the page removed (a virtualised list) tells nothing: false, and the
+# guard before typing still checks the conversation.
+NEW_TURN_SINCE_JS = """(turns, previous) => {
+  if (previous === null) return turns.length > 0;
+  if (!previous.isConnected) return false;
+  const last = turns[turns.length - 1];
+  return !!last && last !== previous
+    && !!(previous.compareDocumentPosition(last) & Node.DOCUMENT_POSITION_FOLLOWING);
+}"""
+
+
+class _ModeSelector:
+    """The measured response-mode selector of one page (response-mode D3). Every click is on
+    exactly one visible element found with a measured locator, and never on one of the
+    `others` (the editor, send, stop or new-chat control) however the locator was written;
+    nothing is typed. Every method that opens the list closes it again, also when it fails
+    (review 2026-11-27, finding 2): whoever types after it checks that it is closed."""
+
+    def __init__(self, page: Page, control: ResponseModeControl,
+                 others: tuple[LocatorSpec, ...] = ()) -> None:
+        self.page = page
+        self.control = control
+        self.others = others
+
+    def _visible(self, spec: LocatorSpec) -> Locator:
+        return spec.resolve(self.page).filter(visible=True)
+
+    async def _one(self, spec: LocatorSpec, what: str) -> Locator:
+        found = self._visible(spec)
+        count = await found.count()
+        if count != 1:
+            raise _NotConfirmed(f"{count} visible elements match {what}, not one")
+        return found.first
+
+    async def _is_other(self, element: Locator) -> bool:
+        for spec in self.others:
+            handles = await spec.resolve(self.page).element_handles()
+            if handles and await element.evaluate(SAME_OR_NESTED_JS, handles):
+                return True
+        return False
+
+    async def _click(self, element: Locator, what: str) -> None:
+        """Click `element` unless it is, holds or sits inside another measured control
+        (review 2026-11-27, finding 4: a loose locator can pass the schema's literal check)."""
+        if await self._is_other(element):
+            raise _NotConfirmed(f"{what} resolves to another control of the page (the "
+                                "editor, send, stop or new chat), so it was not clicked")
+        await element.click(timeout=_ms(MODE_OPEN_S))
+
+    async def unusable(self) -> str | None:
+        """Why this measured selector must not be used on this page, before any click: a
+        visible element of its opener or options that is another control. None if none is."""
+        parts = [("the control that opens the modes", self.control.trigger),
+                 *((f"the option of {mode}", spec) for mode, spec in self.control.options.items())]
+        for what, spec in parts:
+            found = self._visible(spec)
+            for index in range(await found.count()):
+                if await self._is_other(found.nth(index)):
+                    return (f"{what} resolves to another control of the page (the editor, send, "
+                            "stop or new chat)")
+        return None
+
+    async def _list_open(self) -> bool:
+        for spec in self.control.options.values():
+            if await self._visible(spec).count():
+                return True
+        return False
+
+    async def is_open(self) -> bool:
+        """Whether the list of modes shows now."""
+        return await self._list_open()
+
+    async def open(self) -> None:
+        if await self._list_open():
+            return
+        what = "the control that opens the modes"
+        await self._click(await self._one(self.control.trigger, what), what)
+        until = time.monotonic() + MODE_OPEN_S
+        while not await self._list_open():
+            if time.monotonic() >= until:
+                raise _NotConfirmed("the list of modes did not open")
+            await asyncio.sleep(POLL_S)
+
+    async def close(self) -> bool:
+        """Close the list with Escape; whether it is closed now. Never raises for the page:
+        it runs in `finally`, and the caller checks the list before typing."""
+        try:
+            if not await self._list_open():
+                return True
+            await self.page.keyboard.press("Escape")
+            until = time.monotonic() + MODE_CLOSE_S
+            while await self._list_open():
+                if time.monotonic() >= until:
+                    return False
+                await asyncio.sleep(POLL_S)
+            return True
+        except PlaywrightError:
+            return False
+
+    async def choose(self, target: ResponseMode | str) -> None:
+        """Open the list and click the option of `target` (no read-back, no close)."""
+        await self.open()
+        what = f"the option of {target}"
+        await self._click(await self._one(self.control.options[str(target)], what), what)
+
+    async def read(self) -> ResponseMode | None:
+        """The mode the page shows now, by the measured readback; None when it is not one of
+        the measured modes or cannot be told."""
+        if self.control.readback == "trigger_label":
+            trigger = await self._one(self.control.trigger, "the control that opens the modes")
+            text = str(await trigger.evaluate(TRIGGER_LABEL_JS))
+            hits = sorted(((len(label), mode) for mode, label in self.control.labels.items()
+                           if label in text), reverse=True)
+            if not hits or (len(hits) > 1 and hits[0][0] == hits[1][0]):
+                return None
+            return ResponseMode(hits[0][1])
+        was_open = await self._list_open()
+        checked = []
+        try:
+            await self.open()
+            for mode, spec in self.control.options.items():
+                option = self._visible(spec)
+                if await option.count() == 1 and await option.first.evaluate(OPTION_CHECKED_JS):
+                    checked.append(mode)
+        finally:
+            if not was_open:
+                await self.close()
+        return ResponseMode(checked[0]) if len(checked) == 1 else None
+
+    async def select(self, target: ResponseMode) -> ResponseMode | None:
+        """Choose `target` unless the page already shows it, then read it back until it shows
+        or MODE_CONFIRM_S passes. Returns the mode read last."""
+        try:
+            current = await self.read()
+            if current is target:
+                return current
+            await self.choose(target)
+            until = time.monotonic() + MODE_CONFIRM_S
+            while True:
+                current = await self.read()
+                if current is target or time.monotonic() >= until:
+                    break
+                await asyncio.sleep(STATE_POLL_S)
+            return current
+        finally:
+            await self.close()
+
+
 class _NoEvents:
     def bound(self, remote_ref: str) -> None:
         pass
@@ -412,6 +594,19 @@ class CopilotWebProvider:
 
     # -- before anything is recorded --------------------------------------------------------
 
+    def check_mode(self, mode: ResponseMode) -> None:
+        """Whether the measured page has this mode (response-mode D1, D2): `auto` always."""
+        if mode is ResponseMode.AUTO:
+            return
+        control = load_measurement(self._settings.data_dir).response_mode
+        if control is None or mode.value not in control.options:
+            raise ModeUnavailable(
+                f"Copilot cannot set the response mode {mode} yet: the measurement (ui.json) has "
+                f"no response-mode control with a {mode} option. Measure it with `uv run python "
+                "scripts/copilot_probe.py response-mode` (docs/runbook/copilot.md); `/mode auto` "
+                "works meanwhile. Nothing was sent"
+            )
+
     def check(self, prompt: str) -> None:
         """Configuration, measurement and size, without opening anything (D2, D12)."""
         plan = self._plan()
@@ -445,6 +640,7 @@ class CopilotWebProvider:
         on_sent: Callable[[], None],
         *,
         events: ProviderEvents | None = None,
+        on_mode: Callable[[ResponseMode], None] | None = None,
     ) -> str:
         plan = self._plan()
         if len(request.prompt) > plan.limit:  # the service checked; never type an over-long one
@@ -452,7 +648,8 @@ class CopilotWebProvider:
         held = self._held is not None
         reserve = min(HELD_RESERVE_S if held else CLOSE_RESERVE_S, request.timeout_s * 0.25)
         deadline = time.monotonic() + request.timeout_s - reserve
-        turn = _Turn(self._settings, plan, request, on_sent, events or _NoEvents(), deadline)
+        turn = _Turn(self._settings, plan, request, on_sent, events or _NoEvents(), deadline,
+                     on_mode or (lambda mode: None))
         try:
             if held:
                 return await self._ask_held(turn, deadline)
@@ -523,8 +720,11 @@ class _Turn:
         on_sent: Callable[[], None],
         events: ProviderEvents,
         deadline: float,
+        on_mode: Callable[[ResponseMode], None],
     ) -> None:
         self.settings = settings
+        self.on_mode = on_mode
+        self.confirmed_mode: ResponseMode | None = None
         self.plan = plan
         self.request = request
         self.on_sent = on_sent
@@ -549,7 +749,11 @@ class _Turn:
         return self.deadline - time.monotonic()
 
     async def run(self, page: Page) -> str:
+        # One attempt: a mode confirmed in an earlier tab says nothing about this one
+        # (review 2026-11-27, finding 5).
+        self.confirmed_mode = None
         await self.open_conversation(page)
+        await self.apply_mode(page)
         users = self.locators.user_turn.resolve(page)
         assistants = self.locators.assistant_turn.resolve(page)
         users_before = await users.count()
@@ -568,6 +772,7 @@ class _Turn:
         self.stage = "while waiting for the conversation identifier"
         await self.await_identifier(page)
         self.still_this_conversation(page)
+        await self.reread_mode(page)
         if cut:
             self.events.truncated()
             self.events.warn(
@@ -587,6 +792,118 @@ class _Turn:
                 "the answer ended in another remote conversation than this session's, so it "
                 "is not shown and the session keeps its own; the prompt was not resent"
             )
+
+    # -- the response mode (change response-mode, D2 to D4) -----------------------------------
+
+    def _other_controls(self) -> tuple[LocatorSpec, ...]:
+        loc = self.locators
+        return tuple(s for s in (loc.composer, loc.send, loc.stop, loc.new_conversation)
+                     if s is not None)
+
+    def _report_mode(self, mode: ResponseMode) -> None:
+        """A change seen after the prompt went out (D4): recorded at once."""
+        self.confirmed_mode = mode
+        self.on_mode(mode)
+
+    async def apply_mode(self, page: Page) -> None:
+        """Set the request's mode with the measured selector and read it back, before anything
+        is typed. `auto` without a measured automatic option leaves the page as it is, and
+        `auto` never fails because of the selector (D2); `quick` and `deep` fail here when the
+        page does not confirm them (D3). Either way the page must still show this session's
+        conversation with the same turns."""
+        mode = self.request.mode
+        control = self.plan.measurement.response_mode
+        if control is None or mode.value not in control.options:
+            if mode is ResponseMode.AUTO:
+                return
+            raise ModeNotConfirmed(  # check_mode refused this already; never reached in use
+                f"the response mode {mode} is not in the measurement; nothing was sent"
+            )
+        users = self.locators.user_turn.resolve(page)
+        last_before = await users.last.element_handle() if await users.count() else None
+        reference = self.plan.ref.identifier_in(page.url)
+        selector = _ModeSelector(page, control, self._other_controls())
+        unusable = await selector.unusable()
+        if unusable is not None:  # finding 4: nothing of this selector is clicked
+            if mode is ResponseMode.AUTO:
+                self.events.warn(f"the measured response-mode selector is not used ({unusable}); "
+                                 "the question goes with the mode the page is in. Measure the "
+                                 "selector again (copilot_probe.py response-mode)")
+                return
+            raise ModeNotConfirmed(
+                f"the response mode {mode} could not be confirmed on the page ({unusable}); "
+                "nothing was clicked or typed and nothing was sent. Measure the selector again "
+                "(copilot_probe.py response-mode)"
+            )
+        confirmed: ResponseMode | None = None
+        try:
+            confirmed = await selector.select(mode)
+            problem = None if confirmed is mode else f"the page shows {confirmed or 'no mode'}"
+        except _NotConfirmed as exc:
+            problem = str(exc)
+        except PlaywrightError as exc:
+            if page.is_closed() or is_target_gone(exc):
+                raise
+            problem = f"the page did not respond to the selector ({type(exc).__name__})"
+        # As `guard` does (finding 1): the address still names the conversation and no user
+        # turn came after the last one; a count would also change with a late history.
+        if self.plan.ref.identifier_in(page.url) != reference or \
+                await users.evaluate_all(NEW_TURN_SINCE_JS, last_before):
+            raise ProviderError(
+                "the page changed its conversation while the response mode was set, so nothing "
+                "was typed and nothing was sent; the session keeps its conversation. Ask again, "
+                "or measure the selector again (copilot_probe.py response-mode)"
+            )
+        try:
+            still_open = await selector.is_open()
+        except PlaywrightError as exc:
+            if page.is_closed() or is_target_gone(exc):
+                raise
+            still_open = True
+        if still_open:  # finding 2: nothing is typed under an open list, in any mode
+            raise ProviderError(
+                "the list of response modes stayed open after the mode was chosen, so nothing "
+                "was typed and nothing was sent. Close it in the Edge window and ask again"
+            )
+        await self.guard(page)
+        if problem is None:
+            self.confirmed_mode = mode  # recorded when the prompt goes out (`send`)
+            return
+        if mode is ResponseMode.AUTO:
+            self.events.warn(
+                f"the automatic response mode could not be confirmed on the page ({problem}); "
+                "the question goes with the mode the page is in"
+            )
+            self.confirmed_mode = confirmed
+            return
+        raise ModeNotConfirmed(
+            f"the response mode {mode} could not be confirmed on the page ({problem}); nothing "
+            "was typed and nothing was sent"
+        )
+
+    async def reread_mode(self, page: Page) -> None:
+        """After the answer: the mode the page is in now, if it changed by itself (D4). Read
+        only; nothing here changes the request's state."""
+        control = self.plan.measurement.response_mode
+        if self.confirmed_mode is None or control is None:
+            return
+        now: ResponseMode | None = None
+        selector = _ModeSelector(page, control, self._other_controls())
+        try:
+            async with asyncio.timeout(max(0.1, min(MODE_REREAD_S, self.remaining()))):
+                now = await selector.read()
+        except (PlaywrightError, TimeoutError, _NotConfirmed):
+            now = None
+        if not await selector.close():
+            self.events.warn("the list of response modes stayed open after it was read again; "
+                             "close it in the Edge window")
+        if now is None:
+            self.events.warn(
+                "the response mode could not be read again after the answer; the record keeps "
+                f"the mode confirmed before sending ({self.confirmed_mode})"
+            )
+        elif now is not self.confirmed_mode:
+            self._report_mode(now)
 
     # -- before sending ---------------------------------------------------------------------
 
@@ -726,6 +1043,8 @@ class _Turn:
         )
 
     async def send(self, composer: Locator) -> None:
+        if self.confirmed_mode is not None:
+            self.on_mode(self.confirmed_mode)  # the mode this attempt confirmed (finding 5)
         self.sent = True
         self.on_sent()  # just before the key press: a failure during it counts as sent
         await self.submit(composer)
