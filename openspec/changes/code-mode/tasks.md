@@ -442,6 +442,15 @@ Resultado: **17 de 17 muertos, 0 supervivientes**. Verificación independiente (
   - La tanda Edge no se ejecutó: A2 no toca `harness/providers/`, `harness/browser/` ni `tests/browser/`.
   - Windows: NOT RUN (los tests de A2 son posteriores a la última ejecución allí; nada de A2 depende de la plataforma).
 
+### Hallazgo de Windows en `develop` = `a9c51fe` (2026-11-27)
+
+- [x] 10.11 `tests/unit/test_shell_plan.py::test_the_plan_deadline_ends_a_step_in_course` fallaba en Windows, en la tanda y solo, con `mcp.calls() == []`.
+  - Medido allí por el coordinador: el temporizador del plazo del plan (1 s, fijado por el test) vencía a +1,01 s, y el servidor sintético arrancaba a +2,49 s y llamaba a +2,495 s. Con el temporizador 5 s más tarde, pasaba. Es el reloj del test, no un defecto: el plazo vencía antes de que hubiera paso en curso.
+  - Arreglo, solo en el test: el reloj del plazo es del test. Un `Timer` sustituto (solo en `plan_run`) dispara cuando el servidor ya ha recibido la llamada (su propio `calls.log`), no tras 1 s. Se sigue comprobando lo mismo: el ejecutor arma el plazo de 1 s, el plazo alcanzado a mitad del paso lo termina con su árbol de procesos (`mcp.server.stopped()`), el plan queda `timeout`/`deadline` en el paso 1 y el paso 2 no se llama.
+  - El hermano con la misma suposición: `::test_a_single_hung_step_ends_as_its_own_timeout` tenía `startup=1`, que en esa máquina vencería en el arranque y no en la llamada. Pasa a `startup=30`: lo que termina el paso sigue siendo su presupuesto de llamada de 1 s, y el plazo del plan (41 s con la gracia) sigue sin competir. Ningún otro test de plan o de bucle fija un plazo corto contra el arranque (`grep -n "startup=\|deadline_s\", lambda" tests/unit/test_shell_plan.py tests/unit/test_mcp_plan_run.py tests/unit/test_mcp_auto_read.py tests/unit/test_shell_agent.py`).
+  - Control negativo (macOS, 2026-11-27): con el sustituto disparando en el acto (la carrera de Windows reproducida), el test falla (`1 failed`); con la espera, pasa (`1 passed`).
+  - Para la máquina Windows (PowerShell, en la raíz del repo, sobre el HEAD de esta rama): `uv run pytest -q -p no:cacheprovider "tests/unit/test_shell_plan.py::test_the_plan_deadline_ends_a_step_in_course" "tests/unit/test_shell_plan.py::test_a_single_hung_step_ends_as_its_own_timeout"`, y cinco veces seguidas: `1..5 | ForEach-Object { uv run pytest -q -p no:cacheprovider tests/unit/test_shell_plan.py -k "deadline_ends or hung_step" }`. Estado en Windows: **NOT RUN**.
+
 ## 5. Tramo 3 · Sonda y medición con Copilot real (unos 12 envíos del presupuesto de 100)
 
 - [ ] 5.1 Sonda sin herramientas: un bloque `json` sintético de 80 líneas, comparado byte a byte. 1–2 envíos.
