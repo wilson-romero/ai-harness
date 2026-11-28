@@ -149,7 +149,9 @@ def run_workspace_command(args: argparse.Namespace,
         print(f"list: {_shown_path(listed.relative)}, {len(listed.rows)} entries"
               f"{', ' + marks if marks else ''}", file=sys.stderr)
         if listed.stopped:
-            print("warning: listing stopped at 500 entries", file=sys.stderr)
+            more = f"more than {listed.missing}" if listed.missing_capped else listed.missing
+            print(f"warning: listing stopped at 500 entries; {more} more not listed",
+                  file=sys.stderr)
         return EXIT_OK
     finally:
         conn.close()

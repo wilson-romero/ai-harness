@@ -2,7 +2,9 @@
 
 File text is foreign: every invisible, control or line-separator character is written as
 `<U+XXXX>` (the tab and ESC too, so an escape sequence or a bidirectional override is seen
-rather than obeyed), then the line is redacted and cut. The caller prints it after
+rather than obeyed), then the line is redacted, cut, and redacted again: a credential that only
+ends where the cut falls (`ghp_<36>_suffix` cut right after the 36) is one once cut (review of
+d0a65d8, finding 2), as `loop.results_block` cleans again after its own cut. The caller prints it after
 `RESULT_PREFIX`, as `mcp call` does, so no line of a file can pass for a line of the harness.
 """
 
@@ -26,11 +28,12 @@ def visible(text: str) -> str:
 def shown_line(text: str, max_chars: int, cut_marker: str) -> tuple[str, int]:
     """One line of foreign text, safe for a terminal, and the credentials masked in it."""
     redacted = redact(visible(text))
-    line = redacted.text
+    line, count = redacted.text, redacted.count
     if len(line) > max_chars:
-        line = line[:max_chars] + cut_marker
+        again = redact(line[:max_chars])
+        line, count = again.text + cut_marker, count + again.count
     assert terminal_safe(line) == line  # nothing left that a terminal would act on
-    return line, redacted.count
+    return line, count
 
 
 def prefixed(line: str) -> str:

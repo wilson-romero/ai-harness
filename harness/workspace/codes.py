@@ -12,6 +12,7 @@ OK = "ok"
 
 # The work folder itself (D1).
 ROOT_CODES = (
+    "device_path",
     "not_absolute",
     "root_not_found",
     "link",
@@ -22,6 +23,7 @@ ROOT_CODES = (
     "code_run_root",  # in the closed list; checked once code-run exists (design B1-3)
     "home",
     "filesystem_root",
+    "mount_point",
     "workspace_changed",
 )
 # The shape of a relative path, decided on the string alone (D2, phase 1).
@@ -53,9 +55,11 @@ WALK_CODES = (
 # What is never read even inside the folder (D3).
 RULE_CODES = ("denied_component", "denied_name", "credential_in_file", "binary", "too_large")
 READ_CODES = ("offset_out_of_range",)
+# A call of `/plan` or `/agent` cut before it answered (B2-9): never a refusal, only audited.
+CALL_CODES = ("timeout", "interrupted")
 
 CODES = tuple(dict.fromkeys((OK, *ROOT_CODES, *FORM_CODES, *WALK_CODES, *RULE_CODES,
-                              *READ_CODES)))
+                              *READ_CODES, *CALL_CODES)))
 # Refusals decided from the arguments alone, before the disk is touched: audited as a denied
 # call (`argument_invalid`), not as a failed one.
 STRING_CODES = frozenset(FORM_CODES) | {"denied_component", "denied_name"}

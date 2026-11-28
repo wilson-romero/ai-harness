@@ -21,9 +21,11 @@ from __future__ import annotations
 import hashlib
 import hmac
 import sqlite3
+import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from harness.mcp.audit import PlanLink
 from harness.mcp.config import BOUNDED_STRING_MAX_LENGTH, InternalServer, ToolEntry
@@ -40,6 +42,9 @@ from harness.workspace.tools import (
     list_folder,
     read_file,
 )
+
+if TYPE_CHECKING:
+    from harness.mcp.client import StopSignal
 
 # A relative path the model may name: components of ASCII letters, digits, `.`, `_` and `-`,
 # none `.` or `..` (each starts with an optional dot and then a letter, a digit or `_`), `/`
@@ -135,11 +140,13 @@ def run_tool(root: Root, tool: str, arguments: dict[str, Any]) -> Answer:
             rows.append(line)
             used += size
         tail = []
+        more = len(listed.rows) - len(rows) + listed.missing
+        more_shown = f"more than {more}" if listed.missing_capped else str(more)
         if cut:
             tail.append(f"[listing cut at {READ_MAX_OUTPUT_BYTES} bytes after {len(rows)} "
-                        "entries; list a subfolder]")
+                        f"entries; {more_shown} more not shown; list a subfolder]")
         elif listed.stopped:
-            tail.append("[listing stopped at 500 entries]")
+            tail.append(f"[listing stopped at 500 entries; {more_shown} more not listed]")
         return Answer(OK, "\n".join([head, *rows, *tail]), listed.redactions, relative)
     except WorkspaceRefused as refused:
         detail = f": {refused.detail}" if refused.detail else ""
@@ -159,34 +166,88 @@ class WorkspaceServer(InternalServer):
         return {"internal": SERVER, "folder": self.folder}
 
     def call(self, conn: sqlite3.Connection, key: bytes, tool: str, parsed: ParsedArguments,
-             plan: PlanLink | None):
+             plan: PlanLink | None, stop: StopSignal | None = None):
         from harness.mcp.client import Outcome
-        from harness.mcp.gateway import COMPLETED, FAILED, CallReport
+        from harness.mcp.gateway import COMPLETED, FAILED, TIMEOUT, CallReport
         from harness.mcp.policy import Decision
         from harness.mcp.render import Rendered
 
         started = time.monotonic()
+        finished = False
         try:
             if self.state.suspended:
                 raise WorkspaceRefused("workspace_changed", "the work folder is suspended since "
                                        "it was found replaced; choose it again with /workspace")
             # `locate` checks the root first (`check_root_unchanged`): a replaced folder gives
             # `workspace_changed`, which suspends it below.
-            answer = run_tool(self.state.root, tool, dict(parsed.value))
+            finished, answer = bounded(lambda: run_tool(self.state.root, tool,
+                                                        dict(parsed.value)),
+                                       self.call_timeout_s, stop)
         except WorkspaceRefused as refused:
-            answer = Answer(refused.code, f"refused: {refused.code}: {refused.detail}")
+            finished, answer = True, Answer(refused.code,
+                                            f"refused: {refused.code}: {refused.detail}")
+        duration = int((time.monotonic() - started) * 1000)
+        allowed = Decision(True, "allowed", operation="read")
+        relative = parsed.value.get("path") if isinstance(parsed.value, dict) else None
+        if not finished:
+            # Cut by its timeout or by the stop (Ctrl+C, the plan's deadline). The worker
+            # thread may still be blocked in the file system; it holds no lock and writes
+            # nothing, and what it reads later is dropped (design B2-9).
+            code = "interrupted" if stop is not None and stop.is_set() else "timeout"
+            call_id = record_call(conn, key, tool=tool, canonical_args=parsed.canonical,
+                                  code=code, relative=relative, result_bytes=None,
+                                  duration_ms=duration, plan=plan)
+            outcome = Outcome(phase="call", error_code=code, call_sent=True,
+                              interrupted=code == "interrupted", duration_ms=duration)
+            if code == "interrupted":
+                interrupt = KeyboardInterrupt()
+                interrupt.outcome = outcome  # type: ignore[attr-defined]
+                raise interrupt
+            return CallReport(TIMEOUT, allowed, outcome, "timeout", call_id=call_id)
         if answer.code == "workspace_changed":
             self.state.suspended = True
         data = answer.text.encode("utf-8")
-        duration = int((time.monotonic() - started) * 1000)
         call_id = record_call(
             conn, key, tool=tool, canonical_args=parsed.canonical, code=answer.code,
             relative=answer.relative, result_bytes=len(data) if answer.code == OK else None,
-            duration_ms=duration, root_refused=answer.code == "workspace_changed", plan=plan)
+            duration_ms=duration, plan=plan)
         outcome = Outcome(phase="done", call_bytes=len(data), duration_ms=duration,
                           call_sent=True)
-        allowed = Decision(True, "allowed", operation="read")
         rendered = Rendered(answer.text, answer.redactions)
         if answer.code == OK:
             return CallReport(COMPLETED, allowed, outcome, None, rendered, call_id)
         return CallReport(FAILED, allowed, outcome, "tool_error", rendered, call_id)
+
+
+def bounded(work: Callable[[], Answer], timeout_s: float,
+            stop: StopSignal | None) -> tuple[bool, Answer | None]:
+    """Run `work` in a worker thread and wait for it at most `timeout_s`, or until `stop` is
+    set: `(True, answer)` if it finished, `(False, None)` if it was cut. A read or a listing on
+    a network mount that stops answering blocks inside the operating system, where no thread
+    can be cancelled: the wait is what is bounded, not the system call (design B2-9)."""
+    done = threading.Event()
+    box: list[Answer | BaseException] = []
+
+    def run() -> None:
+        try:
+            box.append(work())
+        except BaseException as error:  # noqa: BLE001 - handed back to the caller's thread
+            box.append(error)
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=run, name="workspace-call", daemon=True)
+    if stop is not None:
+        stop.bind(done.set)
+    try:
+        if stop is None or not stop.is_set():
+            worker.start()
+            done.wait(timeout_s)
+    finally:
+        if stop is not None:
+            stop.unbind()
+    if not box:
+        return False, None
+    if isinstance(box[0], BaseException):
+        raise box[0]
+    return True, box[0]

@@ -24,6 +24,8 @@ LINE_CUT = " … [line cut at 500 characters]"
 LIST_DEFAULT_DEPTH = 1
 LIST_MAX_DEPTH = 3
 LIST_MAX_ENTRIES = 500
+# Past LIST_MAX_ENTRIES the walk goes on only to count what was left out (D4), up to this many.
+LIST_COUNT_MAX = 5000
 
 
 @dataclass(frozen=True)
@@ -106,6 +108,8 @@ class ListResult:
     stopped: bool  # LIST_MAX_ENTRIES reached
     redactions: int = 0
     marks: dict[str, int] = field(default_factory=dict)
+    missing: int = 0  # entries left out past LIST_MAX_ENTRIES (at most LIST_COUNT_MAX)
+    missing_capped: bool = False  # there were more than LIST_COUNT_MAX of them
 
 
 def list_folder(root: Root, relative: str | None = None,
@@ -123,28 +127,37 @@ def list_folder(root: Root, relative: str | None = None,
     marks: dict[str, int] = {}
     redactions = 0
     stopped = False
+    missing = 0
     pending = [(located.path, parts, 1)]
-    while pending and not stopped:
+    while pending and missing < LIST_COUNT_MAX:
         folder, prefix, level = pending.pop(0)
         try:
             names = sorted(os.listdir(folder))
         except OSError:
-            rows.append(_row(prefix[:-1], prefix[-1] if prefix else ".", "[unreadable]")[0])
+            if not stopped:
+                rows.append(_row(prefix[:-1], prefix[-1] if prefix else ".", "[unreadable]")[0])
             continue
         for name in names:
             if len(rows) >= LIST_MAX_ENTRIES:
                 stopped = True
-                break
-            mark, descend = _classify(folder / name, (*prefix, name))
-            row, masked = _row(prefix, name, mark, folder=descend)
-            rows.append(row)
-            redactions += masked
-            if mark:
-                key = mark.split(":")[0].strip("[] ")
-                marks[key] = marks.get(key, 0) + 1
+            if stopped:  # only counted from here on, never shown
+                if missing >= LIST_COUNT_MAX:
+                    break
+                missing += 1
+                mark, descend = _classify(folder / name, (*prefix, name))
+            else:
+                mark, descend = _classify(folder / name, (*prefix, name))
+                row, masked = _row(prefix, name, mark, folder=descend)
+                rows.append(row)
+                redactions += masked
+                if mark:
+                    key = mark.split(":")[0].strip("[] ")
+                    marks[key] = marks.get(key, 0) + 1
             if descend and level < depth:
                 pending.append((folder / name, (*prefix, name), level + 1))
-    return ListResult("/".join(parts) or ".", tuple(rows), stopped, redactions, marks)
+    capped = missing >= LIST_COUNT_MAX and bool(pending or stopped)
+    return ListResult("/".join(parts) or ".", tuple(rows), stopped, redactions, marks,
+                      missing, capped)
 
 
 def _classify(path, parts: tuple[str, ...]) -> tuple[str, bool]:

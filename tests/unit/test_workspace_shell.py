@@ -479,3 +479,197 @@ def test_the_conversation_s_own_vault_is_protected_without_the_variable(conn, da
     conversation, _, _ = make_conversation(conn, data_dir, terminal, Recording({}), vault=vault)
     asyncio.run(conversation.run())
     assert "/workspace refused: vault" in terminal.text and conversation._workspace is None
+
+
+# -- independent review of d0a65d8: findings 5 and 6 --------------------------------------------
+
+
+def _server_and_args(folder, data_dir, args='{"path": "src/app.py"}'):
+    from harness.mcp.audit import args_key
+    from harness.mcp.policy import parse_arguments
+    from harness.workspace.root import check_root
+    from harness.workspace.server import Folder, WorkspaceServer
+    root = check_root(str(folder.root), data_dir=data_dir, environ={})
+    key = args_key(data_dir)
+    return WorkspaceServer(Folder(root), key), key, parse_arguments(args)
+
+
+def _hanging(monkeypatch):
+    """`run_tool` as on a network mount that stopped answering: it blocks until released."""
+    import threading
+
+    from harness.workspace import server as server_module
+    release = threading.Event()
+    real = server_module.run_tool
+
+    def hang(root, tool, arguments):
+        release.wait(30)
+        return real(root, tool, arguments)
+
+    monkeypatch.setattr(server_module, "run_tool", hang)
+    return release
+
+
+def _last_call(conn) -> tuple:
+    return rows(conn, "SELECT c.decision, c.reason, c.status, c.error_code, e.code "
+                      "FROM tool_calls c JOIN workspace_events e USING (call_id) "
+                      "ORDER BY c.rowid DESC LIMIT 1")[0]
+
+
+def test_a_read_that_does_not_answer_ends_at_its_call_timeout(conn, data_dir, folder,
+                                                               monkeypatch):
+    import time
+
+    from harness.mcp.gateway import TIMEOUT
+    release = _hanging(monkeypatch)
+    server, key, parsed = _server_and_args(folder, data_dir)
+    server.call_timeout_s = 0.3
+    started = time.monotonic()
+    try:
+        report = server.call(conn, key, "read", parsed, None)
+    finally:
+        release.set()
+    assert time.monotonic() - started < 5
+    assert report.status == TIMEOUT and report.error_code == "timeout"
+    assert "def greet" not in (report.rendered.text if report.rendered else "")
+    assert _last_call(conn) == ("allowed", "allowed", "timeout", "timeout", "timeout")
+
+
+def test_a_stop_cuts_a_read_that_does_not_answer(conn, data_dir, folder, monkeypatch):
+    import threading
+    import time
+
+    from harness.mcp.client import StopSignal
+    release = _hanging(monkeypatch)
+    server, key, parsed = _server_and_args(folder, data_dir)
+    stop = StopSignal()
+    threading.Timer(0.2, stop.set).start()  # Ctrl+C, from the conversation's thread
+    started = time.monotonic()
+    try:
+        with pytest.raises(KeyboardInterrupt) as caught:
+            server.call(conn, key, "read", parsed, None, stop=stop)
+    finally:
+        release.set()
+    assert time.monotonic() - started < 5
+    assert getattr(caught.value, "outcome", None) is not None
+    assert _last_call(conn) == ("allowed", "allowed", "failed", "interrupted", "interrupted")
+
+
+def test_the_gateway_hands_its_stop_to_the_work_folder(conn, data_dir, folder, monkeypatch):
+    from harness.mcp.audit import args_key
+    from harness.mcp.client import StopSignal
+    from harness.mcp.gateway import call_tool
+    from harness.mcp.policy import parse_arguments
+    view = _view(folder, data_dir)
+    stop = StopSignal()
+    stop.set()  # already stopped: nothing is read
+    with pytest.raises(KeyboardInterrupt):
+        call_tool(conn, data_dir, view, "workspace", "read",
+                  parse_arguments('{"path": "src/app.py"}'), args_key(data_dir),
+                  lambda: None, {}, stop=stop)
+    assert _last_call(conn)[3:] == ("interrupted", "interrupted")
+
+
+def test_a_replaced_folder_is_audited_as_what_the_plan_saw(conn, data_dir, folder):
+    # The policy allowed the call; the server found the folder replaced: a failed call with
+    # `tool_error`, as the plan reports it, not a call the policy denied.
+    server, key, parsed = _server_and_args(folder, data_dir)
+    aside = folder.root.parent / "aside"
+    folder.root.rename(aside)
+    folder.root.mkdir()
+    report = server.call(conn, key, "read", parsed, None)
+    assert report.error_code == "tool_error"
+    assert _last_call(conn) == ("allowed", "allowed", "failed", "tool_error",
+                                "workspace_changed")
+
+
+# -- independent review of d0a65d8: finding 4, the consent box expires and Ctrl+C grants nothing
+
+
+def _consent_run(conn, data_dir, folder, terminal, clock=None):
+    provider = Recording({turn(1): plan_reply(READ_APP), turn(2): FINAL}, synthetic=False)
+    conversation, _, _ = make_conversation(conn, data_dir, terminal, provider, environ=ON,
+                                           mcp_config=lambda: NO_LIST, clock=clock)
+    asyncio.run(conversation.run())
+    return terminal.text, provider
+
+
+def test_a_consent_answered_after_it_expired_grants_nothing(conn, data_dir, folder):
+    from datetime import UTC, datetime, timedelta
+    times = [datetime(2026, 11, 28, 12, 0, tzinfo=UTC)]
+
+    class Late(ScriptedTerminal):
+        def ask(self, question):
+            times.append(times[-1] + timedelta(seconds=901))  # the person answers late
+            return super().ask(question)
+
+    terminal = Late([f"/workspace {folder.root}", "/workspace send on", f"/agent {QUESTION}"],
+                    [CODE])
+    text, provider = _consent_run(conn, data_dir, folder, terminal, clock=lambda: times[-1])
+    assert "send: stays off (expired)" in text and "expires:" in text
+    assert rows(conn, "SELECT COUNT(*) FROM workspace_consents") == [(0,)]
+    assert rows(conn, "SELECT outcome FROM audit_events WHERE event_type = "
+                      "'workspace.send_consent'") == [("expired",)]
+    assert len(provider.prompts) == 1  # nothing of the folder was sent
+
+
+def test_a_code_typed_after_ctrl_c_at_the_consent_box_grants_nothing(conn, data_dir, folder):
+    class Interrupted(ScriptedTerminal):
+        def ask(self, question):
+            asyncio.current_task().cancel()  # what asyncio.run's handler does on SIGINT
+            return super().ask(question)
+
+    terminal = Interrupted([f"/workspace {folder.root}", "/workspace send on",
+                            f"/agent {QUESTION}"], [CODE])
+    text, provider = _consent_run(conn, data_dir, folder, terminal)
+    assert "send: stays off (undecided)" in text
+    assert rows(conn, "SELECT COUNT(*) FROM workspace_consents") == [(0,)]
+    assert len(provider.prompts) == 1
+
+
+def test_a_listing_says_how_many_entries_it_did_not_show(tmp_path, data_dir):
+    from harness.workspace.root import check_root
+    from harness.workspace.server import run_tool
+    base = tmp_path / "many"
+    base.mkdir()
+    for n in range(300):
+        (base / f"{n:03d}-{'x' * 100}.txt").write_text("x\n", encoding="utf-8")
+    root = check_root(str(base), data_dir=data_dir, environ={})
+    text = run_tool(root, "list", {}).text
+    shown = sum(1 for line in text.split("\n") if line.startswith("| "))
+    assert f"after {shown} entries; {300 - shown} more not shown; list a subfolder]" in text
+    for n in range(300, 520):
+        (base / f"{n:03d}.txt").write_text("x\n", encoding="utf-8")
+    text = run_tool(root, "list", {}).text
+    shown = sum(1 for line in text.split("\n") if line.startswith("| "))
+    assert f"after {shown} entries; {520 - shown} more not shown; list a subfolder]" in text
+
+
+def test_what_one_loop_sends_of_the_folder_is_bounded(conn, data_dir, tmp_path):
+    # Review of d0a65d8, finding 6: the total per loop, measured. Each turn reads three files
+    # of 16 KiB; at most 12 KiB of results go in each send that carries them (the turns 2 to
+    # 5 and the closing one: 5 of the 6 sends of a loop of 5 turns).
+    from harness.mcp.loop import DEFAULT_MAX_TURNS, RESULTS_SEND_MAX_BYTES
+    base = tmp_path / "wide"
+    base.mkdir()
+    for name in ("a", "b", "c"):
+        (base / f"{name}.txt").write_text(
+            "".join(f"SYN-{name}-{n:04d} " + "z" * 30 + "\n" for n in range(400)),
+            encoding="utf-8")
+    reads = [{"id": n, "server": "workspace", "tool": "read",
+              "args": {"path": f"{n}.txt", "limit": 400}} for n in ("a", "b", "c")]
+    responses = {turn(k): plan_reply(*reads) for k in range(1, DEFAULT_MAX_TURNS + 1)}
+    responses["(turno de cierre, tras"] = FINAL
+    provider = Recording(responses)
+    _run(conn, data_dir, provider, [f"/workspace {base}", f"/agent {QUESTION}"],
+         environ=ON)
+    # The bytes of the results as the loop bounds them: each line without the loop's own
+    # `| ` (the file's lines still carry the work folder's `| ` and their number).
+    sent = [sum(len(line.removeprefix("| ").encode("utf-8")) + 1
+                for line in prompt.split("\n") if "SYN-" in line)
+            for prompt in provider.prompts]
+    assert len(provider.prompts) == DEFAULT_MAX_TURNS + 1 and sent[0] == 0
+    assert all(0 < size <= RESULTS_SEND_MAX_BYTES for size in sent[1:])
+    total = sum(sent)
+    assert 4 * RESULTS_SEND_MAX_BYTES < total <= DEFAULT_MAX_TURNS * RESULTS_SEND_MAX_BYTES
+    print(f"measured: {total} bytes of file lines in {len(sent) - 1} sends")

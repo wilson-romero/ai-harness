@@ -11,15 +11,15 @@
 CREATE TABLE workspace_events (
     call_id     TEXT PRIMARY KEY REFERENCES tool_calls (call_id),
     code        TEXT NOT NULL CHECK (code IN
-                ('ok', 'not_absolute', 'root_not_found', 'link', 'not_a_directory',
+                ('ok', 'device_path', 'not_absolute', 'root_not_found', 'link', 'not_a_directory',
                  'harness_repo', 'data_dir', 'vault', 'code_run_root', 'home',
-                 'filesystem_root', 'workspace_changed', 'empty_path', 'path_too_long',
+                 'filesystem_root', 'mount_point', 'workspace_changed', 'empty_path', 'path_too_long',
                  'absolute', 'backslash', 'colon', 'forbidden_character',
                  'invisible_character', 'not_nfc', 'empty_component', 'dot_component',
                  'component_too_long', 'trailing_dot_or_space', 'reserved_name', 'not_found',
                  'name_not_exact', 'not_regular', 'hard_link', 'changed', 'outside_root',
                  'unreadable', 'denied_component', 'denied_name', 'credential_in_file',
-                 'binary', 'too_large', 'offset_out_of_range')),
+                 'binary', 'too_large', 'offset_out_of_range', 'timeout', 'interrupted')),
     path_hmac   TEXT CHECK (path_hmac IS NULL OR length(path_hmac) = 64),
     created_at  TEXT NOT NULL
 );

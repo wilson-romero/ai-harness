@@ -14,7 +14,7 @@ import sqlite3
 
 from harness.mcp.audit import PlanLink, new_call_id
 from harness.storage.database import transaction, utc_now
-from harness.workspace.codes import CODES, OK, STRING_CODES
+from harness.workspace.codes import CALL_CODES, CODES, OK, STRING_CODES
 
 SERVER = "workspace"
 PATH_DOMAIN = b"ai-harness/workspace-path/v1\n"
@@ -49,8 +49,11 @@ def record_call(
     args_hmac = _hmac(key, canonical_args) if canonical_args else None
     if code == OK:
         decision, reason, status, error = "allowed", "allowed", "completed", None
-    elif root_refused or code == "workspace_changed":
+    elif root_refused:  # the CLI's `--root` refused before any call (B1-5)
         decision, reason, status, error = "denied", "server_not_allowed", "denied", None
+    elif code in CALL_CODES:  # cut by its timeout or by the stop (B2-9)
+        decision, reason = "allowed", "allowed"
+        status, error = ("timeout", "timeout") if code == "timeout" else ("failed", "interrupted")
     elif code in STRING_CODES:
         decision, reason, status, error = "denied", "argument_invalid", "denied", None
     else:

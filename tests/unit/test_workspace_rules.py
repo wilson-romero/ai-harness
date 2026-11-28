@@ -92,3 +92,30 @@ def test_a_nul_inside_the_sniff_window_is_binary_even_in_valid_utf8():
     with pytest.raises(WorkspaceRefused) as caught:
         decode_checked(b"plain text\x00more text\n")
     assert caught.value.code == "binary"
+
+
+# Review of d0a65d8, finding 3: names that hold credentials by convention, read until then.
+REVIEW_DENIED = ["prod.env", "config/staging.env", ".env-local", ".env_local", "kubeconfig",
+                 "ops/prod.kubeconfig", "terraform.tfstate", "infra/terraform.tfstate.backup",
+                 "prod.tfvars", "prod.auto.tfvars.json", ".pgpass", ".htpasswd",
+                 ".vault-token", ".dockercfg", ".my.cnf", "secrets.toml",
+                 "id_ecdsa_sk", "keys/client.key"]
+
+
+@pytest.mark.parametrize("relative", REVIEW_DENIED)
+def test_the_review_s_credential_names_are_refused(relative: str):
+    assert name_refusal(tuple(relative.split("/"))) == "denied_name"
+
+
+@pytest.mark.parametrize("relative", ["environment.py", "src/env/settings.py", "envoy.yaml",
+                                      "terraform.tf", "variables.tf", "kube/notes.md",
+                                      "tfstate.md", "docs/dotenv.md", ".env.example"])
+def test_the_review_s_look_alikes_are_still_read(relative: str):
+    assert name_refusal(tuple(relative.split("/"))) is None
+
+
+def test_a_file_with_credentials_in_a_url_is_not_read():
+    url = "postgres" + "://" + "admin:" + "S3cret" + "Pass" + "@" + "db.example.com:5432/app"
+    with pytest.raises(WorkspaceRefused) as caught:
+        decode_checked(f"DATABASE_URL = '{url}'\n".encode())
+    assert caught.value.code == "credential_in_file"

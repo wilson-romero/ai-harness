@@ -167,3 +167,118 @@ def test_the_name_rule_ignores_case(tmp_path: Path, monkeypatch):
     folder.mkdir()
     env = {"HARNESS_VAULT_ROOT": str(tmp_path / "PROJECTS" / "vault")}
     assert _refused(folder, data_dir=tmp_path / "data", environ=env) == "vault"
+
+
+# -- independent review of d0a65d8, finding 1: a second path to the same folders ----------------
+
+
+def _mirror(monkeypatch, tmp_path: Path, volume: Path) -> None:
+    """As APFS firmlinks (`/System/Volumes/Data/Users` is `/Users`) or a bind mount: under
+    `volume`, `real/...` is the very directory `tmp_path/real/...` (same st_dev, st_ino) under
+    another name; `volume` itself has an identity of its own, as the Data volume's root does."""
+    real_identity = root_module._identity
+
+    def identity(path):
+        try:
+            inside = Path(path).relative_to(volume)
+        except ValueError:
+            return real_identity(path)
+        if inside.parts[:1] == ("real",):
+            return real_identity(tmp_path / inside)
+        return real_identity(path)
+
+    monkeypatch.setattr(root_module, "_identity", identity)
+
+
+@pytest.mark.parametrize("level", [0, 1, 2], ids=["the-volume", "its-parent", "its-grandparent"])
+def test_a_folder_that_reaches_a_protected_folder_by_a_second_path_is_refused(
+        tmp_path: Path, monkeypatch, level: int):
+    data = tmp_path / "real" / "outer" / "data"
+    data.mkdir(parents=True)
+    volume = tmp_path / "system" / "volumes" / "data-volume"
+    (volume / "real" / "outer" / "data").mkdir(parents=True)  # the second path, as a directory
+    _mirror(monkeypatch, tmp_path, volume)
+    candidate = [volume, volume.parent, volume.parent.parent][level]
+    assert refused(str(candidate), data) == "data_dir"
+
+
+def test_a_folder_beside_the_second_path_is_still_accepted(tmp_path: Path, monkeypatch):
+    data = tmp_path / "real" / "outer" / "data"
+    data.mkdir(parents=True)
+    volume = tmp_path / "system" / "volumes" / "data-volume"
+    (volume / "real" / "outer" / "data").mkdir(parents=True)
+    (volume / "projects" / "work").mkdir(parents=True)
+    _mirror(monkeypatch, tmp_path, volume)
+    check_root(str(volume / "projects" / "work"), data_dir=data, environ={})
+
+
+def test_a_folder_containing_the_home_folder_is_refused(tmp_path: Path, monkeypatch):
+    home = tmp_path / "users" / "person"
+    home.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    assert refused(str(tmp_path / "users"), tmp_path / "data") == "home"
+    # Two layers: the containment rule alone, without the search for a second path.
+    monkeypatch.setattr(root_module, "_second_path", lambda candidate, protected: None)
+    assert refused(str(tmp_path / "users"), tmp_path / "data") == "home"
+
+
+def test_a_mount_point_is_refused(tmp_path: Path, monkeypatch):
+    # A volume mounted on a folder: its st_dev differs from its parent's. Simulated, so that
+    # the test does not depend on the machine's mounts.
+    folder = tmp_path / "mounted"
+    folder.mkdir()
+    real_identity = root_module._identity
+
+    def identity(path):
+        found = real_identity(path)
+        if found is not None and Path(path) == folder.resolve():
+            return (found[0] + 1, found[1])
+        return found
+
+    monkeypatch.setattr(root_module, "_identity", identity)
+    assert refused(str(folder), tmp_path / "data") == "mount_point"
+
+
+@pytest.mark.parametrize("raw", [
+    "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume3\\Users",
+    "\\\\localhost\\C$\\Users",
+    "\\\\server\\share\\work",
+    "//server/share/work",
+    "/\\server\\share",
+    "\\\\.\\C:\\work",
+])
+def test_a_network_or_device_path_is_refused_on_every_platform(tmp_path: Path, raw: str):
+    assert refused(raw, tmp_path / "data") == "device_path"
+
+
+def test_a_resolved_network_path_is_refused(tmp_path: Path, monkeypatch):
+    # As a mapped network drive on Windows, which `resolve` may give back as UNC.
+    folder = tmp_path / "mapped"
+    folder.mkdir()
+    real_resolve = Path.resolve
+    monkeypatch.setattr(Path, "resolve", lambda self, strict=False: (
+        Path("//server/share/mapped") if self == folder else real_resolve(self, strict=strict)))
+    assert refused(str(folder), tmp_path / "data") == "device_path"
+
+
+_DATA_VOLUME = Path("/System/Volumes/Data")
+
+
+def _data_volume_mirrors(path: Path) -> bool:
+    try:
+        twin = _DATA_VOLUME / path.relative_to(path.anchor)
+        a, b = os.stat(twin), os.stat(path)
+    except (OSError, ValueError):
+        return False
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
+@pytest.mark.parametrize("raw", ["/System/Volumes/Data", "/System/Volumes", "/System"])
+def test_the_real_data_volume_is_refused_where_the_machine_has_one(tmp_path: Path, raw: str):
+    # Skipped by capability: only where the machine really shows the repository a second time
+    # under /System/Volumes/Data (macOS with APFS firmlinks).
+    data = tmp_path / "data"
+    data.mkdir()
+    if not _data_volume_mirrors(HARNESS_REPO) and not _data_volume_mirrors(data):
+        pytest.skip("no second path to the repository or the data dir on this machine")
+    assert refused(raw, data) in ("harness_repo", "data_dir", "home")

@@ -38,7 +38,10 @@ def test_each_outcome_leaves_its_rows(tmp_path: Path):
         ("link", False, ("allowed", "allowed", "failed", "tool_error")),
         ("credential_in_file", False, ("allowed", "allowed", "failed", "tool_error")),
         ("harness_repo", True, ("denied", "server_not_allowed", "denied", None)),
-        ("workspace_changed", False, ("denied", "server_not_allowed", "denied", None)),
+        # Found by a call the policy allowed (review of d0a65d8, finding 6): what the plan sees.
+        ("workspace_changed", False, ("allowed", "allowed", "failed", "tool_error")),
+        ("timeout", False, ("allowed", "allowed", "timeout", "timeout")),
+        ("interrupted", False, ("allowed", "allowed", "failed", "interrupted")),
     ]
     for code, root_refused, expected in cases:
         call_id = record_call(conn, key, tool="read", canonical_args=b'{"path":"a/b.txt"}',

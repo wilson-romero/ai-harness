@@ -24,7 +24,7 @@ import sqlite3
 import stat
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -57,6 +57,7 @@ from harness.mcp.plan_flow import (
     auto_read_setting,
     box_option,
     run_plan,
+    withdraw_pending_interrupt,
 )
 from harness.mcp.plan_prompt import PlanUnavailable, build_catalogue, shown_instructions
 from harness.memory.config import MemorySettings, ensure_data_dir_outside_vault
@@ -1159,11 +1160,20 @@ class Conversation:
                       "this folder return")
             return
         proposal = workspace.consent_proposal(root, key, provider.name, self._session_id)
+        # The box expires and Ctrl+C grants nothing, as the loop's own box (`loop_flow.
+        # _Loop._consent`; review of d0a65d8, finding 4). What is granted then has no expiry:
+        # it lasts until `/workspace send off` (an owner decision, tasks.md 3b.8).
+        clock = self._deps.clock or (lambda: datetime.now(UTC))
+        ttl_s = self._deps.skills().approval_ttl_s
+        asked = clock()
+        expires = (asked + timedelta(seconds=ttl_s)).astimezone(UTC).isoformat()
         header = [
             "Send consent requested",
             f"  folder:   {self._workspace_shown()} (shown here only, never sent or stored)",
             f"  to:       {name}, a provider outside this machine",
             f"  hash:     {proposal.sha256}",
+            f"  expires:  {expires} (UTC; the answer, not the consent, which lasts until "
+            "/workspace send off)",
         ]
         shown = self._plan_approval(header, proposal.content.split("\n"))
         if self._terminal.is_interactive():
@@ -1171,7 +1181,11 @@ class Conversation:
                              button_question=workspace.CONSENT_BUTTON_QUESTION)
         else:
             verdict = Verdict("undecided")
+        if withdraw_pending_interrupt():
+            verdict = Verdict("undecided")  # whatever was typed after the Ctrl+C grants nothing
         state = verdict.decision
+        if state == "granted" and clock() > asked + timedelta(seconds=ttl_s):
+            state = "expired"  # answered after the box expired: it grants nothing
         workspace.record_consent(self._deps.conn, key, root, provider.name, state=state,
                                  session_id=self._session_id, approval_hash=proposal.sha256,
                                  means=verdict.means)

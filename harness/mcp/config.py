@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     import sqlite3
 
     from harness.mcp.audit import PlanLink
+    from harness.mcp.client import StopSignal
     from harness.mcp.gateway import CallReport
     from harness.mcp.policy import ParsedArguments
 
@@ -223,9 +224,11 @@ class InternalServer:
         return self.bound()  # the shape `entry_sha256` reads from a `ServerEntry`
 
     def call(self, conn: sqlite3.Connection, key: bytes, tool: str, parsed: ParsedArguments,
-             plan: PlanLink | None) -> CallReport:
-        """Run one call the policy allowed and audit it; never raises for what the tool
-        finds (a refusal is a failed call with the harness's reason)."""
+             plan: PlanLink | None, stop: StopSignal | None = None) -> CallReport:
+        """Run one call the policy allowed and audit it, bounded by `call_timeout_s` and cut
+        by `stop` (Ctrl+C, the plan's deadline: KeyboardInterrupt with `.outcome`, as
+        `run_session`); never raises for what the tool finds (a refusal is a failed call
+        with the harness's reason)."""
         raise NotImplementedError
 
 

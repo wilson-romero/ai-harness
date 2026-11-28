@@ -2,6 +2,11 @@
 
 Closed lists in code, compared after `casefold()`: no file of the folder and no setting can
 widen or narrow them. The name rules are pure; the content rules look at bytes already read.
+
+The names are conventions, not a guarantee: a credential in a file with any other name is
+read, unless its content has one of the forms `redaction` knows (then `credential_in_file`).
+Widened after the review of d0a65d8 (finding 3): `*.env`, `.env-*`/`.env_*`, `kubeconfig`,
+Terraform state and variables, and the usual client files of databases and registries.
 """
 
 from __future__ import annotations
@@ -25,11 +30,15 @@ DENIED_NAMES = frozenset(
     {
         ".env", ".envrc", ".netrc", "_netrc", ".npmrc", ".pypirc", ".git-credentials",
         "credentials", "credentials.json", "secrets.json", "secrets.yaml", "secrets.yml",
+        "secrets.toml", "kubeconfig", ".pgpass", ".my.cnf", ".htpasswd", ".vault-token",
+        ".dockercfg",
     }
 )
 ENV_EXAMPLES = frozenset({".env.example", ".env.sample", ".env.template"})
-DENIED_PREFIXES = ("id_rsa", "id_dsa", "id_ecdsa", "id_ed25519")
-DENIED_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".kdbx", ".ovpn")
+DENIED_PREFIXES = ("id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", ".env.", ".env-", ".env_")
+DENIED_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".kdbx", ".ovpn",
+                   ".env", ".kubeconfig", ".tfstate", ".tfstate.backup", ".tfvars",
+                   ".tfvars.json")
 
 
 def name_refusal(parts: tuple[str, ...]) -> str | None:
@@ -44,7 +53,6 @@ def name_refusal(parts: tuple[str, ...]) -> str | None:
         return None
     if (
         name in DENIED_NAMES
-        or name.startswith(".env.")
         or name.startswith(DENIED_PREFIXES)
         or name.endswith(DENIED_SUFFIXES)
     ):

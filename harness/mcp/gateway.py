@@ -91,7 +91,7 @@ def call_tool(
     if isinstance(entry, InternalServer):
         # The harness's own server (workspace-tools D7): the same policy above and the same
         # `tool_calls` table, but no process; it records its own finished row.
-        return entry.call(conn, key, tool, parsed, plan)
+        return entry.call(conn, key, tool, parsed, plan, stop=stop)
     declared = entry.tools[tool]
     call_id = new_call_id()
     lock = call_lock(data_dir, call_id)

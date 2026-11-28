@@ -158,3 +158,40 @@ def test_list_of_a_denied_folder_is_refused(root):
     with pytest.raises(WorkspaceRefused) as caught:
         list_folder(root, ".git")
     assert caught.value.code == "denied_component"
+
+
+def test_a_credential_that_the_cut_makes_recognisable_is_masked():
+    # Review of d0a65d8, finding 2: whole, `ghp_<36>_suffix` is no GitHub token (the `_` goes
+    # on); cut at 500 characters it ends right after the 36 and is one. It must not be shown.
+    token = "gh" + "p_" + "A1b2C3d4E5" * 3 + "F6g7H8"
+    text = "x" * 459 + " " + token + "_suffix"
+    assert len("x" * 459 + " " + token) == LINE_MAX_CHARS
+    line, masked = shown_line(text, LINE_MAX_CHARS, " … [line cut at 500 characters]")
+    assert token not in line and masked == 1
+    assert "[REDACTED:github]" in line and line.endswith("[line cut at 500 characters]")
+
+
+def test_list_says_how_many_entries_it_left_out(root):
+    # Review of d0a65d8, finding 6 (D4): past the cap, the count of what was not listed.
+    many = root.path / "many"
+    (many / "sub").mkdir(parents=True)
+    for n in range(505):
+        (many / f"f{n:04}.txt").write_text("", encoding="utf-8")
+    for n in range(7):
+        (many / "sub" / f"g{n}.txt").write_text("", encoding="utf-8")
+    result = list_folder(root, "many")
+    assert result.stopped and result.missing == 6  # 506 names, 500 listed; depth 1
+    deeper = list_folder(root, "many", depth=2)
+    assert deeper.stopped and deeper.missing == 6 + 7
+
+
+def test_the_count_of_what_was_left_out_is_bounded(root, monkeypatch):
+    from harness.workspace import tools as tools_module
+    monkeypatch.setattr(tools_module, "LIST_MAX_ENTRIES", 3)
+    monkeypatch.setattr(tools_module, "LIST_COUNT_MAX", 10)
+    many = root.path / "many"
+    many.mkdir()
+    for n in range(40):
+        (many / f"f{n:04}.txt").write_text("", encoding="utf-8")
+    result = list_folder(root, "many")
+    assert len(result.rows) == 3 and result.missing == 10 and result.missing_capped
