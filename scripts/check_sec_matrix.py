@@ -34,7 +34,8 @@ What it does NOT check (written limits):
 - a skip decided at run time by code outside the test module and `tests/*.py`, or a mark
   attached through `pytest.param(..., marks=...)`.
 
-Standard library only. Text is read as UTF-8 with universal newlines, so a checkout with CRLF
+Standard library, plus the harness's bounded child process for the collection
+(`harness.mcp.client.run_bounded`). Text is read as UTF-8 with universal newlines, so a checkout with CRLF
 line endings gives the same result.
 """
 
@@ -44,13 +45,14 @@ import argparse
 import ast
 import json
 import re
-import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+from harness.mcp.client import run_bounded  # noqa: E402 - the same kill scope as MCP sessions
+
 MATRIX = Path("docs") / "security" / "sec-matrix.md"
 STATES_PIN = Path("docs") / "security" / "sec-states.json"
 # Documents whose pytest node ids must be collected (besides the matrix).
@@ -73,6 +75,9 @@ LIST_FIELDS = ("Requisitos", "Tests")
 REASON_FIELD = "Motivo"
 NONE_MARK = "—"
 COLLECT_TIMEOUT_S = 120
+# How the collection is run: `sys.executable` followed by these (a test replaces them with a
+# stand-in whose child outlives it).
+COLLECT_ARGS = ["-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider"]
 
 SEC_HEADING = re.compile(r"^## (SEC-\d+)\b(.*)$")
 ANY_H2 = re.compile(r"^#{1,2} ")
@@ -395,27 +400,25 @@ def check_links(doc: Path, label: str) -> list[str]:
 def collect_ids(root: Path, timeout_s: float = COLLECT_TIMEOUT_S) -> set[str]:
     """The node ids `pytest --collect-only -q` prints, run under `root` with a deadline.
 
-    The output goes to a file, not a pipe, so a large collection can never block the child; on
-    the deadline the child is killed. A failed or late collection raises CollectError.
+    The child runs in its own kill scope and its output is read from a pipe while it runs
+    (`harness.mcp.client.run_bounded`, the MCP session process's mechanism): it can never block
+    on a full pipe, and nothing is written to disk that a surviving descendant could keep open.
+    On the deadline its whole tree is ended. A failed or late collection raises CollectError.
     """
-    with tempfile.TemporaryDirectory() as tmp:
-        output = Path(tmp) / "collect.txt"
-        with open(output, "wb") as sink:
-            try:
-                completed = subprocess.run(
-                    [sys.executable, "-m", "pytest", "--collect-only", "-q",
-                     "-p", "no:cacheprovider"],
-                    cwd=root, stdin=subprocess.DEVNULL, stdout=sink, stderr=subprocess.STDOUT,
-                    timeout=timeout_s, check=False,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise CollectError(f"pytest --collect-only did not finish in {timeout_s} s") from exc
-            except OSError as exc:
-                raise CollectError(f"pytest --collect-only could not start: {exc}") from exc
-        text = output.read_bytes().decode("utf-8", errors="replace")
-    if completed.returncode != 0:
-        tail = " | ".join(line for line in text.splitlines()[-5:] if line.strip())
-        raise CollectError(f"pytest --collect-only exited {completed.returncode}: {tail}")
+    try:
+        run = run_bounded([sys.executable, *COLLECT_ARGS], cwd=root, deadline_s=timeout_s,
+                          end_tree_on_exit=True)
+    except OSError as exc:
+        raise CollectError(f"pytest --collect-only could not start: {exc}") from exc
+    if run.returncode is None:
+        raise CollectError(f"pytest --collect-only did not finish in {timeout_s} s")
+    text = run.output.decode("utf-8", errors="replace")
+    if run.returncode != 0:
+        said = text + "\n" + run.errors.decode("utf-8", errors="replace")
+        tail = " | ".join(line for line in said.splitlines()[-5:] if line.strip())
+        raise CollectError(f"pytest --collect-only exited {run.returncode}: {tail}")
+    if run.truncated:
+        raise CollectError("pytest --collect-only printed more than the check reads")
     return parse_collected(text)
 
 

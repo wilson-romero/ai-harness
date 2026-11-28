@@ -3,7 +3,10 @@ exists, and NO to each way the matrix can rot. Synthetic matrices, specs and col
 `tmp_path`; the real collection only in the tests that need a subprocess."""
 
 import importlib.util
+import shutil
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -303,6 +306,116 @@ def test_a_collection_past_its_deadline_is_a_failure(tmp_path):
         newline="\n")
     with pytest.raises(checker.CollectError, match="did not finish"):
         checker.collect_ids(tmp_path, timeout_s=2)
+
+
+# Windows parity (hardening 9.1): in a uv environment on Windows `sys.executable` is a launcher
+# that runs the real interpreter as its child; that child inherits the output handle and outlives
+# a kill of the launcher by a few milliseconds. The stand-in below reproduces it on any system:
+# it starts a grandchild that holds the output open and would write `survived` if not ended.
+STAND_IN = """import subprocess, sys, time
+from pathlib import Path
+marks = Path(sys.argv[1])
+subprocess.Popen([sys.executable, "-c",
+                  "import sys, time; from pathlib import Path; time.sleep(4); "
+                  "Path(sys.argv[1], 'survived').write_text('yes')", str(marks)],
+                 stdin=subprocess.DEVNULL, stdout=sys.stdout.fileno(),
+                 stderr=sys.stderr.fileno())
+(marks / "ready").write_text("yes")
+time.sleep(30)
+"""
+
+
+def empty_soon(folder: Path) -> list[Path]:
+    """The folder's listing once it is empty, or after 1 s. On Windows the errors file of a
+    bounded run is a named `O_TEMPORARY` file that stays listed until the last descendant that
+    inherited it closes its handle, and the end of the tree waits only for the leader there."""
+    for _ in range(20):
+        left = list(folder.iterdir())
+        if not left:
+            break
+        time.sleep(0.05)
+    return left
+
+
+@pytest.fixture
+def late_child(tmp_path, monkeypatch):
+    """A collection that is late and whose child outlives it; an empty temporary directory to
+    see whether anything is left behind. Returns (marks folder, temporary directory)."""
+    marks, scratch = tmp_path / "marks", tmp_path / "scratch"
+    marks.mkdir()
+    scratch.mkdir()
+    script = tmp_path / "stand_in.py"
+    script.write_text(STAND_IN, encoding="utf-8", newline="\n")
+    monkeypatch.setattr(checker, "COLLECT_ARGS", [str(script), str(marks)])
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    return marks, scratch
+
+
+def test_a_late_collection_whose_child_outlives_it_ends_the_whole_tree(late_child, tmp_path):
+    marks, scratch = late_child
+    with pytest.raises(checker.CollectError, match="did not finish"):
+        checker.collect_ids(tmp_path, timeout_s=2)
+    assert (marks / "ready").exists()  # the grandchild was started before the deadline
+    time.sleep(4)  # past the moment the grandchild would have written `survived`
+    assert not (marks / "survived").exists(), "a process of the collection outlived it"
+    assert empty_soon(scratch) == []
+
+
+def test_a_cleanup_that_fails_does_not_hide_a_late_collection(late_child, tmp_path, monkeypatch):
+    """Windows refuses to delete a file another process still has open (WinError 32); the
+    first removal is refused here on any system. The answer is still the late collection, and
+    nothing is left in the temporary directory."""
+    marks, scratch = late_child
+    refused = []
+    real_rmtree = shutil.rmtree
+
+    def rmtree_refused_once(path, *args, **kwargs):  # noqa: ANN002, ANN003
+        if not refused:
+            refused.append(path)
+            raise PermissionError(13, "simulated: the file is used by another process", path)
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", rmtree_refused_once)
+    with pytest.raises(checker.CollectError, match="did not finish"):
+        checker.collect_ids(tmp_path, timeout_s=2)
+    assert empty_soon(scratch) == []
+
+
+def test_a_child_that_exits_leaving_a_descendant_returns_and_ends_it(tmp_path):
+    """The bounded run returns soon after the child's exit even though a descendant keeps the
+    output open, ends that descendant, and keeps only `output_limit` bytes."""
+    marks = tmp_path / "marks"
+    marks.mkdir()
+    script = tmp_path / "exits.py"
+    script.write_text(STAND_IN.replace("time.sleep(30)", "print('x' * 5000)"),
+                      encoding="utf-8", newline="\n")
+    started = time.monotonic()
+    run = checker.run_bounded([sys.executable, str(script), str(marks)], cwd=tmp_path,
+                              deadline_s=20, output_limit=1000, end_tree_on_exit=True)
+    assert time.monotonic() - started < 10
+    assert run.returncode == 0 and run.truncated and run.output == b"x" * 1000
+    assert run.tree_ended
+    time.sleep(4)
+    assert not (marks / "survived").exists()
+
+
+def test_without_a_deadline_a_descendant_survives_unless_asked(tmp_path):
+    """What the demos need (review of windows-parity-3, finding 1): a process that `main.py`
+    leaves alive must still be alive after `harness_bounded` returns, or a leak check after it
+    proves nothing. By default the tree is ended only when the deadline expires."""
+    marks = tmp_path / "marks"
+    marks.mkdir()
+    script = tmp_path / "exits.py"
+    script.write_text(STAND_IN.replace("time.sleep(30)", "pass"), encoding="utf-8",
+                      newline="\n")
+    run = checker.run_bounded([sys.executable, str(script), str(marks)], cwd=tmp_path,
+                              deadline_s=20)
+    assert run.returncode == 0 and run.tree_ended is None
+    for _ in range(100):  # the descendant writes `survived` 4 s after it starts
+        if (marks / "survived").exists():
+            break
+        time.sleep(0.1)
+    assert (marks / "survived").exists(), "the bounded run ended a descendant it was not asked to"
 
 
 def test_main_without_collected_fails_on_a_broken_collection(project, capsys):
