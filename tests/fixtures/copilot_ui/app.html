@@ -25,6 +25,17 @@
                         as a virtualized list does
     bounce=1            the server receives the prompt, the page shows an error notice as a
                         turn and keeps the prompt in the editor (no user turn, never emptied)
+  End of reply and an open tab (change copilot-turn-speed):
+    steps=N             the reply streams in about N chunks (default 60)
+    flicker_ms=N        with pause_ms, the stop control hides for N ms in the middle of the
+                        pause and comes back; the reply then goes on
+    nostop=1            the stop control never shows
+    late_block_ms=N     N ms after the reply ended (stop hidden, copy control shown) another
+                        block is appended to the reply, in late_chunks parts (default 1)
+                        150 ms apart; it ends with ZZ-LATE-BLOCK-END
+    live=1              the page follows the server every 300 ms: turns added elsewhere are
+                        shown, a conversation deleted elsewhere empties the chat and goes to
+                        the new-chat address, and a session that ended shows a sign-in banner
   A response-mode selector, only with modes=... (change response-mode). Invented labels: the
   options are "Synthetic automatic", "Synthetic brisk" and "Synthetic pondering" (auto, quick,
   deep). The page posts the mode it is in with each prompt and every mode it switches to.
@@ -95,6 +106,14 @@
   const deaf = params.get("deaf") === "1";
   const bounce = params.get("bounce") === "1";
   const shownPairs = Number(params.get("window") || 0);
+  const steps = Number(params.get("steps") || 60);
+  const flickerMs = Number(params.get("flicker_ms") || 0);
+  const noStop = params.get("nostop") === "1";
+  const lateBlockMs = params.has("late_block_ms") ? Number(params.get("late_block_ms")) : null;
+  const lateChunks = Number(params.get("late_chunks") || 1);
+  const live = params.get("live") === "1";
+  let shownTurns = 0;  // turns of the server's conversation shown here (live=1)
+  let replying = false;
   const modesShape = params.get("modes") || "";
   const MODE_LABELS = { auto: "Synthetic automatic", quick: "Synthetic brisk", deep: "Synthetic pondering" };
   const modeStuck = params.get("mode_stuck") === "1";
@@ -173,6 +192,32 @@
       if (turn.role === "assistant") addDone(element);
       if (first) thread.insertBefore(element, first);  // history goes above what is shown
     }
+    shownTurns = data.turns.length;
+  }
+  function showSignedOut() {
+    if (document.getElementById("synthetic-unauth-banner")) return;
+    const banner = document.createElement("div");
+    banner.id = "synthetic-unauth-banner";
+    banner.textContent = "Synthetic session ended";
+    document.querySelector("main").prepend(banner);
+  }
+  function follow() {
+    if (!live) return;
+    setInterval(async () => {
+      if (replying || !conversation) return;
+      let response;
+      try { response = await fetch("/api/live/" + conversation); } catch (e) { return; }
+      if (replying) return;
+      if (response.status === 401) { showSignedOut(); return; }
+      if (response.status === 404) { newChat(); shownTurns = 0; return; }
+      if (!response.ok) return;
+      const data = await response.json();
+      for (const turn of data.turns.slice(shownTurns)) {
+        const element = addTurn(turn.role, turn.text);
+        if (turn.role === "assistant") addDone(element);
+      }
+      shownTurns = data.turns.length;
+    }, 300);
   }
   function renderMode() {
     if (!modeTrigger) return;
@@ -270,11 +315,12 @@
       addTurn("assistant notice", "ZZ-ERROR-NOTICE");
       return;
     }
+    replying = true;
     composer.value = "";
     send.disabled = true;
     addTurn("user", prompt);
     send.hidden = true;
-    stop.hidden = false;
+    if (!noStop) stop.hidden = false;
     const response = await fetch("/api/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -294,12 +340,21 @@
     turn.setAttribute("aria-busy", "true");
     const reply = data.reply;
     const half = Math.floor(reply.length / 2);
-    const step = Math.max(5, Math.ceil(reply.length / 60));
+    const step = Math.max(5, Math.ceil(reply.length / steps));
     for (let i = 0; i < reply.length; i += step) {
       if (i >= half && i - step < half) {
         if (early === "done_control") addDone(turn);
         if (neverFinish) return;
-        if (pauseMs) await sleep(pauseMs);
+        if (pauseMs && flickerMs) {
+          const before = Math.floor((pauseMs - flickerMs) / 2);
+          await sleep(before);
+          stop.hidden = true;  // looks finished for a moment, then goes on
+          await sleep(flickerMs);
+          if (!noStop) stop.hidden = false;
+          await sleep(Math.max(0, pauseMs - before - flickerMs));
+        } else if (pauseMs) {
+          await sleep(pauseMs);
+        }
       }
       body.textContent = reply.slice(0, i + step);
       await sleep(chunkMs);
@@ -327,6 +382,20 @@
       const id = data.conversation;
       setTimeout(() => showConversation(id), idDelay);
     }
+    if (lateBlockMs !== null) {
+      await sleep(lateBlockMs);
+      const block = document.createElement("p");
+      turn.insertBefore(block, turn.querySelector(".synthetic-copy"));
+      const words = ["ZZ-LATE-BLOCK"];
+      for (let k = 1; k <= lateChunks; k++) {
+        words.push("late" + k);
+        if (k === lateChunks) words.push("ZZ-LATE-BLOCK-END");
+        block.textContent = words.join(" ");
+        if (k < lateChunks) await sleep(150);
+      }
+    }
+    shownTurns += 2;
+    replying = false;
   }
 
   // Like many chat pages, sending is possible only once something is typed.
@@ -340,6 +409,7 @@
     setTimeout(() => { composer.hidden = false; }, readyMs);
   }
   load();
+  follow();
 })();
 </script>
 </body>

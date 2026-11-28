@@ -66,7 +66,7 @@ async def manual_login(settings: Settings, launcher: EdgeLauncher | None = None)
     url = settings.require_copilot_url()
     measurement = load_measurement(settings.data_dir)
     copilot_host = host_of(url)
-    launcher = launcher or EdgeLauncher.from_settings(settings)
+    launcher = launcher or EdgeLauncher.from_settings(settings, window=True)  # always a window
     async with launcher.open(wait_s=None) as context:
         page = context.pages[0] if context.pages else await context.new_page()
         with suppress(PlaywrightError):  # the person may close the window while it loads

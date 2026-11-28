@@ -38,6 +38,15 @@ class Settings:
     # The deadline of a question in `deep` mode (response-mode D6); None: three times the
     # request timeout.
     deep_timeout_s: float | None = None
+    # Change copilot-turn-speed: each optimisation can be switched off, and each one runs
+    # only when the probe measured it (`tab_reuse`, `fast_end` in ui.json); `copilot_timings`
+    # adds a line with the time of each phase to every question's warnings.
+    copilot_reuse_tab: bool = True
+    copilot_fast_end: bool = True
+    copilot_timings: bool = False
+    # Questions to Copilot without a window (`HARNESS_COPILOT_HEADLESS=on`), off by default.
+    # Signing in and the probe's discovery always use a window (copilot-turn-speed D5).
+    copilot_headless: bool = False
 
     @property
     def deep_request_timeout_s(self) -> float:
@@ -72,6 +81,10 @@ class Settings:
             copilot_max_prompt_chars=_positive_int(env, "HARNESS_COPILOT_MAX_PROMPT_CHARS"),
             browser_headless=env.get("HARNESS_TEST_HEADLESS") == "1",
             answer_notice=answer_notice(env),
+            copilot_reuse_tab=_on_off(env, "HARNESS_COPILOT_REUSE_TAB", True),
+            copilot_fast_end=_on_off(env, "HARNESS_COPILOT_FAST_END", True),
+            copilot_timings=_on_off(env, "HARNESS_COPILOT_TIMINGS", False),
+            copilot_headless=_on_off(env, "HARNESS_COPILOT_HEADLESS", False),
         )
 
     def require_copilot_url(self) -> str:
@@ -83,6 +96,15 @@ class Settings:
             # The value itself is not echoed: it may be a real tenant URL.
             raise InvalidInput("HARNESS_COPILOT_URL must be an http or https URL with a host")
         return self.copilot_url
+
+
+def _on_off(env: Mapping[str, str], key: str, default: bool) -> bool:
+    raw = (env.get(key) or "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("on", "off"):
+        return raw == "on"
+    raise InvalidInput(f"{key} must be 'on' or 'off', got {raw!r}")
 
 
 def _positive_int(env: Mapping[str, str], key: str) -> int | None:
