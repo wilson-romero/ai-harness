@@ -598,7 +598,7 @@ Límite: un proceso que el servidor lance en **otra sesión o grupo** (`setsid`,
 
 ### Un plan de lecturas: `/plan`
 
-En la rama `feature/code-mode-plan` (sin merge, 2026-11-27; `openspec/changes/code-mode/`, tramo 2). En la conversación escribes `/plan <pregunta>`; fuera de ella, `uv run python main.py plan SESSION_ID "<pregunta>"`, que necesita una terminal interactiva y, sin ella, no envía nada. `/plan` se escribe entero: `/pla` o `/p` no lo abren.
+En `develop` desde el 2026-11-27 (`openspec/changes/code-mode/`, tramo 2). En la conversación escribes `/plan <pregunta>`; fuera de ella, `uv run python main.py plan SESSION_ID "<pregunta>"`, que necesita una terminal interactiva y, sin ella, no envía nada. `/plan` se escribe entero: `/pla` o `/p` no lo abren.
 
 1. El harness manda **una** pregunta: primero sus instrucciones (la gramática del plan, un ejemplo y un nonce nuevo), después el catálogo de las herramientas `read` de tu lista local (una línea cada una, con los argumentos declarados y la `description` que tú escribas, una línea de 120 caracteres como mucho), la memoria del proyecto como datos y tu pregunta. Nada de lo que dice un servidor entra en el catálogo. `/context` muestra ese bloque. Si no cabe en el límite del proveedor, no se envía nada.
 2. Si la respuesta no trae un bloque `json` con un plan, es la respuesta y no pasa nada más. Si lo trae y no es válido (una escritura, una herramienta o un servidor fuera de la lista, dos bloques, otro nonce, un campo desconocido…), se dice el motivo y no se ejecuta nada; nunca se vuelve a preguntar solo. Una respuesta incierta, fallida o truncada no se lee.

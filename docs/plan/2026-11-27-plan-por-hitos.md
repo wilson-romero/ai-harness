@@ -2,6 +2,16 @@
 
 Aprobado por el dueño del proyecto el 2026-11-27. Desde esta fecha, **este documento da el orden de trabajo**. El plan por cortes ([`2026-11-24-ai-harness-cortes.md`](2026-11-24-ai-harness-cortes.md)) sigue siendo el registro de cada corte: su change, su riesgo, sus SEC y su estado. Cuando un change nombra su corte, lo busca allí; cuando alguien pregunta «¿qué va ahora?», la respuesta está aquí.
 
+## Criterio de éxito
+
+El proyecto es **educativo**. El objetivo es demostrar que cada pieza se puede construir, que funciona y entender por qué. De ahí salen tres reglas de trabajo:
+
+- Cada hito empieza por una **versión fina de punta a punta** que el dueño puede ejecutar, con Copilot real donde se pueda.
+- Lo que se aprende se escribe en la guía de estudio ([`docs/aprendizaje/fundamentos-de-un-harness.md`](../aprendizaje/fundamentos-de-un-harness.md)).
+- Algo que no funciona **también es un resultado**, si se mide y se explica.
+
+Lo que no se relaja: la aprobación antes de escribir, enviar o ejecutar, y ningún dato real en el repo.
+
 ## Qué se construye
 
 Un asistente personal sobre Copilot Web. Hace tres cosas, que se entregan en este orden:
@@ -20,6 +30,8 @@ Un asistente personal sobre Copilot Web. Hace tres cosas, que se entregan en est
 - Solo datos sintéticos en el repo (`SECURITY.md`).
 
 ## Dónde estamos (sobre `develop` = `a9c51fe`)
+
+La verificación completa (`scripts/verify.sh`, incluidos los tests marcados `edge`) pasó sobre `develop` `a9c51fe` el 2026-11-27: 2555 tests pasados y 2 omitidos.
 
 **En `develop`:**
 
