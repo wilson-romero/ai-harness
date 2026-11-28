@@ -41,7 +41,22 @@ from harness.core.response_mode import describe_mode
 from harness.core.service import SessionService
 from harness.core.strict_json import decode_text_limited
 from harness.mcp.config import LoadedConfig, load_config
-from harness.mcp.plan_flow import PlanRequest, PlanSetting, run_plan
+from harness.mcp.loop import PROVIDERS_ENV, loop_settings
+from harness.mcp.loop_flow import (
+    HOLDS_RESULTS,
+    IN_THIS_SESSION,
+    holds_results,
+    last_loop,
+    recover_loops,
+    run_loop,
+)
+from harness.mcp.plan_flow import (
+    PlanRequest,
+    PlanSetting,
+    auto_read_setting,
+    box_option,
+    run_plan,
+)
 from harness.mcp.plan_prompt import PlanUnavailable, build_catalogue, shown_instructions
 from harness.memory.config import MemorySettings, ensure_data_dir_outside_vault
 from harness.memory.context import ProjectContext, build_context, new_nonce
@@ -230,6 +245,7 @@ class Conversation:
         self._lock: SessionLock | None = None
         self._listed: list[UUID] = []
         self._attachment: tuple[str, str] | None = None  # (name, block) for the next question
+        self._loop_counter: str | None = None  # the turn of the /agent loop in course (A3)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._current: asyncio.Task | None = None
         self._notes: tuple[str, ...] = ()  # memory notes of the last question (shell-tui D4)
@@ -495,7 +511,7 @@ class Conversation:
         """Say what the interruption left, from what was recorded during this action only.
         `/plan` asks a question, so its interruption is told as a question's (code-mode D12);
         a plan interrupted while it runs says so itself and never comes here."""
-        if isinstance(parsed, Command) and parsed.name != "plan":
+        if isinstance(parsed, Command) and parsed.name not in ("plan", "agent"):
             if parsed.name == "skill":
                 self._skill_interrupted(run_before)
             else:
@@ -581,6 +597,9 @@ class Conversation:
         self._session, self._lock = taken
         self._attachment = None
         self._notes = ()
+        # A loop left `running` by a process that is gone is marked interrupted as soon as a
+        # conversation opens a session (review of fa6b6d1, finding 6), not at the next /agent.
+        recover_loops(self._deps.conn, self._deps.data_dir)
 
     def _release(self) -> None:
         if self._lock is not None:
@@ -631,6 +650,7 @@ class Conversation:
             sends=int(sends),
             last_request=last[1] if last is not None else "-",
             mode=self._mode_shown(session),
+            loop=self._loop_counter or last_loop(self._deps.conn, session.session_id),
         )
 
     def _mode_shown(self, session: Session) -> str:
@@ -762,6 +782,9 @@ class Conversation:
                 last.requested_mode, last.confirmed_mode)) else ""),
             f"mode:     {session.response_mode}",
             f"sends: {panel.sends}",
+            f"loop: {panel.loop}",
+            *([f"results: {HOLDS_RESULTS}"]
+              if holds_results(self._deps.conn, session.session_id) else []),
             f"memory: {len(panel.notes)} note(s) in the last question",
             *(f"  {terminal_safe(note)}" for note in panel.notes),
             "attachment: " + (self._attachment[0] if self._attachment else "-"),
@@ -918,14 +941,17 @@ class Conversation:
         return lambda: load_config(environ)
 
     async def _cmd_plan(self, *words: str) -> None:
-        """`/plan QUESTION`: the only way a reply is ever read for a plan (D9). The question
-        is the words as the parser split them, joined by one space."""
+        """`/plan [--box] QUESTION`: the only way a reply is ever read for a plan (D9). The
+        question is the words as the parser split them, joined by one space. `--box` as the
+        first word turns the rule `auto_read` off for this question only (A2-4)."""
+        box, words = box_option(words)
         question = " ".join(words)
         size = len(question.encode("utf-8", errors="surrogatepass"))
         if size > MAX_QUESTION_BYTES:
             raise UsageError(f"the question has {size} bytes; the limit is {MAX_QUESTION_BYTES}; "
                              "nothing was sent")
         load = self._mcp_config()
+        auto_read = auto_read_setting(self._environ()) and not box  # a wrong value: stop here
         build_catalogue(load())  # no read tool, or a list that cannot be read: stop here
         context = self._context_for_question(question)
         attachment, self._attachment = self._attachment, None
@@ -934,7 +960,9 @@ class Conversation:
         clock = self._deps.clock
         setting = PlanSetting(
             data_dir=self._deps.data_dir, environ=self._environ(), load_config=load,
-            ttl_s=self._deps.skills().approval_ttl_s,
+            ttl_s=self._deps.skills().approval_ttl_s, auto_read=auto_read,
+            bounded_only=(IN_THIS_SESSION if holds_results(self._deps.conn, self._session_id)
+                          else None),
             **({"clock": clock} if clock is not None else {}),
         )
         await run_plan(
@@ -943,6 +971,59 @@ class Conversation:
             service=self._service, conn=self._deps.conn, view=_PlanScreen(self),
             terminal=self._terminal, setting=setting,
         )
+
+    async def _cmd_agent(self, *words: str) -> None:
+        """`/agent QUESTION` (code-mode A3): `/plan`, and then each plan's results go back to
+        the provider as data, turn by turn (`loop_flow`). Only when `HARNESS_LOOP_PROVIDERS`
+        names this provider: else nothing is recorded or sent. `--box` first: every plan of
+        this loop asks the box, even reads by rule (A2-4)."""
+        box, words = box_option(words)
+        question = " ".join(words)
+        size = len(question.encode("utf-8", errors="surrogatepass"))
+        if size > MAX_QUESTION_BYTES:
+            raise UsageError(f"the question has {size} bytes; the limit is {MAX_QUESTION_BYTES}; "
+                             "nothing was sent")
+        environ = self._environ()
+        provider = self._deps.provider
+        loop = loop_settings(environ)  # a wrong value: stop here
+        if not loop.allows(provider.name):
+            raise UsageError(
+                f"/agent sends what the reads return back to the provider, and "
+                f"{PROVIDERS_ENV} does not name {provider.name}; nothing was sent. Set "
+                f"{PROVIDERS_ENV}={provider.name} to allow it, or ask with /plan")
+        load = self._mcp_config()
+        auto_read = auto_read_setting(environ) and not box
+        build_catalogue(load())
+        context = self._context_for_question(question)
+        attachment, self._attachment = self._attachment, None
+        if attachment is not None:
+            self._say(f"attached: {attachment[0]}")
+        clock = self._deps.clock
+        setting = PlanSetting(
+            data_dir=self._deps.data_dir, environ=environ, load_config=load,
+            ttl_s=self._deps.skills().approval_ttl_s, auto_read=auto_read,
+            loop_to=terminal_safe(provider.name),
+            **({"clock": clock} if clock is not None else {}),
+        )
+        try:
+            await run_loop(
+                PlanRequest(question, self._session_id, provider, context,
+                            attachment[1] if attachment is not None else None),
+                service=self._service, conn=self._deps.conn, view=_PlanScreen(self),
+                terminal=self._terminal, setting=setting, loop=loop,
+                provider_name=terminal_safe(provider.name),
+                synthetic=bool(provider.synthetic_content), state=self._loop_state,
+            )
+        finally:
+            self._loop_counter = None
+
+    def _loop_state(self, counter: str) -> None:
+        """The loop's counter, for the side panel and `/status`; the full screen reads its
+        panel again at once."""
+        self._loop_counter = None if counter == "-" else counter
+        refresh = getattr(self._terminal, "refresh_panel", None)
+        if callable(refresh):
+            refresh()
 
     def _plan_approval(self, header: list[str], content: list[str]) -> str:
         """The plan's notice, laid out as a skill's (`_render_approval`): the harness's header,

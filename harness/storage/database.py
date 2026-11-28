@@ -64,6 +64,18 @@ def transaction(conn: sqlite3.Connection) -> Iterator[None]:
     conn.execute("COMMIT")
 
 
+# The first line of a migration that rebuilds a table other tables refer to (code-mode A2,
+# migration 010). SQLite cannot change a CHECK in place; its documented procedure (create the
+# new table, copy, drop the old one, rename) needs the foreign keys off, which only takes
+# effect outside a transaction. Such a migration runs with them off, inside its transaction,
+# and is refused (rolled back) unless `PRAGMA foreign_key_check` finds no broken reference.
+FOREIGN_KEYS_OFF = "-- migrate: foreign keys off"
+
+
+class MigrationError(sqlite3.IntegrityError):
+    """A rebuilding migration would leave a broken reference: nothing of it was applied."""
+
+
 def migrate(conn: sqlite3.Connection, migrations_dir: Path = MIGRATIONS_DIR) -> list[int]:
     """Apply pending migrations in order and return the versions applied now."""
     conn.execute(
@@ -73,18 +85,29 @@ def migrate(conn: sqlite3.Connection, migrations_dir: Path = MIGRATIONS_DIR) -> 
     applied: list[int] = []
     for path in sorted(migrations_dir.glob("[0-9][0-9][0-9]_*.sql")):
         version = int(path.name[:3])
-        with transaction(conn):
-            done = conn.execute(
-                "SELECT 1 FROM schema_migrations WHERE version = ?", (version,)
-            ).fetchone()
-            if done:
-                continue
-            conn.executescript(path.read_text(encoding="utf-8"))
-            conn.execute(
-                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
-                (version, utc_now()),
-            )
-            applied.append(version)
+        script = path.read_text(encoding="utf-8")
+        rebuilds = script.startswith(FOREIGN_KEYS_OFF)
+        if rebuilds:
+            conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            with transaction(conn):
+                done = conn.execute(
+                    "SELECT 1 FROM schema_migrations WHERE version = ?", (version,)
+                ).fetchone()
+                if done:
+                    continue
+                conn.executescript(script)
+                if rebuilds and conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    raise MigrationError(f"migration {version} would break a reference; "
+                                         "nothing of it was applied")
+                conn.execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                    (version, utc_now()),
+                )
+                applied.append(version)
+        finally:
+            if rebuilds:
+                conn.execute("PRAGMA foreign_keys = ON")
     return applied
 
 

@@ -14,7 +14,8 @@ HOSTILE = ["²", "٣", "a\x00b", "\udcff", "-1", "0", "9" * 30, "../x", "--x", "
 TEMPLATES = ["/new {}", "/new --project {}", "/resume {}", "/memory {}", "/skill {}",
              "/skill demo-echo {}", "/skill demo-echo --file {}", "/skill demo-echo --file text={}",
              "/skill demo-echo text={}", "/file {}", "/mode {}",
-             "/plan {}"]  # code-mode slice 2: with no MCP list, refused before sending
+             "/plan {}",  # code-mode slice 2: with no MCP list, refused before sending
+             "/agent {}"]  # code-mode A3: without HARNESS_LOOP_PROVIDERS, refused the same
 
 
 def test_every_command_that_takes_arguments_is_covered():

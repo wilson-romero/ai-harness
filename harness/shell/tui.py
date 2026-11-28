@@ -351,6 +351,11 @@ class TuiTerminal:
         finally:
             self._post("set_working", None)
 
+    def refresh_panel(self) -> None:
+        """Read the side panel again now, between two lines read (code-mode A3: the turn of a
+        loop). In the conversation's thread, like every read of the panel."""
+        self._refresh_panel()
+
     def _refresh_panel(self) -> None:
         state = self._state
         if state is None or state.panel is None:
@@ -850,6 +855,8 @@ class SidePanel(Static):
             entry("Mode", panel.mode)
             entry("Sends", str(panel.sends))
             entry("Last request", self.working or panel.last_request)
+            if panel.loop != "-":
+                entry("Loop", panel.loop)
             entry("Memory", f"{len(panel.notes)} note(s) in the last question")
             for note in panel.notes[:PANEL_NOTES]:
                 lines.extend([(f"  {note}", "dim"), "\n"])

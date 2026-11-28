@@ -96,7 +96,8 @@ def test_every_command_of_d10_and_nothing_else():
     assert set(COMMANDS) == {"help", "status", "new", "sessions", "resume", "history",
                              "memory", "context", "skill", "file", "exit",
                              "mode",  # response-mode, 2026-11-27
-                             "plan"}  # code-mode slice 2
+                             "plan",  # code-mode slice 2
+                             "agent"}  # code-mode A3
 
 
 @pytest.mark.parametrize("line, message", [

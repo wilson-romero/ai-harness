@@ -101,6 +101,9 @@ class PanelState:
     sends: int  # requests of this session that went to the provider
     last_request: str  # status of the last request of this session, or "-"
     mode: str = "auto"  # the session's response mode, and the last confirmed one if it differs
+    # code-mode A3: the turn of the `/agent` loop in course (`turn 2 of 5`), else how the
+    # session's last loop ended, else "-"
+    loop: str = "-"
 
 
 @runtime_checkable
