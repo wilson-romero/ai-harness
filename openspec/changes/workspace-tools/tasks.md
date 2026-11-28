@@ -308,7 +308,17 @@ Cada arreglo tiene una prueba que se vio fallar sobre el código revisado, antes
   4. tras `/workspace send off`, lo ya enviado se queda en la conversación del proveedor: el harness no puede retirarlo.
 
   Hecho: cada punto dice «tomada por el dueño el …», o se edita la decisión en `design.md`.
-- [ ] 3b.9 Integración con `develop` y la tanda sin Edge sobre el árbol mergeado. Recibo: pendiente.
+- [x] 3b.9 Integración con `develop` y la tanda sin Edge sobre el árbol mergeado. Oráculo: código 0 en todo.
+  - **Merge.** `git merge origin/develop` (`02b2c09`) sobre `0848426`, en `04aec2f`, con dos conflictos:
+    - `docs/security/known-debt.md`: `develop` trae su propia entrada 15 (el motivo previo al envío que se pierde). Quedan las dos, y la de la carpeta de trabajo pasa a ser la **16**, con sus referencias en `SECURITY.md`, `design.md` y esta lista;
+    - `docs/security/sec-matrix.md`, cuatro filas: quedan los tests y el control negativo de esta rama, y la línea **Windows** de `develop`, con la ejecución de `a9c51fe`.
+  - **Recibo (2026-11-28, macOS arm64, sobre `04aec2f`):**
+    - `caffeinate -i uv run pytest -m "not edge and not copilot" -q -p no:cacheprovider` → `2944 passed, 193 deselected in 469.83s`, código 0. Las dos pruebas de TUI sensibles a la carga pasaron en la tanda;
+    - `scripts/check_public_safety.py` → `PASS (558 file(s))`;
+    - `scripts/check_sec_matrix.py` → `PASS (15 rows, 240 tests)`;
+    - `openspec validate --all --strict --no-interactive` → `30 passed, 0 failed`;
+    - `scripts/demo_workspace.py` → `demo: PASS`, código 0.
+  - Sin la batería de Edge: esta ronda no cambia código del proveedor ni del navegador. Windows: **NOT RUN**.
 
 ## 4. B3 · Escrituras con diff y aprobación
 
