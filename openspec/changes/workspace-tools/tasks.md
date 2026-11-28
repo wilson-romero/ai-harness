@@ -159,20 +159,78 @@ Leyenda: **oráculo** = qué dice SÍ; **control negativo** = la mutación o el 
 
 ## 3. B2 · Conversación, catálogo y lecturas automáticas (tras el merge de `feature/code-mode-loop`)
 
-- [ ] 3.1 Volver a medir las premisas de A2 y A3 sobre el `develop` mergeado: nombre real del `auto_read`, modo `rule`, tope de envío y forma de los datos marcados. Si difieren de este diseño, editar D6, D7 y D14 en su sitio. Recibo: SHA de `develop` y los nombres encontrados.
-- [ ] 3.2 `/workspace`, `/workspace off`, `/workspace send on|off` en `harness/shell/commands.py` (tabla declarativa), el panel y `/status`. Oráculo: tests de la conversación para cada orden y para `workspace_busy` con la caja abierta. Control negativo: permitir el cambio con la caja abierta hace fallar su test. Recibo.
-- [ ] 3.3 Nombre reservado. Oráculo: una lista MCP con `workspace` falla con `reserved_server_name`. Control negativo: quitar la reserva hace fallar el test. Recibo.
-- [ ] 3.4 Servidor interno en la vista de política y en el catálogo (D6, D7). Oráculo:
+- [x] 3.1 Volver a medir las premisas de A2 y A3 sobre el `develop` mergeado: nombre real del `auto_read`, modo `rule`, tope de envío y forma de los datos marcados. Si difieren de este diseño, editar D6, D7 y D14 en su sitio. Recibo (2026-11-28, `develop` = `8a8afbd`, mergeado en `6418e91`):
+  - la marca es `ToolEntry.auto_read` (`harness/mcp/config.py`), válida solo como booleano en una `read`;
+  - el modo es `means = 'rule'` en `plan_runs` (`plan_flow.approve_and_run`);
+  - topes de `harness/mcp/loop.py`: `STEP_SEND_MAX_BYTES` = 4 096, `RESULTS_SEND_MAX_BYTES` = 12 288, `TURN_SEND_MAX_CHARS` = 28 000, `DEFAULT_MAX_TURNS` = 5;
+  - los datos van entre `<<<RESULTADOS <marca>` y `RESULTADOS <marca>>>>`, con `| ` delante de cada línea.
+
+  Lo que no estaba en el diseño: dentro de `/agent`, una lectura corre por regla solo si **todos** sus argumentos están acotados (A3-12: un `string` con `pattern` y `max_length` ≤ 64). Se resolvió declarando así la ruta (B2-2). D1 (la carpeta no se guarda en una tabla) y D6 (la línea aparte del catálogo) quedan revisados en su sitio (B2-1, B2-4). D7 y D14 no cambian.
+- [x] 3.2 `/workspace`, `/workspace off`, `/workspace send on|off` en `harness/shell/commands.py` (tabla declarativa), el panel y `/status`. Oráculo: tests de la conversación para cada orden y para `workspace_busy` con la caja abierta. Control negativo: permitir el cambio con la caja abierta hace fallar su test. Recibo (2026-11-28):
+  - tests `test_workspace_sets_shows_and_unsets_the_folder`, `test_a_refused_folder_keeps_the_one_set`, `test_the_folder_does_not_follow_the_person_to_another_session`, `test_the_folder_cannot_change_while_a_plan_is_in_course`, `test_the_side_panel_shows_the_folder`, `test_completion_offers_the_words_and_a_folder` y `test_the_conversation_s_own_vault_is_protected_without_the_variable` de `tests/unit/test_workspace_shell.py`;
+  - `workspace_busy` se prueba con un `/plan` en curso, no con la caja abierta: con la caja abierta, lo que se escribe es la respuesta de la caja, no una orden (B2-7);
+  - control negativo: las mutaciones 2, 3, 20 y 21 de 3.10.
+- [x] 3.3 Nombre reservado. Oráculo: una lista MCP con `workspace` falla con `reserved_server_name`. Control negativo: quitar la reserva hace fallar el test. Recibo (2026-11-28): `test_a_local_list_cannot_declare_a_server_named_workspace`; mutación 1 de 3.10.
+- [x] 3.4 Servidor interno en la vista de política y en el catálogo (D6, D7). Oráculo:
   - el catálogo con carpeta nombra las 2 herramientas de B2 con la descripción fija, sin la ruta absoluta (`assert root not in prompt`) y dentro de 8 000 caracteres (cifra medida y citada);
   - sin carpeta no las nombra;
   - un plan que nombra `workspace` sin carpeta da `server_not_allowed`.
 
-  Recibo.
-- [ ] 3.5 Lecturas automáticas en `/plan` y en el bucle. Oráculo: con el Mock, un guion de dos vueltas (lee `src/app.py`, responde) corre sin caja, con `running plan:`, deja dos filas en `tool_calls` y respeta el tope de envío de A3. Control negativo: marcar `read` como no automática hace que se abra la caja. Recibo.
-- [ ] 3.6 Consentimiento por carpeta (D14). Oráculo: con un proveedor de test que no es el Mock y sin consentimiento, nada vuelve al proveedor (contador de envíos sin cambiar) y se ve `not sent: no consent for this folder`; con consentimiento, el resultado vuelve marcado; al revocarlo, deja de volver. Control negativo: ignorar el consentimiento hace fallar el contador. Recibo.
-- [ ] 3.7 Inyección (D16). Oráculo: el guion del Mock propone, tras leer el `README.md` hostil, `read` de `.env` (se rechaza con su motivo) y un `edit` del `Makefile` (en B2 se rechaza con `write_not_allowed`; en B3, la caja). Recibo.
-- [ ] 3.8 Filas SEC-01, 03, 04, 05 y 15 de `docs/security/sec-matrix.md`: añadir los tests de B1 y B2 sin cambiar ningún estado. Oráculo: `scripts/check_sec_matrix.py` pasa. Recibo.
-- [ ] 3.9 Demo B2: en la pantalla completa con el Mock: `/workspace <fixture>`, se ve en el panel, una pregunta que lee dos ficheros sola y el contador de envíos. PASS/FAIL/NOT RUN/BLOCKED, con el SHA y el log o vídeo.
+  Recibo (2026-11-28):
+  - `test_the_catalogue_names_the_two_tools_without_the_path`: **572 caracteres** de catálogo con la carpeta y sin lista local, de 8 000;
+  - `test_without_a_folder_there_is_no_workspace_server` y `test_a_plan_that_names_workspace_without_a_folder_is_server_not_allowed`;
+  - la política decide antes de tocar la carpeta (cinco llamadas `denied` sin fila en `workspace_events`): `test_the_policy_decides_before_the_folder_is_touched`;
+  - el hash de la lista ata la carpeta (otra carpeta da `list_changed`): `test_the_plan_binds_the_folder_it_was_read_with`;
+  - control negativo: las mutaciones 4, 5, 15 y 16 de 3.10.
+- [x] 3.5 Lecturas automáticas en `/plan` y en el bucle. Oráculo: con el Mock, un guion de dos vueltas (lee `src/app.py`, responde) corre sin caja, con `running plan:`, deja dos filas en `tool_calls` y respeta el tope de envío de A3. Control negativo: marcar `read` como no automática hace que se abra la caja. Recibo (2026-11-28):
+  - `test_plan_reads_two_files_by_rule_and_shows_them_only_here`: dos lecturas por regla, dos filas de `tool_calls` con el plan y el paso, y el Mock recibe solo la pregunta;
+  - `test_agent_lists_then_reads_then_answers`: tres vueltas (`list`, `read`, respuesta), sin caja; cada vuelta enviada es la mostrada y cabe en los topes de 3.1;
+  - `test_a_denied_file_stops_the_plan_with_its_reason_and_no_text` y `test_a_path_outside_the_pattern_refuses_the_plan_before_anything_runs` (`../`, `/`, un espacio, 65 caracteres: `argument_invalid` al leer el plan);
+  - control negativo: mutación 6 de 3.10 (con `auto_read` falso se abre la caja y el test falla).
+- [x] 3.6 Consentimiento por carpeta (D14). Oráculo: con un proveedor de test que no es el Mock y sin consentimiento, nada vuelve al proveedor (contador de envíos sin cambiar) y se ve `not sent: no consent for this folder`; con consentimiento, el resultado vuelve marcado; al revocarlo, deja de volver. Control negativo: ignorar el consentimiento hace fallar el contador. Recibo (2026-11-28):
+  - el proveedor de test es el Mock marcado como no sintético (`synthetic_content = False`), que hace lo mismo que un proveedor de fuera de la máquina;
+  - `test_without_consent_agent_sends_nothing_of_the_folder`: un envío (la pregunta) y el bucle `stopped (send_not_approved)`;
+  - `test_with_consent_the_results_go_after_the_loop_s_own_box`: dos cajas (la del consentimiento y la de A3-14) y el resultado marcado en el segundo envío;
+  - `test_a_revoked_consent_stops_sending_again`, `test_a_rejected_consent_grants_nothing`, `test_a_refusal_is_sent_without_consent_it_holds_no_file_text` y `test_the_consent_belongs_to_the_folder_not_to_its_name` (otra carpeta con la misma ruta no lo hereda);
+  - control negativo: las mutaciones 7 a 13 de 3.10.
+- [x] 3.7 Inyección (D16). Oráculo: el guion del Mock propone, tras leer el `README.md` hostil, `read` de `.env` (se rechaza con su motivo) y un `edit` del `Makefile` (en B2 se rechaza con `write_not_allowed`; en B3, la caja). Recibo (2026-11-28): `test_a_hostile_readme_can_only_propose_and_its_proposals_are_refused` y `test_a_hostile_file_reaches_the_model_marked_and_cannot_imitate_the_harness`. El `edit` se rechaza con **`tool_not_allowed`**, no con `write_not_allowed`: en B2 la herramienta no existe (B2-8). El `Makefile` queda igual (mismo SHA-256). Control negativo: mutación 18 de 3.10.
+- [x] 3.8 Filas SEC-01, 03, 04, 05 y 15 de `docs/security/sec-matrix.md`: añadir los tests de B1 y B2 sin cambiar ningún estado. Oráculo: `scripts/check_sec_matrix.py` pasa. Recibo (2026-11-28): `sec-matrix: PASS (15 rows, 229 tests)`, código 0. Ningún estado cambia. SEC-04 y SEC-05 ganan los requisitos «Rutas acotadas en un plan», «Carpeta suspendida si cambia», «Elegir la carpeta de trabajo», «Herramientas en el catálogo» y «Nombre reservado».
+- [x] 3.9 Demo B2: en la pantalla completa con el Mock: `/workspace <fixture>`, se ve en el panel, una pregunta que lee dos ficheros sola y el contador de envíos. PASS/FAIL/NOT RUN/BLOCKED, con el SHA y el log o vídeo. Recibo (2026-11-28, macOS): **PASS**.
+  - `uv run python scripts/demo_workspace.py` termina en `demo: PASS`, código 0. Los casos B2-a a B2-f usan el modo plano del guion de los tests con el Mock: el contador de envíos es el número de prompts que recibe;
+  - la pantalla completa la prueba `test_the_full_screen_shows_the_folder_and_the_reads` (Pilot, 100×30): el panel `Workspace`, `/plan` con dos lecturas sin caja y `/agent`;
+  - `uv run python scripts/demo_workspace.py --prepare DIR` prepara la carpeta sintética y el guion del Mock para probarlo a mano (runbook);
+  - sin navegador: este tramo no cambia código del proveedor ni del navegador, así que no se corrió la batería de Edge.
+- [x] 3.10 Mutaciones del tramo B2. Cada mutación se aplica a un fichero de producto y se restaura al momento; con cada una se corre `tests/unit/test_workspace_shell.py`.
+
+  Recibo (2026-11-28, macOS): **21 mutaciones, 0 supervivientes**.
+
+  **Primera pasada: 2 supervivientes**, de 22:
+  - quitar la comprobación de la raíz en cada llamada del servidor: era redundante, porque `paths.locate` ya la hace antes de nada. Se quitó del servidor, y la mutación con ella;
+  - no proteger el vault de la conversación cuando falta `HARNESS_VAULT_ROOT`: se mató con `test_the_conversation_s_own_vault_is_protected_without_the_variable`.
+
+  | # | Mutación | Test que falla (el primero) |
+  |---|---|---|
+  | 1 | aceptar una lista con un servidor `workspace` | `test_a_local_list_cannot_declare_a_server_named_workspace` |
+  | 2 | la carpeta sigue en otra sesión | `test_the_folder_does_not_follow_the_person_to_another_session` |
+  | 3 | sin `workspace_busy` | `test_the_folder_cannot_change_while_a_plan_is_in_course` |
+  | 4 | el patrón de la ruta pasa a `.*` | `test_the_catalogue_names_the_two_tools_without_the_path` |
+  | 5 | la ruta con 1 024 caracteres | `test_the_catalogue_names_the_two_tools_without_the_path` |
+  | 6 | `read` sin `auto_read` | `test_plan_reads_two_files_by_rule_and_shows_them_only_here` |
+  | 7 | `withhold` nunca retiene | `test_without_consent_agent_sends_nothing_of_the_folder` |
+  | 8 | el bucle no llama a `withhold` | `test_without_consent_agent_sends_nothing_of_the_folder` |
+  | 9 | ningún paso cuenta como contenido | `test_without_consent_agent_sends_nothing_of_the_folder` |
+  | 10 | el consentimiento no mira el proveedor | `test_the_consent_belongs_to_the_folder_not_to_its_name` |
+  | 11 | el HMAC de la carpeta sin su identidad | `test_the_consent_belongs_to_the_folder_not_to_its_name` |
+  | 12 | cualquier respuesta de la caja lo concede | `test_a_rejected_consent_grants_nothing` |
+  | 13 | `send off` no revoca | `test_a_revoked_consent_stops_sending_again` |
+  | 14 | sin suspensión | `test_a_folder_replaced_after_it_was_chosen_stays_suspended` |
+  | 15 | el hash de la lista sin la carpeta | `test_the_plan_binds_the_folder_it_was_read_with` |
+  | 16 | el servidor interno antes de la política | `test_the_policy_decides_before_the_folder_is_touched` |
+  | 17 | la auditoría sin el plan | `test_plan_reads_two_files_by_rule_and_shows_them_only_here` |
+  | 18 | las líneas del fichero sin `\| ` | `test_a_hostile_file_reaches_the_model_marked_and_cannot_imitate_the_harness` |
+  | 19 | el tope del listado por 10 | `test_a_long_listing_is_cut_at_its_bound` |
+  | 20 | el vault de la conversación sin proteger | `test_the_conversation_s_own_vault_is_protected_without_the_variable` |
+  | 21 | el panel sin la carpeta | `test_workspace_sets_shows_and_unsets_the_folder` |
 
 ## 4. B3 · Escrituras con diff y aprobación
 
@@ -242,10 +300,10 @@ Leyenda: **oráculo** = qué dice SÍ; **control negativo** = la mutación o el 
 
 ## 8. Windows (confirmación opcional, no puerta)
 
-- [ ] 8.1 Ejecutar en el PC de pruebas de Windows la batería sin navegador y `scripts/demo_workspace.py`. Recibo: resultado y SHA, o NOT RUN. **Tramo B1: NOT RUN** (2026-11-27). Órdenes, en PowerShell desde el repo:
+- [ ] 8.1 Ejecutar en el PC de pruebas de Windows la batería sin navegador y `scripts/demo_workspace.py`. Recibo: resultado y SHA, o NOT RUN. **Tramos B1 y B2: NOT RUN** (2026-11-27 y 2026-11-28). Órdenes, en PowerShell desde el repo:
 
   ```powershell
-  uv run pytest tests/unit/test_workspace_paths.py tests/unit/test_workspace_root.py tests/unit/test_workspace_rules.py tests/unit/test_workspace_output.py tests/unit/test_workspace_audit.py tests/security/test_workspace_confinement.py tests/integration/test_workspace_cli.py tests/unit/test_portability.py -rs
+  uv run pytest tests/unit/test_workspace_paths.py tests/unit/test_workspace_root.py tests/unit/test_workspace_rules.py tests/unit/test_workspace_output.py tests/unit/test_workspace_audit.py tests/security/test_workspace_confinement.py tests/integration/test_workspace_cli.py tests/unit/test_workspace_shell.py tests/unit/test_portability.py -rs
   uv run python scripts/demo_workspace.py
   ```
 

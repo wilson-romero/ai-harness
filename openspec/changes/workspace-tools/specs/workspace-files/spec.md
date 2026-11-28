@@ -145,6 +145,17 @@ Con una carpeta elegida, sus herramientas SHALL aparecer en el catálogo del pla
 - **WHEN** se envía una pregunta con la carpeta elegida
 - **THEN** el texto enviado no contiene la ruta absoluta de la carpeta
 
+### Requirement: Rutas acotadas en un plan
+La ruta que nombra el modelo en un plan SHALL ser un argumento acotado (un patrón y como mucho 64 caracteres), además de pasar el confinamiento, de modo que dentro de `/agent` las lecturas también corran por regla.
+
+#### Scenario: Una ruta fuera del patrón
+- **WHEN** el modelo propone `read` de `../fuera.txt`, de `a b.txt` o de una ruta de más de 64 caracteres
+- **THEN** el plan se rechaza con `argument_invalid` al leerlo y no se ejecuta nada
+
+#### Scenario: Leer y listar dentro de `/agent`
+- **WHEN** dentro de `/agent` el modelo propone un `list` y, en la vuelta siguiente, un `read`
+- **THEN** los dos corren sin caja, y cada resultado vuelve en la vuelta siguiente tal como se mostró
+
 ### Requirement: Nombre reservado
 El nombre de servidor `workspace` SHALL quedar reservado: una lista MCP local que declare un servidor con ese nombre SHALL rechazarse al cargar.
 
@@ -285,6 +296,10 @@ Con un proveedor distinto del Mock, el resultado de una lectura de la carpeta SH
 #### Scenario: Sin consentimiento
 - **WHEN** con un proveedor real y sin consentimiento, el modelo pide `read` de `app.py`
 - **THEN** la lectura se muestra a la persona, no se envía nada más al proveedor y se ve `not sent: no consent for this folder`
+
+#### Scenario: Consentimiento dado y revocado
+- **WHEN** la persona aprueba `/workspace send on` en su caja, pide un `/agent` que lee `app.py`, y después escribe `/workspace send off` y pide otro
+- **THEN** el primero envía la lectura tras la caja de su primera vuelta con resultados, y el segundo para con `not sent: no consent for this folder`; el consentimiento se guarda sin la ruta
 
 ### Requirement: El contenido de un fichero nunca aprueba
 Un texto dentro de un fichero de la carpeta SHALL tratarse como datos. SHALL NOT aprobar, cambiar un plan, elegir otra carpeta ni dibujar una línea o un botón del harness.

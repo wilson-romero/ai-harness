@@ -129,9 +129,11 @@ Una revisión de seguridad de `develop` (sobre `5af28ed`, con datos sintéticos 
     - el de la carpeta raíz: su identidad se comprueba en cada llamada.
 
     Pero no puede cerrar la ventana de las carpetas intermedias: `os.open` no admite `dir_fd` en Windows, así que no hay `openat` portable.
-  - **Windows.** En Windows no se ha ejecutado nada de este tramo (NOT RUN). Las uniones reales, `st_nlink` en NTFS, los nombres cortos 8.3, los flujos alternativos y las rutas largas se rechazan por regla y se prueban simulados en macOS.
+  - **Windows.** En Windows no se ha ejecutado nada de los tramos B1 y B2 (NOT RUN). Las uniones reales, `st_nlink` en NTFS, los nombres cortos 8.3, los flujos alternativos y las rutas largas se rechazan por regla y se prueban simulados en macOS.
+  - **Lo que vuelve al proveedor con el consentimiento dado (tramo B2).** Dentro de `/agent`, un fichero hostil de la carpeta puede convencer al modelo de leer otro fichero normal de ella y de mandar su contenido en la vuelta siguiente. Lo acotan el consentimiento por carpeta, las reglas fijas, el tope de 4 KiB por paso y que cada vuelta se muestra antes de salir, pero no se impide.
 - **Riesgo:**
   - un proceso local que ya tiene la cuenta de la persona podría hacer leer al harness un fichero de fuera de la carpeta. Ese proceso podría leerlo igualmente sin el harness;
+  - con el consentimiento dado, el texto de un fichero normal de la carpeta puede llegar al proveedor sin que la persona lo pidiera expresamente;
   - una diferencia de conducta del sistema en Windows que la simulación no reproduzca.
 - **Decisión:** aceptado. El atacante de este diseño es el contenido de la carpeta, no un proceso concurrente. Las órdenes para el PC de pruebas están en `docs/runbook/workspace-tools.md` («Windows») y en `openspec/changes/workspace-tools/tasks.md` 8.1 y 8.2.
 - **Dueño:** Wilson.

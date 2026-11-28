@@ -148,9 +148,9 @@ Lo que **no** garantiza:
 - **Lo que aún puede salir sin la caja**: los valores acotados que elige el modelo van como argumentos al servidor de esa lectura (qué proyecto de un `enum`, qué número de un rango, qué texto que cumple un `pattern`). Es un canal pequeño, no ninguno. Tú decides qué herramientas llevan `auto_read`, y el harness no juzga un `pattern`: `.*` con 64 caracteres deja pasar 64 caracteres cualesquiera.
 - Lo que el proveedor haga con los resultados que recibe es cosa suya. Con Copilot, salen de la máquina.
 
-## Carpeta de trabajo (`main.py workspace`, rama `feature/workspace-tools`, tramo B1)
+## Carpeta de trabajo (`main.py workspace` y `/workspace`, rama `feature/workspace-tools`, tramos B1 y B2)
 
-El harness lee ficheros de una carpeta que tú eliges con `--root`. En este tramo, solo desde la CLI y solo para leer: no hay orden en la conversación, ni plan, ni bucle, ni escrituras. Runbook: [`docs/runbook/workspace-tools.md`](docs/runbook/workspace-tools.md).
+El harness lee ficheros de una carpeta que tú eliges: con `--root` en cada orden `main.py workspace` (B1) o con `/workspace <ruta>` en la conversación (B2), que la ofrece a `/plan` y `/agent` como las herramientas `workspace.read` y `workspace.list`. Solo para leer: no hay escrituras. Runbook: [`docs/runbook/workspace-tools.md`](docs/runbook/workspace-tools.md).
 
 Lo que el harness garantiza:
 
@@ -175,12 +175,22 @@ Lo que el harness garantiza:
   - un binario, un fichero que no es UTF-8 o uno de más de 256 KiB.
 - **Cómo se muestra.** El texto del fichero sale tras `| `, con cada invisible o control escrito como `<U+XXXX>` y las credenciales enmascaradas. Una línea de un fichero no puede pasar por una del harness: las del harness van por stderr y nunca llevan texto del fichero.
 - **Qué se guarda.** Nada del fichero. La auditoría (`tool_calls` y `workspace_events`) guarda el motivo y la ruta solo como HMAC.
+- **En la conversación (B2):**
+  - la carpeta vale para la sesión en curso y vive solo en memoria: no se escribe en la base de datos, y otra sesión (o un `chat` nuevo) empieza sin carpeta. Sin carpeta, `workspace` no está en el catálogo y un plan que lo nombra se rechaza (`server_not_allowed`);
+  - el catálogo describe las dos herramientas con texto fijo del harness y nunca lleva la ruta de la carpeta ni un listado;
+  - las lecturas pasan por la misma política, el mismo hash de la lista (que ata la carpeta: otra carpeta entre leer y ejecutar el plan da `list_changed`) y la misma tabla `tool_calls` que una herramienta MCP;
+  - la ruta que escribe el modelo es un argumento acotado: como mucho 64 caracteres de `[A-Za-z0-9._-]` y `/`, sin `.` ni `..` como componente, y además pasa el confinamiento de arriba. Por eso dentro de `/agent` corren por regla, sin caja;
+  - si la carpeta se sustituye después de elegirla, se suspende (`workspace_changed`) hasta un `/workspace` nuevo, aunque vuelva la misma;
+  - **consentimiento de envío por carpeta:** con un proveedor que no es sintético, lo que devuelve una lectura de la carpeta solo vuelve al proveedor si diste `/workspace send on` para esa carpeta y ese proveedor, en su caja. Está apagado por defecto; `/workspace send off` lo revoca. Se guarda con un HMAC de la ruta y de la identidad de la carpeta, nunca con la ruta. Sin él, `/plan` solo te muestra el contenido a ti y `/agent` para sin enviar (`not sent: no consent for this folder`). Con él, la caja de `/agent` de la primera vuelta con resultados se sigue pidiendo en cada bucle. Un rechazo (el motivo, sin texto del fichero) sí vuelve. El Mock no lo necesita: su contenido no sale de la máquina.
 
 Lo que **no** garantiza:
 
 - **Secretos.** Un secreto con forma desconocida en un fichero normal se lee y se muestra.
 - **Carreras con otro proceso.** Un proceso con tu cuenta que cambie una carpeta intermedia por un enlace entre la comprobación y la apertura no siempre se detecta: no hay `openat` portable. El harness sí detecta el cambio del fichero mismo y de la carpeta raíz. Quien controla tu cuenta ya puede leer esos ficheros sin el harness (deuda conocida 1 y 15).
-- **Windows.** Ahí no se ha ejecutado (NOT RUN). Las uniones, los enlaces duros de NTFS, los nombres cortos y los flujos alternativos se rechazan por regla y se prueban simulados en macOS.
+- **Lo que un fichero hostil consigue con el consentimiento dado.** Dentro de `/agent`, un fichero puede convencer al modelo de leer otro fichero normal de la carpeta y de mandar su contenido al proveedor en la vuelta siguiente. Lo acotan las reglas fijas, el tope de lo que se envía por paso (4 KiB) y por vuelta, y que cada vuelta se muestra antes de salir. No se impide.
+- **La ruta como canal.** La ruta que el modelo elige es un canal pequeño (64 caracteres de un alfabeto corto) que solo llega al disco local y a la auditoría como HMAC: no sale de la máquina. El canal grande es el contenido devuelto, y ese pasa por el consentimiento.
+- **Nombres que un plan no alcanza.** Un fichero cuyo nombre lleva espacios, acentos u otros caracteres, o cuya ruta pasa de 64 caracteres, no se puede leer desde un plan en esta versión (sí con `main.py workspace read`).
+- **Windows.** Ahí no se ha ejecutado (NOT RUN), ni B1 ni B2. Las uniones, los enlaces duros de NTFS, los nombres cortos y los flujos alternativos se rechazan por regla y se prueban simulados en macOS.
 
 ## Matriz SEC y deuda conocida
 

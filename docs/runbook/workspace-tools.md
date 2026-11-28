@@ -1,6 +1,6 @@
-# Runbook: herramientas de la carpeta de trabajo (tramo B1)
+# Runbook: herramientas de la carpeta de trabajo (tramos B1 y B2)
 
-En el tramo B1, el harness lee ficheros de una **carpeta de trabajo** que tú eliges, y **solo desde la CLI**. Todavía no hay orden en la conversación, ni catálogo de plan, ni bucle, ni escrituras. Diseño: `openspec/changes/workspace-tools/design.md`.
+El harness lee ficheros de una **carpeta de trabajo** que tú eliges: desde la CLI (B1, `main.py workspace … --root`) y desde la conversación (B2, `/workspace`), donde `/plan` y `/agent` la leen con `workspace.read` y `workspace.list`. Todavía no hay escrituras. Diseño: `openspec/changes/workspace-tools/design.md`.
 
 ## Las órdenes
 
@@ -88,12 +88,39 @@ uv run python main.py workspace read README.md --root "$PWD"; echo "código $?"
 
 La demo completa, con todos los casos negativos, es `uv run python scripts/demo_workspace.py` y termina en `demo: PASS`.
 
+## En la conversación (tramo B2)
+
+```text
+/workspace                 muestra la carpeta de esta sesión y el consentimiento de envío
+/workspace <ruta>          la elige (absoluta; ~/ vale); las mismas reglas que --root
+/workspace off             la quita: workspace.read y workspace.list desaparecen del catálogo
+/workspace send on|off     da (con su caja) o revoca el consentimiento para este proveedor
+```
+
+- La carpeta vale para esta sesión y solo mientras dura el `chat`: no se guarda en la base de datos. `/new` y `/resume` empiezan sin carpeta. No se puede cambiar con un `/plan` o un `/agent` en marcha (`workspace_busy`).
+- Se ve en el panel lateral (`Workspace`) y en `/status` (`workspace: …, send: …`).
+- Con carpeta, el catálogo de `/plan` y `/agent` gana dos líneas fijas: `workspace.list(depth, path)` y `workspace.read(limit, offset, path)`. La ruta va relativa a la carpeta, con `/`, como mucho 64 caracteres de `A-Z a-z 0-9 . _ -`. Las dos son lecturas por regla: corren sin caja (salvo `/plan --box` o `HARNESS_AUTO_READ=off`).
+- **Consentimiento.** Con el Mock no hace falta. Con un proveedor que no es sintético, `/agent` no envía nada de la carpeta hasta `/workspace send on`, y para con `not sent: no consent for this folder`. Dado el consentimiento, la caja de la primera vuelta con resultados de cada `/agent` se sigue pidiendo. `/workspace send off` lo revoca.
+- Si la carpeta se sustituye por otra después de elegirla, queda suspendida (`workspace_changed`) hasta otro `/workspace`.
+
+Probarlo a mano con el Mock (zsh), sin red y en una carpeta temporal:
+
+```sh
+d="$(mktemp -d)"
+uv run python scripts/demo_workspace.py --prepare "$d"
+# copia y ejecuta la línea `HARNESS_DATA_DIR=… uv run python main.py chat` que imprime, y escribe:
+#   /workspace <la ruta que imprime>
+#   /plan ¿qué hace el módulo de demo?
+#   /agent dime ¿qué hace el módulo de demo?
+#   /status
+```
+
 ## Windows
 
 Es el mismo código, sin ramas por plataforma. En Windows queda **NOT RUN** hasta ejecutarlo en el PC de pruebas (`openspec/changes/workspace-tools/tasks.md` 8.1 y 8.2). Las órdenes, en PowerShell:
 
 ```powershell
-uv run pytest tests/unit/test_workspace_paths.py tests/unit/test_workspace_root.py tests/unit/test_workspace_rules.py tests/unit/test_workspace_output.py tests/unit/test_workspace_audit.py tests/security/test_workspace_confinement.py tests/integration/test_workspace_cli.py -rs
+uv run pytest tests/unit/test_workspace_paths.py tests/unit/test_workspace_root.py tests/unit/test_workspace_rules.py tests/unit/test_workspace_output.py tests/unit/test_workspace_audit.py tests/security/test_workspace_confinement.py tests/integration/test_workspace_cli.py tests/unit/test_workspace_shell.py -rs
 uv run python scripts/demo_workspace.py
 ```
 

@@ -49,7 +49,7 @@ Lo que hacen OpenCode, Claude Code y Codex con sus herramientas de ficheros est�
     5. no es la carpeta personal (`Path.home()` resuelta) ni la raíz de un sistema de ficheros (`path == Path(path.anchor)`). Una subcarpeta de la carpeta personal sí vale.
 
     La comparación usa `is_within` de `memory/paths.py` en los dos sentidos. Cada rechazo tiene un motivo estable: `not_absolute`, `link`, `not_a_directory`, `harness_repo`, `data_dir`, `vault`, `code_run_root`, `home`, `filesystem_root`.
-  - **Qué se guarda.** La ruta resuelta y su identidad (`st_dev`, `st_ino`) en una tabla nueva de la sesión. En cada uso se vuelve a hacer `lstat` de la raíz: si la identidad cambió o ahora es un enlace, la carpeta queda **suspendida** (`workspace_changed`) hasta un `/workspace` nuevo.
+  - **Qué se guarda.** ~~La ruta resuelta y su identidad (`st_dev`, `st_ino`) en una tabla nueva de la sesión.~~ **Revisado en B2 (2026-11-28, B2-1):** la ruta resuelta y su identidad viven solo en la memoria de la conversación; en la base de datos no se escribe la ruta. En cada uso se vuelve a hacer `lstat` de la raíz: si la identidad cambió o ahora es un enlace, la carpeta queda **suspendida** (`workspace_changed`) hasta un `/workspace` nuevo.
   - **Qué ve la persona:**
     - el panel lateral gana una línea `workspace: <ruta resuelta>` o `workspace: -`;
     - `/status` la repite junto con el consentimiento de envío (D14);
@@ -204,7 +204,7 @@ Lo que hacen OpenCode, Claude Code y Codex con sus herramientas de ficheros est�
   - `read`, `list`, `glob` y `grep` son `auto_read: true`. `write` y `edit` son `operation: write` y siempre necesitan una aprobación por diff (D10).
   - La persona no puede cambiar la tabla. Lo único que decide es si hay carpeta (D1) y si hay consentimiento de envío (D14).
   - Aparecen en el catálogo del plan como cualquier herramienta (`server: "workspace"`), con una `description` fija escrita por el harness, y solo si hay carpeta.
-  - El catálogo **no** incluye la ruta absoluta ni ningún listado. Dice solo: «a work folder is set; paths are relative to it; use `list` to see it».
+  - El catálogo **no** incluye la ruta absoluta ni ningún listado. ~~Dice solo: «a work folder is set; paths are relative to it; use `list` to see it».~~ **Revisado en B2 (B2-4):** lo dicen las dos descripciones fijas de las herramientas, sin una línea aparte.
 - **Por qué.**
   - code-mode, «Consecuencia para el esquema»: el plan ya admite un servidor que no es MCP, porque `server` y `tool` son nombres del catálogo.
   - Una tabla en código no la puede ampliar un fichero de la carpeta ni de la lista local.
@@ -570,6 +570,100 @@ El dueño contestó el 2026-11-27 y autorizó solo el tramo **B1**. Lo que sigue
 
   En todos los casos hay además una fila en `workspace_events` con el código exacto (o `ok`) y el HMAC de la ruta. La clave es la de `mcp-args.key`, con un dominio propio (`ai-harness/workspace-path/v1`). Las lecturas no dejan fila `running`: no tienen efecto que reconciliar.
 - **Impacto.** `harness/workspace/audit.py`; tests de `test_workspace_audit.py`.
+
+## Lo que enseñó el tramo B2 (2026-11-28)
+
+Medido sobre `develop` = `8a8afbd` (tarea 3.1): la marca de lectura por regla se llama `auto_read` (`ToolEntry.auto_read`); el modo de aprobación es `means = 'rule'` en `plan_runs`; lo que se envía tiene topes de 4 KiB por paso (`loop.STEP_SEND_MAX_BYTES`), 12 KiB de resultados por vuelta (`RESULTS_SEND_MAX_BYTES`) y 28 000 caracteres por vuelta (`TURN_SEND_MAX_CHARS`); los datos van entre `<<<RESULTADOS <marca>` y `RESULTADOS <marca>>>>`, cada línea tras `| `. Lo que dentro de `/agent` corre por regla es lo que además tiene todos los argumentos acotados (A3-12: `pattern` y `max_length` ≤ 64). Con un proveedor no sintético, la primera vuelta con resultados de cada bucle pide la caja (A3-14).
+
+### B2-1. La carpeta vive en la memoria de la conversación
+
+- **Qué.** `/workspace <ruta>` guarda en la conversación la raíz aceptada (`Root`: ruta resuelta, `st_dev`, `st_ino`) dentro de un `Folder` que también sabe si está suspendida. No hay tabla de carpeta por sesión. `/new`, `/resume` y un `chat` nuevo empiezan sin carpeta, y lo dicen. La auditoría (`workspace.folder`: `set`, `off` o el motivo del rechazo) guarda 16 caracteres del HMAC de la carpeta.
+- **Por qué.** La ruta es contenido de la persona (D7). Guardarla en claro para recordarla entre arranques contradice «la ruta solo como HMAC». Elegirla otra vez cuesta una línea y hace visible la decisión.
+- **Alternativas rechazadas.**
+  - La tabla de D1 con la ruta en claro: la ruta quedaría en SQLite.
+  - La tabla con la ruta cifrada: una clave más que gestionar para ahorrar una línea.
+- **Impacto.** D1 revisado en su sitio; `conversation._workspace`; `PanelState.workspace`; `/status`; test `test_the_folder_does_not_follow_the_person_to_another_session`.
+
+### B2-2. La ruta que elige el modelo cuenta como argumento acotado
+
+- **Qué.** `path` se declara `string` con `max_length` 64 y el patrón `\.?[A-Za-z0-9_][A-Za-z0-9._-]*(/\.?[A-Za-z0-9_][A-Za-z0-9._-]*)*`: componentes ASCII de letras, cifras, `.`, `_` y `-`, ninguno `.` ni `..`, `/` entre ellos. Así cumple la regla de A3-12 sin cambiarla, y dentro de `/agent` las lecturas corren por regla. `offset`, `limit` y `depth` son enteros con tope. El patrón va **además** del confinamiento de D2 y de las reglas de D3, que siguen decidiendo cada ruta: el patrón solo estrecha lo que el modelo puede pedir.
+- **Por qué (exfiltración).**
+  - A3-12 existe porque un argumento de texto libre puede llevar lo leído a un **servidor** (un proceso que puede tener red). Aquí el argumento no sale de la máquina: lo recibe el propio harness, que lo usa para abrir un fichero local y lo guarda solo como HMAC.
+  - Lo que el modelo elige es un canal pequeño: 64 caracteres de un alfabeto de 65 símbolos, que solo se ven en la pantalla y en la auditoría como hash.
+  - El canal grande es el **contenido** devuelto. Ese va al proveedor solo con el consentimiento por carpeta (B2-3), con la caja de la primera vuelta de cada bucle (A3-14) y acotado a 4 KiB por paso. Sin ellos, nada sale.
+- **Alternativas rechazadas.**
+  - Que las lecturas de ficheros vayan siempre a la caja dentro de `/agent`: un bucle de lectura pediría una caja por vuelta, sin proteger más, porque el riesgo es el contenido y ese ya tiene su consentimiento.
+  - Declarar la ruta con 1 024 caracteres (el tope de D2): sería texto libre, y la regla de A3-12 la mandaría a la caja.
+  - Admitir Unicode en el patrón: NFC, invisibles y confusables ya los rechaza D2, pero el patrón dejaría de ser legible en el catálogo.
+- **Límite que no se arregla en v1.** Un fichero con espacios, acentos u otros caracteres en el nombre, o con una ruta de más de 64 caracteres, no se puede leer desde un plan (sí con `main.py workspace read`). Decisión abierta 12.
+- **Impacto.** `harness/workspace/server.py` (`PATH_PATTERN`, `TOOLS`); tests `test_a_path_outside_the_pattern_refuses_the_plan_before_anything_runs` y `test_agent_lists_then_reads_then_answers`.
+
+### B2-3. El consentimiento de envío por carpeta
+
+- **Qué.**
+  - **Dónde vive.** Una tabla `workspace_consents (folder_hmac, provider, state, approval_hash, decided_at)` en la migración 011, que no ha salido de esta rama. `folder_hmac` es el HMAC (clave `mcp-args.key`, dominio `ai-harness/workspace-folder/v1`) de la ruta resuelta **y** de su identidad: otra carpeta con el mismo nombre no hereda el consentimiento.
+  - **Cómo se da.** `/workspace send on` abre la caja (botones en la pantalla completa, código tecleado en el modo plano) con el texto «file contents of <ruta> will be sent to <proveedor>», ligado al hash de una `Proposal` de alcance `workspace-tools.send-consent`. Se decide con `approvals.decide`; `ApprovalScreen`, `ApprovalButton` y `ProposalArea` no cambian. Rechazado, sin decidir o caducado: no se da y la auditoría lo dice.
+  - **Cómo se revoca.** `/workspace send off` deja la fila en `revoked`.
+  - **Qué hace.** En `/agent`, con un proveedor no sintético, antes de componer una vuelta con resultados el bucle pregunta a `PlanSetting.withhold`: si algún paso **completado** de `workspace` está en el informe y no hay consentimiento para esa carpeta y ese proveedor, se ve `not sent: no consent for this folder`, no se envía nada y el bucle termina `stopped (send_not_approved)`. Se comprueba en cada vuelta. Con consentimiento, la caja de A3-14 se sigue pidiendo una vez por bucle. Un paso rechazado (solo el motivo del harness) no necesita consentimiento. `/plan` nunca envía resultados: el contenido solo se muestra a la persona. El Mock no lo necesita.
+- **Por qué.**
+  - D14 y la decisión 6 del dueño: apagado por defecto, por carpeta, revocable.
+  - Se reutiliza `send_not_approved` de la 013: un motivo nuevo exigiría reconstruir `loop_runs` para ampliar su `CHECK`. La línea de la pantalla dice el motivo exacto.
+- **Alternativas rechazadas.**
+  - Un consentimiento por proveedor solamente: cubriría carpetas que nadie pensó.
+  - Pedirlo con la caja de A3-14: esa caja es por bucle y por texto, y se olvidaría en el siguiente bucle.
+  - Guardarlo en memoria: habría que darlo en cada `chat`, y la persona acabaría aprobando sin leer.
+- **Impacto.** `harness/workspace/session.py`, `PlanSetting.withhold`, `loop_flow._Loop._withhold`, `conversation._workspace_send`; tests de consentimiento de `tests/unit/test_workspace_shell.py`.
+
+### B2-4. El servidor interno en la vista de política
+
+- **Qué.**
+  - `config.InternalServer`: una clase base sin `command` (`tools`, `bound()`, `call()`), y `LoadedConfig.internal`, que se suma a `servers`. Lo que no es la vista de un `/plan` o un `/agent` (`mcp list`, `mcp call`, `main.py plan`) sigue sin servidores internos.
+  - `gateway.call_tool` decide la política igual y, si el servidor es interno, le pasa la llamada en vez de arrancar un proceso. El servidor escribe su fila de `tool_calls` con el plan y el paso, y la de `workspace_events`.
+  - `policy.entry_sha256` ata `bound()` = `{"internal": "workspace", "folder": <HMAC>}`: si la carpeta cambia entre leer y ejecutar el plan, el paso da `list_changed`.
+  - Una llamada que la política deniega antes del servidor (argumento fuera del patrón, tope, argumento no declarado) deja solo su fila `denied` de `tool_calls`, como cualquier llamada MCP. Lo que el servidor rechaza deja las dos filas de B1-5 y vuelve al plan como un fallo `tool_error` con el texto `refused: <motivo>: <detalle del harness>`.
+  - El catálogo dice la carpeta con las dos descripciones fijas de las herramientas (D6 revisado), 572 caracteres en total.
+- **Por qué.** Es lo mínimo para que el plan, el bucle y la auditoría traten igual al servidor interno, sin tocar el lector del plan.
+- **Alternativas rechazadas.** Una `ServerEntry` con un `command` ficticio: mentiría a `mcp list` y al hash de la lista.
+- **Impacto.** `config.py`, `gateway.py`, `plan_run.approval_header` (la línea `server:` dice que no se arranca nada); tests `test_the_policy_decides_before_the_folder_is_touched` y `test_the_plan_binds_the_folder_it_was_read_with`.
+
+### B2-5. Lo que el modelo recibe de una lectura
+
+- **Qué.** El texto de un paso es la línea del harness (`read: <ruta>, lines a-b of N, sha256 …` o `list: …`) y cada línea del fichero o nombre tras `| `. El bucle lo vuelve a limpiar, lo acota (4 KiB por paso, cabeza y cola) y antepone su propio `| `: el modelo ve `| |      4  def greet…`. El listado de un plan se corta a 16 KiB con su marca.
+- **Por qué.** Las reglas del bucle se aplican sin excepción: lo enviado es lo mostrado y se limpia después del corte (A3-16).
+- **Límite.** Si el texto de un paso pasa de 4 KiB, el modelo ve su cabeza y su cola, con la marca del corte: para leer el resto tiene que pedir rangos con `offset` y `limit`.
+
+### B2-6. Una carpeta sustituida queda suspendida
+
+- **Qué.** Si una llamada encuentra la raíz cambiada (`workspace_changed`), el `Folder` queda suspendido: las siguientes llamadas se rechazan igual aunque vuelva la misma carpeta, hasta un `/workspace` nuevo. El panel y `/workspace` lo dicen.
+- **Impacto.** Requisito «Carpeta suspendida si cambia»; test `test_a_folder_replaced_after_it_was_chosen_stays_suspended`.
+
+### B2-7. `workspace_busy` es una segunda capa
+
+- **Qué.** La conversación hace una sola acción a la vez: con una caja abierta, lo que se escribe es la respuesta de la caja, no una orden. Aun así, `/workspace` se rechaza con `workspace_busy` mientras corre un `/plan` o un `/agent`.
+- **Impacto.** Test `test_the_folder_cannot_change_while_a_plan_is_in_course`.
+
+### B2-8. Sin herramienta de escritura en B2
+
+- **Qué.** Un plan que pide `workspace.edit` se rechaza con `tool_not_allowed` al leerlo (no con `write_not_allowed`, como suponía la tarea 3.7): la herramienta no existe en la tabla. Llega en B3.
+
+### Decisiones abiertas del tramo B2
+
+12. **Nombres que un plan no alcanza** (B2-2).
+    - (a) el patrón ASCII de 64 caracteres (tomada en esta rama);
+    - (b) admitir también letras Unicode en NFC (`\w`), con el mismo tope;
+    - (c) subir el tope a 128 y aceptar que dentro de `/agent` esas lecturas vayan a la caja.
+
+    **Recomiendo (a)** para la primera versión que el dueño prueba: es legible en el catálogo y basta para el fixture y para un repo de código normal; (b) cuando una carpeta real lo pida.
+13. **Dónde vive la carpeta** (B2-1).
+    - (a) solo en memoria, por `chat` (tomada);
+    - (b) recordarla por sesión con su HMAC y pedir la ruta otra vez al reanudar, para comprobar que es la misma.
+
+    **Recomiendo (a)**: más simple, y no guarda nada de la ruta.
+14. **El consentimiento dentro de `/plan`.**
+    - (a) `/plan` no lo pide, porque no envía resultados (tomada);
+    - (b) avisar en `/plan` de que, sin consentimiento, `/agent` no enviará.
+
+    **Recomiendo (a)**, con el aviso que ya da `/workspace` (`send: off for …`).
 
 ## Referencias: cómo lo hacen OpenCode, Claude Code y Codex
 
