@@ -262,11 +262,40 @@ Wilson ejecutó `develop` en Windows 11 con Edge. En la batería `-m edge` fall�
   - Se mantiene la clasificación. El mensaje conserva siempre la primera línea de Edge, con `<profile>` en lugar de la ruta. En el caso del cierre con artefacto dice además que la causa puede ser un bloqueo de un Edge que se colgó.
   - Oráculo: `test_in_use_by_an_immediate_close_keeps_edges_message_and_names_a_stale_lock` (`lockfile` y `SingletonLock`) y `test_in_use_by_a_named_singleton_keeps_edges_message`.
   - Recibo (2026-11-27, macOS): antes, 3 failed; después, `test_edge_launch_errors.py` → 14 passed.
-- [ ] 9.2 Confirmación en Windows (no es puerta), en PowerShell, sobre la rama: `uv run pytest -m edge tests/browser/test_edge_launcher.py -v -s`.
+- [x] 9.2 Confirmación en Windows (no es puerta), en PowerShell, sobre la rama: `uv run pytest -m edge tests/browser/test_edge_launcher.py -v -s`.
   - Tienen que pasar `test_profile_open_in_another_edge_is_reported_as_in_use` y `test_a_held_profile_carries_a_lock_artefact`.
   - Hay que pegar la línea `lock artefacts while open: [...]`; se espera `lockfile`.
   - Si el primero falla, pegar el mensaje entero de `BrowserLaunchFailed` (sin rutas: el lanzador ya pone `<profile>`).
-  - Estado: **NOT RUN**.
+  - Estado: **PASS** sobre `develop` = `a9c51fe` (2026-11-27, Windows 11): el perfil en uso se informa bien y el test imprime `lock artefacts while open: ['lockfile']`, la premisa de 9.1.
+
+## 10. Tercera ejecución en Windows (2026-11-27, `develop` = `a9c51fe`)
+
+Wilson ejecutó `develop` en Windows 11 con Edge: 188 pasados y 1 fallo. `tests/browser/test_copilot_mode.py::test_a_history_that_arrives_while_choosing_does_not_block[deep-auto]` (de `response-mode`) falló en la batería completa en su **primera** pregunta con «the Copilot page was not ready in time (HARNESS_COPILOT_READY_TIMEOUT_S is 60 s)». Solo, pasan los dos casos en 31 s. Va aquí porque lo que cambia es la espera de la página del proveedor. Rama `bugfix/windows-parity-3`.
+
+- [x] 10.1 Investigado; **causa sin confirmar**. El fallo se hace diagnosticable.
+  - Aislamiento, leído en los fixtures:
+    - cada test tiene su `SyntheticCopilot`, con un puerto que da el sistema (`("127.0.0.1", 0)`), su `tmp_path` con su perfil (`edge-profile`) y su `HARNESS_DATA_DIR`;
+    - el bloqueo del navegador vive en ese directorio de datos;
+    - la primera pregunta de los dos casos es la misma (`modes=menu`, sin opciones de historia): el orden de los casos no cambia lo que ve la primera pregunta.
+    No hay perfil, puerto ni servidor compartidos entre tests.
+  - Lo que el mensaje no decía: en este test `HARNESS_REQUEST_TIMEOUT_S` es 40 y el proveedor guarda `min(SHUTDOWN_S, 25 %)` = 10 s para cerrar Edge. La espera de la página acaba, pues, como mucho 30 s después de empezar la pregunta, y ese plazo cuenta también la espera del bloqueo y el arranque de Edge con un perfil nuevo. Los «60 s» del mensaje no se pudieron esperar nunca. La hipótesis más probable es carga: un arranque de Edge muy lento en Windows en mitad de la batería. No está medida.
+  - Intento de reproducirlo en macOS (2026-11-27, macOS arm64, Edge instalado), sin un solo fallo:
+    - 4 copias en paralelo de `tests/browser/test_copilot_mode.py`: 4 × 23 passed, de 141 a 165 s;
+    - dos rondas de 8 copias en paralelo de `-k "history or set_and_confirmed"` con 4 procesos que ocupan una CPU cada uno: 16 × 4 passed, de 33 a 38 s;
+    - después, ningún Edge con un perfil de `pytest-of-…` seguía vivo.
+  - Hecho (`harness/providers/copilot_web.py`, `_Turn`): si la espera de la página vence, el mensaje añade solo estructura, nunca texto de la página:
+    - cuánto se esperó y cuánto pasó desde que empezó la pregunta;
+    - qué plazo la cortó: `HARNESS_COPILOT_READY_TIMEOUT_S`, o `HARNESS_REQUEST_TIMEOUT_S, which counts the start of Edge`;
+    - la dirección sin la consulta, el estado clasificado, cuántos elementos casan con el localizador del editor y si está visible y habilitado, y cuántos turnos del usuario hay.
+    No se sube ningún plazo.
+  - Oráculo, en `tests/browser/test_copilot_provider.py`:
+    - `test_page_that_does_not_load_keeps_the_session` comprueba ahora el detalle: `page http://127.0.0.1:<puerto>/c/`, sin `ready_ms`, `editor 1 matched, not visible`, `1 user turns`, `ended by HARNESS_COPILOT_READY_TIMEOUT_S`;
+    - `test_a_readiness_ended_by_the_request_deadline_says_so` (nuevo): con `HARNESS_REQUEST_TIMEOUT_S=8`, el mensaje sigue diciendo `is 60 s` pero añade `ended by HARNESS_REQUEST_TIMEOUT_S, which counts the start of Edge`.
+  - Recibo (2026-11-27, macOS):
+    - antes del cambio, el primero falla (el mensaje acababa en `nothing was sent`); con el cambio, los dos pasan;
+    - control negativo (mutante: el plazo nombrado siempre `HARNESS_COPILOT_READY_TIMEOUT_S`): 1 failed, el nuevo; restaurado, pasa.
+  - Líneas tocadas en el fichero compartido con `feature/copilot-turn-speed`: el import de `address`, una línea en `_Turn.__init__` (`self.started`), dos en `wait_ready` (`waited_since` y el final del mensaje) y el método nuevo `not_ready_seen`, justo antes de `settle`.
+- [ ] 10.2 Confirmación en Windows (no es puerta), en PowerShell, sobre la rama: la batería `uv run pytest -m edge` completa. Si vuelve a fallar un «not ready in time», pegar la línea entera del error: el detalle no lleva texto de la página, y la dirección es la del servidor sintético local. Con ella se distingue un arranque lento (`ended by HARNESS_REQUEST_TIMEOUT_S` con muchos segundos desde el inicio de la pregunta y pocos de espera) de una página que no llegó a mostrar el editor (`editor 0 matched`). Además, `uv run pytest -m edge tests/browser/test_copilot_provider.py -k "not_load or readiness_ended" -v`: pasan los dos. Estado: **NOT RUN**.
 
 ## Workflow follow-up
 
