@@ -36,6 +36,15 @@ class CallRow:
     call_id: str
 
 
+@dataclass(frozen=True)
+class PlanLink:
+    """The plan a call is a step of (code-mode D10): its id and the step's position, 1 to 10.
+    A call of `mcp call` has none, and its row keeps both columns NULL."""
+
+    plan_id: str
+    position: int
+
+
 def new_call_id() -> str:
     return str(uuid7())
 
@@ -114,16 +123,18 @@ def record_denied(
     canonical_args: bytes,
     args_bytes: int,
     key: bytes,
+    plan: PlanLink | None = None,
 ) -> CallRow:
     call_id = new_call_id()
     with transaction(conn):
         conn.execute(
             "INSERT INTO tool_calls (call_id, server, tool, operation, decision, reason, "
-            "args_hmac, args_bytes, status, created_at, finished_at) "
-            "VALUES (?, ?, ?, ?, 'denied', ?, ?, ?, 'denied', ?, ?)",
+            "args_hmac, args_bytes, status, created_at, finished_at, plan_id, plan_step) "
+            "VALUES (?, ?, ?, ?, 'denied', ?, ?, ?, 'denied', ?, ?, ?, ?)",
             (
                 call_id, stored_name(server), stored_name(tool), operation, reason,
                 _digest(key, canonical_args), args_bytes, utc_now(), utc_now(),
+                *_link(plan),
             ),
         )
     return CallRow(call_id)
@@ -131,18 +142,18 @@ def record_denied(
 
 def record_running(
     conn: sqlite3.Connection, call_id: str, server: str, tool: str, operation: str,
-    canonical_args: bytes, key: bytes,
+    canonical_args: bytes, key: bytes, plan: PlanLink | None = None,
 ) -> CallRow:
     """Committed before the server is started, so a crash leaves a `running` row behind. The
     caller already holds `call_lock(data_dir, call_id)`."""
     with transaction(conn):
         conn.execute(
             "INSERT INTO tool_calls (call_id, server, tool, operation, decision, reason, "
-            "args_hmac, args_bytes, status, created_at) "
-            "VALUES (?, ?, ?, ?, 'allowed', 'allowed', ?, ?, 'running', ?)",
+            "args_hmac, args_bytes, status, created_at, plan_id, plan_step) "
+            "VALUES (?, ?, ?, ?, 'allowed', 'allowed', ?, ?, 'running', ?, ?, ?)",
             (
                 call_id, stored_name(server), stored_name(tool), operation,
-                _digest(key, canonical_args), len(canonical_args), utc_now(),
+                _digest(key, canonical_args), len(canonical_args), utc_now(), *_link(plan),
             ),
         )
     return CallRow(call_id)
@@ -219,6 +230,10 @@ def forget_lock(data_dir: Path, call_id: str) -> None:
 
 def _digest(key: bytes, data: bytes) -> str | None:
     return hmac.new(key, data, hashlib.sha256).hexdigest() if data else None
+
+
+def _link(plan: PlanLink | None) -> tuple[str | None, int | None]:
+    return (None, None) if plan is None else (plan.plan_id, plan.position)
 
 
 def _flag(value: bool | None) -> int | None:

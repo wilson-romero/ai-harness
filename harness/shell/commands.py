@@ -43,6 +43,9 @@ class CommandSpec:
     positional: tuple[str, ...] = ()  # what each positional takes; the last one repeats
     options: tuple[Option, ...] = ()
     short: str = ""  # the short form, for /help
+    # Typed in full only: no start of the name stands for it (code-mode D9: a plan is asked
+    # only when the person writes `/plan`). Completion still offers it.
+    full_name_only: bool = False
 
     @property
     def takes_arguments(self) -> bool:
@@ -74,6 +77,9 @@ TABLE: tuple[CommandSpec, ...] = (
     CommandSpec("file", 1, 1, "/file PATH",
                 "attach a text file to the next question (it is never stored)",
                 positional=(PATH,)),
+    CommandSpec("plan", 1, None, "/plan QUESTION",
+                "ask for a plan of reads from the MCP list; you approve it, then it runs",
+                positional=(TEXT,), full_name_only=True),
     CommandSpec("mode", 0, 1, f"/mode [{'|'.join(MODES)}]",
                 "the response mode of this session (nothing is sent)", positional=(MODE,)),
     CommandSpec("exit", 0, 0, "/exit", "leave (end of input leaves too)"),
@@ -86,7 +92,7 @@ HELP_HEAD = ("Commands (a line that starts with / is never sent to the provider;
              "with // to ask\na question that begins with /):")
 HELP_TAIL = """\
 Short forms: the start of a command's name is enough when only one command starts so (/sk is
-/skill); the full command is shown (running: ...) before it runs.
+/skill); the full command is shown (running: ...) before it runs. /plan has no short form.
 In the full screen, / opens a list of the commands and their arguments: tab or the arrows and
 enter complete, esc closes it; nothing is sent until enter is pressed with the list closed.
 Ctrl+C interrupts a question in progress; it is never resent. Ctrl+C at the approval prompt
@@ -113,8 +119,11 @@ def names_starting(start: str) -> list[str]:
 
 
 def resolve_name(word: str) -> str | None:
-    """The command `word` names: itself, or the only command whose name starts with it."""
+    """The command `word` names: itself, or the only command whose name starts with it,
+    unless that command is typed in full only (`full_name_only`)."""
     if word in BY_NAME:
         return word
     found = names_starting(word) if word else []
-    return found[0] if len(found) == 1 else None
+    if len(found) == 1 and not BY_NAME[found[0]].full_name_only:
+        return found[0]
+    return None

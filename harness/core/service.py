@@ -64,15 +64,22 @@ def is_valid_unicode(text: str) -> bool:
 REMOTE_REF = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
+CONCISE_NOTICE_NAME = "the concise-answer notice"
+PLAN_NOTICE_NAME = "the plan instructions and catalogue"  # code-mode D8
+
+
 def _own_share(sent_text: str, prompt: str, context: ProjectContext | None,
-               notice: str | None) -> str:
+               notice: str | None, notice_name: str = CONCISE_NOTICE_NAME) -> str:
     """How much of an over-long prompt is the person's and how much the harness's own, so the
     size error does not blame the question for the notice and the memory block."""
-    own = [name for name, present in (("the concise-answer notice", notice is not None),
+    own = [name for name, present in ((notice_name, notice is not None),
                                       ("the project memory", context is not None)) if present]
     if not own:
         return f"All {len(sent_text)} characters are your text"
-    hint = " (HARNESS_CONCISE_ANSWERS=off removes the notice)" if notice is not None else ""
+    hint = (" (HARNESS_CONCISE_ANSWERS=off removes the notice)"
+            if notice is not None and notice_name == CONCISE_NOTICE_NAME else "")
+    if notice is not None and notice_name == PLAN_NOTICE_NAME:
+        hint = f" ({notice_name}: {len(notice)} characters)"
     return (f"Your text is {len(prompt)} characters; the other {len(sent_text) - len(prompt)} "
             f"are the harness's own: {' and '.join(own)}{hint}")
 
@@ -383,6 +390,36 @@ class SessionService:
         return await self._ask_locked(session.session_id, provider, sent, context,
                                       stored_text=prompt, notice=self._answer_notice)
 
+    async def ask_plan(
+        self,
+        session_id: UUID,
+        provider: LLMProvider,
+        question: str,
+        instructions: str,
+        context: ProjectContext | None = None,
+        *,
+        attachment: str | None = None,
+        stored_text: str,
+    ) -> LLMResponse:
+        """A `/plan` question (code-mode D8) from a caller that holds the session: `ask_taken`
+        with the harness's plan instructions in the place of the answer notice (the answer
+        style never applies to a plan). Same checks, states, deadline, size check of the whole
+        text before anything is recorded, and no resend. Only `stored_text` is ever stored,
+        and only when the provider's content is synthetic."""
+        session = self._require_session(str(session_id))
+        if not question.strip():
+            raise InvalidInput("the question of /plan must not be empty")
+        if not is_valid_unicode(question) or (
+            attachment is not None and not is_valid_unicode(attachment)
+        ):
+            raise InvalidInput("the prompt is not valid Unicode text (it has a lone surrogate)")
+        if context is not None:
+            self._check_project(session, context.project)
+        sent = question if attachment is None else f"{attachment}\n\n{question}"
+        return await self._ask_locked(session.session_id, provider, sent, context,
+                                      stored_text=stored_text, notice=instructions,
+                                      notice_name=PLAN_NOTICE_NAME)
+
     def require_session(self, raw_session_id: str) -> Session:
         return self._require_session(raw_session_id)
 
@@ -420,6 +457,7 @@ class SessionService:
         stored_text: str | None = None,
         timeout_s: float | None = None,
         notice: str | None = None,
+        notice_name: str = CONCISE_NOTICE_NAME,
         set_mode: ResponseMode | None = None,
     ) -> LLMResponse:
         # Read under the session lock: nobody else can change the session until it is released.
@@ -447,7 +485,9 @@ class SessionService:
             try:
                 check(sent_text)  # configuration, measurement, size: before anything is recorded
             except PromptTooLong as exc:
-                raise PromptTooLong(f"{exc}. {_own_share(sent_text, prompt, context, notice)}") from None
+                raise PromptTooLong(f"{exc}. "
+                                    f"{_own_share(sent_text, prompt, context, notice, notice_name)}"
+                                    ) from None
         check_mode(provider, mode)  # a mode the provider cannot set: refused, nothing recorded
         if set_mode is not None:
             self.set_mode(session_id, provider, set_mode)

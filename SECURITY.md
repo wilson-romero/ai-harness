@@ -112,6 +112,18 @@ Lo que **no** garantiza:
 - La lista local se rechaza si otro usuario, el grupo u otros pueden escribirla en macOS y Linux. En Windows no se comprueban las ACL.
 - La marca de recursión (`AI_HARNESS_MCP_CHILD`) evita encadenamientos accidentales. No detiene a un servidor malicioso que la borre.
 
+### Planes de lectura (`/plan`, rama `feature/code-mode-plan`)
+
+Lo que el harness garantiza:
+
+- Solo la respuesta a un `/plan` escrito entero se lee como plan. Una respuesta normal con un plan dentro es texto.
+- Ningún paso arranca nada antes de una aprobación de una persona en una terminal interactiva. Un Ctrl+C en el aviso del código deja el plan sin aprobar aunque después se teclee el código. La aprobación está ligada al hash del plan canónico (que incluye el nonce de la pregunta), al de su caja, a la sesión y a la solicitud; caduca y vale una vez. Si cambia un byte de lo ejecutado, de lo registrado o de lo mostrado, se deniega.
+- Cada paso pasa por la pasarela de `mcp call`, que decide otra vez la política al ejecutar. Un plan nunca llama a una herramienta `write`.
+- Ningún texto del modelo ni de una herramienta aprueba, cambia el plan o dibuja una línea del harness: llegan siempre como texto ajeno, marcado.
+- Una sola pregunta por `/plan`: los resultados no vuelven al proveedor.
+
+Lo que **no** garantiza: que un modelo real proponga el plan que la pregunta necesita, ni que una lectura permitida sea inocua para tus datos. Tampoco ata la orden que arranca cada servidor: sale de tu lista local al ejecutar y no entra en el hash; la caja lo dice con una línea por servidor (atarla es un requisito de A2, en `openspec/changes/code-mode/design.md`). El plan solo lee lo que tu lista permite; lo que el servidor haga con esa lectura es cosa del servidor.
+
 ## Matriz SEC y deuda conocida
 
 Qué propiedad de seguridad (SEC-01..SEC-15) prueba qué test, con su control negativo y sus límites, está en [`docs/security/sec-matrix.md`](docs/security/sec-matrix.md); `scripts/verify.sh` comprueba que lo que cita existe. Lo que no se hace o no se prueba, con su decisión, está en [`docs/security/known-debt.md`](docs/security/known-debt.md).

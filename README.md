@@ -596,6 +596,18 @@ Límite: un proceso que el servidor lance en **otra sesión o grupo** (`setsid`,
 - Una llamada `running` cuyo comando ya no existe (se cortó la luz, se mató el proceso) se marca `failed`/`interrupted` en el siguiente `mcp call`. "Ya no existe" lo dice un bloqueo que el comando mantiene mientras vive, no la antigüedad de la fila.
 - Todo lo que se imprime (resultado, descripciones, nombres y errores del servidor) sale sin caracteres de control, de formato ni secuencias de escape. Las credenciales conocidas salen como `[REDACTED:<tipo>]`. Imágenes y audio se sustituyen por `[<tipo> withheld: N bytes of base64]`, y los recursos por `[<tipo> withheld]`.
 
+### Un plan de lecturas: `/plan`
+
+En la rama `feature/code-mode-plan` (sin merge, 2026-11-27; `openspec/changes/code-mode/`, tramo 2). En la conversación escribes `/plan <pregunta>`; fuera de ella, `uv run python main.py plan SESSION_ID "<pregunta>"`, que necesita una terminal interactiva y, sin ella, no envía nada. `/plan` se escribe entero: `/pla` o `/p` no lo abren.
+
+1. El harness manda **una** pregunta: primero sus instrucciones (la gramática del plan, un ejemplo y un nonce nuevo), después el catálogo de las herramientas `read` de tu lista local (una línea cada una, con los argumentos declarados y la `description` que tú escribas, una línea de 120 caracteres como mucho), la memoria del proyecto como datos y tu pregunta. Nada de lo que dice un servidor entra en el catálogo. `/context` muestra ese bloque. Si no cabe en el límite del proveedor, no se envía nada.
+2. Si la respuesta no trae un bloque `json` con un plan, es la respuesta y no pasa nada más. Si lo trae y no es válido (una escritura, una herramienta o un servidor fuera de la lista, dos bloques, otro nonce, un campo desconocido…), se dice el motivo y no se ejecuta nada; nunca se vuelve a preguntar solo. Una respuesta incierta, fallida o truncada no se lee.
+3. Si el plan es válido, la caja de aprobación lo muestra paso a paso (servidor, herramienta, argumentos canónicos, decisión de la política y qué lee). Una línea por servidor recuerda que la orden que lo arranca sale de tu lista local y no forma parte de lo aprobado. Solo se ejecuta el plan de la caja: lo que la respuesta pinte encima no cuenta. Se aprueba con el botón en la pantalla completa y con el código tecleado en `--plain` y en la CLI; Ctrl+C en el aviso del código no aprueba nada, aunque después se teclee el código (la CLI sale con 130). La aprobación caduca (`HARNESS_APPROVAL_TTL_S`), vale una vez y solo para ese plan, esa pregunta y esa sesión.
+4. Los pasos se ejecutan en orden por la misma pasarela que `mcp call`, con la política decidida otra vez en ese momento. El primero que falla detiene el plan. El plan entero tiene un plazo (la suma de los plazos de arranque y de llamada de sus pasos más 10 s, 300 s como mucho; así un paso que agota el suyo termina como `timeout` de ese paso) y Ctrl+C lo para, también a mitad de un paso. Un plan parado no se vuelve a ejecutar.
+5. Cada resultado se muestra como texto de fuera del harness, saneado (en la CLI, por stdout y con cada línea tras `| `, como en `mcp call`; la respuesta del modelo también), con las credenciales enmascaradas y 256 KiB como mucho entre todos. **Solo lo ves tú: no vuelve al proveedor.**
+
+Se guarda una fila por plan en `plan_runs` (su hash, el de la aprobación, el estado, el paso donde paró y cómo se aprobó) y, en `tool_calls`, cada paso con el `plan_id` y su posición. Como en `mcp call`, sin argumentos ni resultados.
+
 ## Configuración
 
 Por variables de entorno (ver `.env.example`):

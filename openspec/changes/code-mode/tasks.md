@@ -161,31 +161,214 @@ Tramo 1 (este commit): lector del plan como función pura, sin nada conectado. L
 
 Empieza cuando estén en `develop` la tabla de órdenes (`harness/shell/commands.py`), el espaciado de toda la interfaz, el pintado de respuestas y `/mode` (design, «Dependencias del tramo 2»).
 
-- [ ] 4.1 Catálogo desde la lista local (D8): una línea por herramienta `read`, sin texto del servidor.
-  - Oráculo: test de bytes exactos; un servidor con una descripción hostil no cambia el catálogo; `/context` muestra lo que se enviaría; un catálogo que no cabe en 32 000 no envía nada.
-- [ ] 4.2 Prompt de `/plan` con la gramática, el ejemplo y un nonce nuevo por pregunta (D15).
+Hecho en `feature/code-mode-plan`, desde `develop` = `28e8f81` (2026-11-27). `/mode` no estaba mergeado: `/plan` se construyó sin él, y lo que se aprendió está en design, «Lo que enseñó el tramo 2» (T2-1 a T2-8).
+
+- [x] 4.1 Catálogo desde la lista local (D8): una línea por herramienta `read`, sin texto del servidor.
+  - Oráculo: test de bytes exactos; un servidor con una descripción hostil no cambia el catálogo; `/context` muestra lo que se enviaría; un catálogo que no cabe no envía nada.
+  - Cambio respecto al oráculo: el catálogo tiene su propio tope (64 herramientas, 8 000 caracteres) y además cuenta en el `check` del proveedor (T2-1).
+  - Recibo: `tests/unit/test_mcp_plan_prompt.py`, 7 passed. Ahí están los bytes exactos, los modos `forge-output` y `destructive` del servidor, `description` con salto de línea, ESC, borde o invisible rechazada, y 65 herramientas o 64×120 caracteres rechazados con el control en 64. También `test_shell_plan.py::test_context_shows_what_a_plan_question_sends_first` y `::test_a_prompt_over_the_provider_limit_records_nothing` (0 solicitudes, 0 envíos).
+- [x] 4.2 Prompt de `/plan` con la gramática, el ejemplo y un nonce nuevo por pregunta (D15).
   - Oráculo: dos preguntas, dos nonces; el Mock recibe el nonce dentro del cuerpo.
-- [ ] 4.3 Extraer la llamada de `_call` (D10) sin cambiar `mcp call`.
+  - Recibo: `test_shell_plan.py::test_each_plan_question_gets_its_own_nonce_inside_the_harness_block`: el prompt empieza por el bloque del harness, acaba en la pregunta y lleva el nonce dos veces (regla y ejemplo); no ofrece `set_project_metadata`. El Mock sustituye `{{plan_nonce}}` por el nonce del prompt, para poder guionizar un plan válido.
+- [x] 4.3 Extraer la llamada de `_call` (D10) sin cambiar `mcp call`.
   - Oráculo: `tests/unit/test_mcp_*` e `tests/integration` de MCP sin tocar pasan.
-- [ ] 4.4 Migración numerada: `plan_id` y posición en `tool_calls`, más una fila del plan con su hash, su estado y sus límites. SQL literal con `?`.
+  - Recibo: `harness/mcp/gateway.py` (`call_tool`, `CallReport`, `server_log`); `_call` imprime lo mismo con `_finish`. El log del servidor se sigue creando solo si la llamada se permite (`errlog` perezoso). Ningún test de MCP se tocó, y pasan dentro de la tanda de 4.10.
+- [x] 4.4 Migración numerada: `plan_id` y posición en `tool_calls`, más una fila del plan con su hash, su estado y sus límites. SQL literal con `?`.
   - Oráculo: `tests/unit/test_sql_literals.py`; un `SELECT` con N filas del mismo `plan_id`; las filas antiguas, intactas.
-- [ ] 4.5 Aprobación (D7, D9): `Proposal` con las líneas del plan y la decisión por paso; botón en la pantalla completa, código en plano y CLI.
+  - Recibo: `009_plan_runs.sql`, porque la 008 es de `response-mode` (T2-4).
+    - `test_shell_plan.py::test_a_plan_approved_with_the_code_runs_its_reads_and_shows_them`: dos filas con un solo `plan_id` y `plan_step` 1 y 2.
+    - Para la tabla nueva y la versión 9 se tocaron las listas de `tests/unit/test_storage.py` y `tests/security/test_sql_values.py`; `test_migration_007_…` compara ahora solo el primer elemento.
+    - `test_sql_literals.py` pasa.
+- [x] 4.5 Aprobación (D7, D9): `Proposal` con las líneas del plan y la decisión por paso; botón en la pantalla completa, código en plano y CLI.
   - Oráculo: un byte distinto deniega; una pulsación para otro hash no ejecuta; uso único y caducidad.
   - Control negativo: la pulsación con otro hash.
   - La caja dice dos cosas (D9, revisión de `38683ac`): que solo se ejecuta el plan canónico de la caja, no lo que se ve en la respuesta pintada, y qué leerá cada paso.
   - Oráculo: test de las líneas de la cabecera.
-- [ ] 4.5b `read_plan` se llama solo sobre la respuesta a `/plan` (D9).
+  - Recibo, en `tests/unit/test_mcp_plan_run.py` (11 passed). Cada test cambia una sola cosa justo antes del ejecutor, y `starts.log` queda vacío:
+    - lo ejecutado: `test_changed_what_runs_refuses`;
+    - lo hasheado: `test_changed_what_was_hashed_refuses`;
+    - lo mostrado: `test_changed_what_was_shown_refuses`;
+    - otra solicitud: `test_an_approval_never_runs_the_plan_for_another_request`;
+    - otro `plan_id` con el hash de este: `test_an_approval_never_runs_another_plan_with_its_hash`;
+    - dos usos: `test_an_approval_runs_once`;
+    - caducidad al ejecutar: `test_an_approval_that_expires_before_the_run_runs_nothing`;
+    - nonce, sesión y solicitud en el hash: `test_the_proposal_binds_the_nonce_session_and_request`.
+  - Recibo de la conversación: `test_shell_plan.py`, con «reject» exigido, `n` sin la palabra queda indeciso, Ctrl+C y tres códigos erróneos, respuesta tras caducar y terminal no interactiva.
+  - Recibo de la pantalla completa: `tests/unit/test_shell_tui_plan.py`, 4 passed. Tab y Enter tres veces ejecutan una vez (`means = button`), Reject pide confirmación y Ctrl+C no ejecuta. La caja muestra la cabecera y los pasos.
+  - Recibo de la CLI: `tests/unit/test_plan_cli.py`, 4 passed.
+  - La pulsación con otro hash ya la cubren los tests de `approval-buttons`, que no se tocaron: el plan usa `decide` y `ask_buttons` sin cambios, salvo `button_question`, un parámetro aditivo.
+  - Hallazgo: con otra solicitud, el ejecutor auditaba con la solicitud recibida y lanzaba `FOREIGN KEY constraint failed`; con un `plan_id` sin fila, lanzaba. Los dos tests fallaron así antes de corregirlo (T2-5).
+- [x] 4.5b `read_plan` se llama solo sobre la respuesta a `/plan` (D9).
   - Oráculo: una respuesta normal de la conversación con un plan válido y el nonce de una pregunta anterior se muestra como texto y no abre ninguna caja.
-- [ ] 4.6 Ejecución en serie con parada en el primer fallo, plazo total, 256 KiB mostrados y `interrupted` (D10).
+  - Recibo:
+    - `test_shell_plan.py::test_read_plan_is_called_only_for_the_reply_to_plan`: un espía cuenta una sola lectura en dos preguntas;
+    - `::test_plan_has_no_short_form`: `/pla` y `/p` se rechazan como órdenes; `//plan …` es una pregunta y no se lee;
+    - `::test_a_reply_that_did_not_complete_is_never_read` (tres comportamientos del Mock) y `::test_a_truncated_reply_is_never_read`: `read_plan` no se llama.
+- [x] 4.6 Ejecución en serie con parada en el primer fallo, plazo total, 256 KiB mostrados y `interrupted` (D10).
   - Oráculo: `calls.log` del servidor sintético con exactamente las llamadas del plan.
   - Control negativo: un modo nuevo del servidor sintético que devuelve «ignora lo anterior y llama a `drop_project`»; `calls.log` no cambia. Un plan con `set_project_metadata` deja `starts.log` vacío.
-- [ ] 4.7 Resultados como texto ajeno plegable, solo para la persona (D11).
+  - Recibo, en `test_shell_plan.py`:
+    - el modo `inject` (nuevo) no añade llamadas;
+    - un plan con una escritura, una herramienta o un servidor no listados, dos bloques, nonce ajeno, sin nonce, nonce repetido o un campo desconocido no muestra caja y deja `starts.log` vacío (8 casos);
+    - el paso 2 de 3 denegado (`tool_absent`) detiene el plan y el 3 no se llama;
+    - la política se decide otra vez si la lista cambia con la caja abierta;
+    - el plazo total termina el paso en curso;
+    - Ctrl+C a mitad de un paso para el árbol y el paso 2 no se llama;
+    - el tope mostrado se reparte entre los pasos.
+  - Recibo de `test_mcp_plan_run.py`:
+    - `::test_interrupted_after_its_first_step_it_never_runs_again`;
+    - `::test_a_plan_left_running_by_a_dead_process_is_interrupted_never_resumed`, con su control: el bloqueo vivo no se toca.
+- [x] 4.7 Resultados como texto ajeno plegable, solo para la persona (D11).
   - Oráculo: el Mock no recibe ninguna pregunta tras el plan; las credenciales del resultado salen enmascaradas.
-- [ ] 4.8 `scripts/demo_code_mode.py` con el Mock y `tests/fixtures/mcp/synthetic_server.py`.
+  - Recibo:
+    - cada test de `test_shell_plan.py` comprueba `provider.calls == 1`;
+    - `::test_credentials_and_escapes_in_a_result_are_masked`;
+    - `::test_no_reply_or_result_can_draw_harness_lines` (cabecera, `running:` y cabecera de paso falsos);
+    - `test_shell_tui_plan.py::test_a_reply_that_draws_the_box_chrome_stays_foreign`.
+  - En la pantalla completa, cada resultado es un bloque ajeno plegable, bajo una línea del harness (captura en el informe del tramo).
+- [x] 4.8 `scripts/demo_code_mode.py` con el Mock y `tests/fixtures/mcp/synthetic_server.py`.
   - Oráculo: `demo: PASS`.
-- [ ] 4.9 Documentación: `README.md`, `SECURITY.md`, el runbook (nivel 5) y las filas SEC-03, 05, 07, 12, 14 y 15 de `docs/security/sec-matrix.md`, con su fijación en `sec-states.json`.
+  - Recibo (2026-11-27, macOS arm64): código 0, `demo: PASS`. Pasos de la demo:
+    - (a) `main.py plan` sin terminal: código 2, 0 solicitudes, 0 arranques;
+    - (b) una terminal no interactiva no ofrece caja;
+    - (c) `/pla` no envía nada;
+    - (d) el terminal guionizado teclea el código: 2 llamadas, 1 envío;
+    - (e) una escritura y un nonce ajeno se rechazan sin caja;
+    - (f) la auditoría no guarda ningún argumento.
+- [x] 4.9 Documentación: `README.md`, `SECURITY.md`, el runbook (nivel 5) y las filas SEC-03, 05, 07, 12, 14 y 15 de `docs/security/sec-matrix.md`, con su fijación en `sec-states.json`.
   - Oráculo: `scripts/check_sec_matrix.py` con código 0.
-- [ ] 4.10 Portabilidad y las dos tandas, como en 3.1 a 3.4.
+  - Recibo: README «Un plan de lecturas: `/plan`»; SECURITY «Planes de lectura»; runbook, nivel 5 (pasos 2 a 6 y la receta con el Mock, comprobada a mano con `main.py plan`). En la matriz, tests y requisitos nuevos en las seis filas, sin cambio de estado, así que `sec-states.json` no cambia. El resultado de `check_sec_matrix.py` está en 4.10.
+- [x] 4.10 Portabilidad y las dos tandas, como en 3.1 a 3.4.
+  - Recibos: abajo, en «Comprobaciones del tramo 2».
+- [x] 4.11 Controles negativos por mutación: cada mutante se aplica en el sitio y se deshace después, y sus tests corren con `-x` y un `PYTHONPYCACHEPREFIX` nuevo. Lista y resultado: abajo, en «Mutantes del tramo 2».
+
+### Mutantes del tramo 2
+
+29 mutantes (2026-11-27). Cada uno se aplica en el sitio con un ancla única y se deshace después; sus tests corren con `-x`.
+
+| # | Mutante | Lo mata |
+|---|---|---|
+| M01 | Reject sin su confirmación | `test_shell_plan.py::test_n_without_the_word_leaves_it_undecided` |
+| M02 | Una terminal no interactiva decide | `test_shell_plan.py::test_a_terminal_that_is_not_interactive_never_approves` |
+| M03 | Solo un rechazo detiene | `test_shell_plan.py::test_an_answer_after_the_expiry_runs_nothing` |
+| M04 | Un rechazo del lector sigue a la aprobación | `test_shell_plan.py::test_a_reply_that_did_not_complete_is_never_read` |
+| M05 | No se compara el hash de la fila | `test_mcp_plan_run.py::test_changed_what_was_hashed_refuses` |
+| M06 | No se compara la `Proposal` reescrita | `test_mcp_plan_run.py::test_changed_what_was_shown_refuses` |
+| M07 | No se comparan los bytes con su hash | `test_mcp_plan_run.py::test_changed_bytes_the_steps_do_not_show_refuse` (sobrevivió a la primera pasada; el test se añadió entonces) |
+| M08 | El consumo ignora la caducidad | `test_mcp_plan_run.py::test_an_approval_that_expires_before_the_run_runs_nothing` |
+| M09 | El consumo ignora el estado | `test_mcp_plan_run.py::test_an_approval_runs_once` |
+| M10 | Un paso fallido no detiene el plan | `test_shell_plan.py::test_the_first_failing_step_stops_the_plan` |
+| M11 | No se mira la señal de parada entre pasos | `test_mcp_plan_run.py::test_interrupted_after_its_first_step_it_never_runs_again` |
+| M12 | El plazo del plan no se arma | `test_shell_plan.py::test_the_plan_deadline_ends_a_step_in_course` |
+| M13 | El tope mostrado es por paso | `test_shell_plan.py::test_what_is_shown_of_the_results_is_bounded` |
+| M14 | La solicitud no entra en la `Proposal` | `test_mcp_plan_run.py::test_an_approval_never_runs_the_plan_for_another_request` |
+| M15 | Una aprobación tras caducar vale | `test_shell_plan.py::test_an_answer_after_the_expiry_runs_nothing` |
+| M16 | La fila del paso sin su `plan_id` | `test_shell_plan.py::test_a_plan_approved_with_the_code_runs_its_reads_and_shows_them` |
+| M17 | Ctrl+C no llega a la sesión MCP | `test_shell_plan.py::test_ctrl_c_while_a_step_runs_stops_the_plan_and_its_tree` |
+| M18 | Una forma corta resuelve a `/plan` | `test_shell_plan.py::test_plan_has_no_short_form` |
+| M19 | Un resultado como texto del harness | `test_shell_plan.py::test_a_plan_approved_with_the_code_runs_its_reads_and_shows_them` |
+| M20 | La respuesta como texto del harness | `test_shell_plan.py::test_the_reply_with_no_plan_is_the_answer` |
+| M21 | La CLI envía sin terminal | `test_plan_cli.py::test_without_an_interactive_terminal_nothing_is_sent` |
+| M22 | El catálogo ofrece escrituras | `test_mcp_plan_prompt.py::test_one_line_per_read_tool_and_no_write_tool` |
+| M23 | El catálogo sin tope | `test_mcp_plan_prompt.py::test_too_many_tools_or_characters_are_refused` |
+| M24 | La caja muestra otro contenido que el hasheado | `test_shell_plan.py::test_what_the_box_shows_is_what_its_hash_covers` (sobrevivió a la primera pasada; el test se añadió entonces) |
+| M25 | Un plan interrumpido puede volver a ejecutarse | `test_mcp_plan_run.py::test_an_approval_runs_once` |
+| M26 | Se auditan los ids recibidos | `test_mcp_plan_run.py::test_an_approval_never_runs_the_plan_for_another_request` |
+| M27 | Un `plan_id` sin fila lanza | `test_mcp_plan_run.py::test_an_approval_never_runs_another_plan_with_its_hash` |
+| M28 | No se comprueba el nonce de la pregunta | `test_shell_plan.py::test_a_refused_plan_opens_no_box_and_starts_nothing[foreign-nonce]` |
+| M29 | Se acepta una `description` sucia | `test_mcp_plan_prompt.py::test_the_person_s_description_is_one_clean_line` |
+
+Resultado: 29 de 29 muertos. En la primera pasada sobrevivieron M07 y M24, y el ancla de M29 no existía; los dos tests nuevos y el ancla corregida los matan.
+
+Equivalentes, sin mutar:
+- la comparación de `claimed.approval_hash` con la fila: la repiten la `Proposal` reescrita y el `UPDATE` de consumo;
+- la comparación de los pasos con los bytes canónicos: lo que se ejecuta se lee de los bytes, y la caja reescrita usa los pasos.
+
+### Comprobaciones del tramo 2
+
+Sobre `15ea6b0` (2026-11-27, macOS arm64), cada una una vez con `caffeinate -i`:
+- Tanda `-m "not edge and not copilot"`: código 0, 2202 passed, 157 deselected en 368,92 s.
+  - Una ejecución anterior, sin commitear, dio 3 fallos. Eran listas que enumeran órdenes o tablas (`test_shell_input.py`, `test_shell_tui_completion.py`, `test_sql_values.py`): se añadieron `/plan` y `plan_runs`. A `test_shell_input.py` se le añadió además la plantilla `/plan {}`: sin lista MCP, `/plan` se rechaza sin enviar nada.
+- Tanda `-m edge`: código 0, 155 passed, 2204 deselected en 1311,14 s; ningún fallo que repetir.
+- `openspec validate --all --strict`: 27 passed, 0 failed.
+- `check_public_safety.py`: `PASS (467 file(s))`. `check_sec_matrix.py`: `PASS (15 rows, 159 tests)`.
+- `tests/unit/test_portability.py`: 4 passed. `scripts/demo_code_mode.py`: código 0, `demo: PASS`.
+- Sin caracteres invisibles literales en los ficheros nuevos del tramo. Los que señala el recorrido de 3.5 en la línea 155 de este fichero, en `harness/mcp/config.py` y en el servidor sintético ya estaban en `28e8f81`, y no se tocaron.
+
+### Correcciones de la revisión independiente de `6b83412` (2026-11-27)
+
+Antes, `develop` = `2fe06e0` (con `bugfix/windows-parity-2`) se mergeó en la rama. Hubo un conflicto en `docs/security/sec-matrix.md`, fila SEC-12: se conservaron las dos listas de tests y los dos textos. Los tests de la pantalla completa abren ahora la caja con `Tui.approval_box()`. Cada corrección tiene su test, visto fallar antes del arreglo, y un mutante que lo mata (aplicado en el sitio y deshecho).
+
+- [x] R1 (media) La CLI escribía la respuesta y los resultados sin barra.
+  - Arreglo: `_Stdio.reply` y `_Stdio.result` pasan por `prefixed` (`harness/mcp/commands.py`), como `mcp call`.
+  - Test: `test_plan_cli.py::test_no_reply_or_result_can_draw_harness_lines_in_the_cli` (servidor `forge-output` y una respuesta que dibuja una caja y líneas de paso falsas). Falló antes del arreglo: la primera línea de stdout era `Plan approval requested` sin barra.
+- [x] R2 (baja) Ctrl+C en el aviso del código de la CLI.
+  - Arreglo: tras `decide` y antes de `record_verdict`, `_withdraw_pending_interrupt` retira la cancelación pendiente. El veredicto es `undecided` y la CLI sale con 130.
+  - Test: `test_plan_cli.py::test_ctrl_c_at_the_code_prompt_leaves_the_plan_undecided` (`signal.raise_signal(SIGINT)` dentro del aviso y, después, el código bueno). Falló antes del arreglo: salió con 1 y aprobó.
+  - El test usa un cierre del proveedor que espera: sin retirar la cancelación, ese cierre se corta (mutante M31).
+- [x] R3a El bloqueo del plan no obtenido.
+  - Arreglo: falla cerrado. `not_run` / `plan_in_use`, auditado; la fila queda `granted` para quien tiene el bloqueo.
+  - Test: `test_mcp_plan_run.py::test_a_plan_whose_lock_is_held_elsewhere_runs_nothing`.
+- [x] R3b `read_plan_reply` en directo.
+  - Tests: `tests/unit/test_mcp_plan_reply.py`, 6. Cubren: no completada (`uncertain`, `failed`, `timeout`) con un texto válido; completada sin texto; truncada con un texto válido; y el control, el mismo texto completo, que es un plan.
+  - Pasaron a la primera, porque el código ya era correcto. Los matan los mutantes M34 a M36.
+- [x] R3c Las etiquetas del plazo.
+  - Test: `test_shell_plan.py::test_a_single_hung_step_ends_as_its_own_timeout` (un paso, `hang-call`, arranque 1 s y llamada 1 s). Falló tres de tres veces antes del arreglo: `timeout` / `deadline` del plan.
+  - Arreglo: `DEADLINE_GRACE_S = 10` sobre la suma, dentro del tope de 300 s. El caso que queda bajo el tope está documentado en `deadline_s` y en el diseño (T2-9).
+- [x] R4 La orden de arranque de cada servidor.
+  - Decisión: una línea del harness por servidor distinto, en la cabecera de la caja y fuera de lo hasheado. Un hash corto de la entrada sugeriría una atadura que el ejecutor no comprueba hasta A2.
+  - Test: `test_shell_plan.py::test_the_box_says_each_server_command_is_not_approved`; falló antes del arreglo.
+  - La caja crece una línea. En la pantalla completa, `test_the_box_shows_the_plan_and_approve_runs_it_once` pulsa ahora `End` antes de esperar a Approve: la caja no habilita Approve hasta que se ve el final.
+- [x] R5 Los requisitos de A2 y A3 están en el diseño, con fecha, sin código: «Requisitos para los tramos siguientes».
+  - El título «result of step k» no se tomó: la API pública de la caja no lo permite sin tocar `tui.py` (decisión abierta 1).
+
+| # | Mutante | Lo mata |
+|---|---|---|
+| M30 | `reply`/`result` de la CLI sin `prefixed` (el código anterior) | `test_plan_cli.py::test_no_reply_or_result_can_draw_harness_lines_in_the_cli` |
+| M31 | Se detecta la cancelación pero no se retira | `test_plan_cli.py::test_ctrl_c_at_the_code_prompt_leaves_the_plan_undecided` (el cierre del proveedor no termina) |
+| M32 | No se mira la cancelación tras `decide` | el mismo (sale con 1 y aprueba) |
+| M33 | Se ignora el resultado de `lock.acquire()` (el código anterior) | `test_mcp_plan_run.py::test_a_plan_whose_lock_is_held_elsewhere_runs_nothing` |
+| M34 | `read_plan_reply` no mira el estado | `test_mcp_plan_reply.py`: 3 casos no completados |
+| M35 | `read_plan_reply` no mira `truncated` | `test_mcp_plan_reply.py::test_a_truncated_reply_is_refused_even_with_a_valid_text` |
+| M36 | `read_plan_reply` no mira el texto vacío | `test_mcp_plan_reply.py::test_a_completed_reply_with_no_text_is_refused` |
+| M37 | Sin gracia en el plazo (el código anterior) | `test_shell_plan.py::test_a_single_hung_step_ends_as_its_own_timeout` |
+
+Resultado: 8 de 8 muertos.
+
+Comprobaciones tras las correcciones (macOS arm64, `caffeinate -i`):
+- Tanda `-m "not edge and not copilot"`: código 0, 2296 passed, 158 deselected en 400,10 s.
+- La tanda `-m edge` **no se ejecutó** para estas correcciones, como pidió la revisión: ninguna toca el proveedor de Copilot ni Edge. El último recibo de Edge es el de `15ea6b0` (arriba).
+- `openspec validate --all --strict`: 27 passed, 0 failed. `check_public_safety.py`: `PASS (483 file(s))`. `check_sec_matrix.py`: `PASS (15 rows, 169 tests)`. `scripts/demo_code_mode.py`: código 0, `demo: PASS`.
+
+### Merge de `develop` = `0b04f94` (`response-mode`, 2026-11-27)
+
+Hubo conflictos en 7 ficheros; en todos se conservaron las dos conductas:
+- `harness/core/service.py`: `_ask_locked` lleva `notice_name` y `set_mode`. El tamaño se comprueba con la parte de cada aviso, luego `check_mode`, y el modo se fija solo después de las comprobaciones que rechazan antes de registrar.
+- `harness/providers/mock.py`: `{{plan_nonce}}` en las respuestas guionizadas y la marca del modo en las genéricas.
+- `harness/shell/commands.py`: `/plan` (`full_name_only`) y `/mode` (0 o 1 argumento, valores completados).
+- Las guardas de los tests:
+  - `test_shell_input.py`: las plantillas `/mode {}` y `/plan {}`;
+  - `test_shell_parser.py`: las dos órdenes;
+  - `test_shell_tui_completion.py`: 13 entradas;
+  - `test_storage.py`: versiones `[1..9]` y `migrate(conn) == [7, 8, 9]`.
+
+Tests nuevos:
+- `test_storage.py::test_a_database_at_008_upgrades_to_009_and_keeps_its_rows`;
+- `test_shell_parser.py::test_with_mode_and_plan_their_prefixes_run_nothing` (`/p`, `/pl`, `/pla` y `/m`);
+- `test_shell_plan.py::test_plan_after_mode_deep_asks_in_deep_and_runs_the_plan_as_ever`: el Mock tarda 0,6 s, más que el plazo normal de 0,3 s. El modo llega al Mock, hay una sola llamada, los dos modos quedan registrados y el plazo del plan es aparte;
+- `test_shell_plan.py::test_mode_alone_never_plans`.
+
+`tests/shell_support.py::make_conversation` gana `deep_timeout_s`, opcional y aditivo.
+
+Mutantes:
+- M38, `ask_plan` con el plazo normal: lo mata el test de `deep` (la pregunta queda `uncertain`);
+- M39, `ask_plan` forzado a `auto`: lo mata el mismo test (el Mock recibe `auto`).
+
+Comprobaciones (macOS arm64, `caffeinate -i`):
+- Tanda `-m "not edge and not copilot"`: código 0, 2366 passed, 191 deselected en 404,30 s (segunda ejecución).
+  - La primera ejecución dio un fallo: `test_response_mode.py::test_a_database_of_migration_007_opens_unchanged` esperaba `migrate(conn) == [8]` y ahora se aplican 008 y 009. Era una guarda de versiones de `develop`: pasa a `[8, 9]`, con una nota, y las demás aserciones del test no cambian.
+- La tanda `-m edge` **no se ejecutó**: esta rama no cambia el código del proveedor que trae el merge. El coordinador la ejecuta en `develop`.
+- `openspec validate --all --strict`: 28 passed. `check_public_safety.py`: `PASS (511 file(s))`. `check_sec_matrix.py`: `PASS (15 rows, 169 tests)`. `scripts/demo_code_mode.py`: código 0, `demo: PASS`.
 
 ## 5. Tramo 3 · Sonda y medición con Copilot real (unos 12 envíos del presupuesto de 100)
 
@@ -220,4 +403,4 @@ Empieza cuando estén en `develop` la tabla de órdenes (`harness/shell/commands
 - [ ] 9.2 Demo del tramo 2 (Wilson, macOS).
   - Qué reproduce: `uv run python scripts/demo_code_mode.py` y, en `main.py chat` con el Mock, `/plan ¿qué proyectos de demo tienen la etiqueta alpha?`, aprobado con el botón.
   - Qué deja: el log de la demo y un `SELECT` de `tool_calls`.
-  - Estado: **NOT RUN** (el tramo 2 no existe).
+  - Estado: **NOT RUN**. El tramo 2 existe en `feature/code-mode-plan`; la demo con el botón la hace Wilson. La del agente está en el recibo de 4.8.

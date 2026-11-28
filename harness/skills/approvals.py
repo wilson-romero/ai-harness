@@ -217,12 +217,13 @@ BUTTON_QUESTION = "Approve applies this proposal; Reject cancels the run."
 
 
 def decide(terminal: Terminal, shown: str, approval_hash: str, *,
-           confirm_rejection: bool = False) -> Verdict:
+           confirm_rejection: bool = False, button_question: str = BUTTON_QUESTION) -> Verdict:
     """Show the proposal and ask for a decision: by buttons on the full screen, otherwise by
-    the typed code (approval-buttons D1)."""
+    the typed code (approval-buttons D1). `button_question` is the line the box asks; a plan
+    of code mode says what its buttons do (code-mode D9)."""
     if isinstance(terminal, ButtonApprovalTerminal):
         terminal.show(shown)
-        press = terminal.ask_buttons(BUTTON_QUESTION, approval_hash)
+        press = terminal.ask_buttons(button_question, approval_hash)
         # Only an object of the button type, answered to this very prompt, for this hash.
         if not isinstance(press, ButtonPress) or press.approval_hash != approval_hash:
             return Verdict("undecided")

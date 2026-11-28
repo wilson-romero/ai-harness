@@ -95,7 +95,25 @@ def test_unbalanced_quote_is_an_error():
 def test_every_command_of_d10_and_nothing_else():
     assert set(COMMANDS) == {"help", "status", "new", "sessions", "resume", "history",
                              "memory", "context", "skill", "file", "exit",
-                             "mode"}  # response-mode, 2026-11-27
+                             "mode",  # response-mode, 2026-11-27
+                             "plan"}  # code-mode slice 2
+
+
+@pytest.mark.parametrize("line, message", [
+    ("/p x", "/p is not a command; /plan is typed in full"),
+    ("/pl x", "/pl is not a command; /plan is typed in full"),
+    ("/pla x", "/pla is not a command; /plan is typed in full"),
+    ("/m deep", "/m is the start of more than one command: /memory, /mode"),
+])
+def test_with_mode_and_plan_their_prefixes_run_nothing(line, message):
+    """Merge of response-mode and code-mode (2026-11-27): /plan has no short form, and /m
+    names both of its candidates; /mo is still /mode."""
+    from harness.shell.parser import parse_short
+
+    with pytest.raises(LineError) as raised:
+        parse_short(line)
+    assert str(raised.value) == message
+    assert parse_short("/mo deep") == Command("mode", ("deep",))
 
 
 def test_parsing_is_linear():

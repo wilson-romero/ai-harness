@@ -13,7 +13,8 @@ HOSTILE = ["²", "٣", "a\x00b", "\udcff", "-1", "0", "9" * 30, "../x", "--x", "
            "--file", "x" * 5000, "​", "CON", "--project", "\x1b[31m"]
 TEMPLATES = ["/new {}", "/new --project {}", "/resume {}", "/memory {}", "/skill {}",
              "/skill demo-echo {}", "/skill demo-echo --file {}", "/skill demo-echo --file text={}",
-             "/skill demo-echo text={}", "/file {}", "/mode {}"]
+             "/skill demo-echo text={}", "/file {}", "/mode {}",
+             "/plan {}"]  # code-mode slice 2: with no MCP list, refused before sending
 
 
 def test_every_command_that_takes_arguments_is_covered():

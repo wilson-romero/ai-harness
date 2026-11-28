@@ -17,11 +17,12 @@ that the terminal's own wrapping never starts a row with foreign text.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import shutil
 import sqlite3
 import stat
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,9 @@ from harness.core.answer_style import with_notice
 from harness.core.response_mode import describe_mode
 from harness.core.service import SessionService
 from harness.core.strict_json import decode_text_limited
+from harness.mcp.config import LoadedConfig, load_config
+from harness.mcp.plan_flow import PlanRequest, PlanSetting, run_plan
+from harness.mcp.plan_prompt import PlanUnavailable, build_catalogue, shown_instructions
 from harness.memory.config import MemorySettings, ensure_data_dir_outside_vault
 from harness.memory.context import ProjectContext, build_context, new_nonce
 from harness.memory.paths import PROJECTS_DIR, is_safe_name, resolve_project, validate_project_slug
@@ -136,6 +140,12 @@ class ConversationDeps:
     # The columns a reply's tables and code blocks are laid out in (reply-rendering D1); None:
     # what `columns` leaves after the mark.
     layout: Callable[[], int | None] = lambda: None
+    # `/plan` (code-mode slice 2): the environment the MCP servers are started from and the
+    # allowlist, read when a plan is asked and again before it runs. None: `os.environ` and
+    # the list it names (HARNESS_MCP_CONFIG).
+    environ: Mapping[str, str] | None = None
+    mcp_config: Callable[[], LoadedConfig] | None = None
+    clock: Callable[[], datetime] | None = None  # the plan approval's expiry (tests)
 
 
 def read_text_file(raw_path: str, max_bytes: int = MAX_FILE_BYTES) -> tuple[str, str]:
@@ -482,8 +492,10 @@ class Conversation:
 
     def _interrupted(self, parsed: Question | Command, request_before: tuple[str, str] | None,
                      run_before: tuple[str, str] | None) -> None:
-        """Say what the interruption left, from what was recorded during this action only."""
-        if isinstance(parsed, Command):
+        """Say what the interruption left, from what was recorded during this action only.
+        `/plan` asks a question, so its interruption is told as a question's (code-mode D12);
+        a plan interrupted while it runs says so itself and never comes here."""
+        if isinstance(parsed, Command) and parsed.name != "plan":
             if parsed.name == "skill":
                 self._skill_interrupted(run_before)
             else:
@@ -867,10 +879,25 @@ class Conversation:
             if notice is not None:
                 self._say("before each question the harness sends:")
                 self._foreign(notice)
+            self._plan_context()
             return
         context = self._build_context(session.project_id)
         self._foreign(with_notice(notice, context.text))
         self._context_summary(context)
+        self._plan_context()
+
+    def _plan_context(self) -> None:
+        """What a `/plan` question sends first, instead of the answer notice (code-mode D8):
+        shown only when the MCP list has a read tool to offer."""
+        try:
+            catalogue = build_catalogue(self._mcp_config()())
+        except PlanUnavailable:
+            return
+        except HarnessError as refused:
+            self._say(f"warning: /plan: the MCP list cannot be read: {safe_line(str(refused)).text}")
+            return
+        self._say("a /plan question sends this first, before the memory, instead of the notice:")
+        self._foreign(shown_instructions(catalogue))
 
     def _cmd_file(self, raw_path: str) -> None:
         self._attachment = None  # a refused file never leaves an older one attached
@@ -878,6 +905,58 @@ class Conversation:
         self._attachment = (name, attachment_block(name, text))
         self._say(f"attached {name} ({len(text.encode('utf-8'))} bytes) to the next question; "
                   "it is sent marked as data and never stored")
+
+    # -- /plan (code-mode slice 2) ------------------------------------------------------------
+
+    def _environ(self) -> Mapping[str, str]:
+        return self._deps.environ if self._deps.environ is not None else os.environ
+
+    def _mcp_config(self) -> Callable[[], LoadedConfig]:
+        if self._deps.mcp_config is not None:
+            return self._deps.mcp_config
+        environ = self._environ()
+        return lambda: load_config(environ)
+
+    async def _cmd_plan(self, *words: str) -> None:
+        """`/plan QUESTION`: the only way a reply is ever read for a plan (D9). The question
+        is the words as the parser split them, joined by one space."""
+        question = " ".join(words)
+        size = len(question.encode("utf-8", errors="surrogatepass"))
+        if size > MAX_QUESTION_BYTES:
+            raise UsageError(f"the question has {size} bytes; the limit is {MAX_QUESTION_BYTES}; "
+                             "nothing was sent")
+        load = self._mcp_config()
+        build_catalogue(load())  # no read tool, or a list that cannot be read: stop here
+        context = self._context_for_question(question)
+        attachment, self._attachment = self._attachment, None
+        if attachment is not None:
+            self._say(f"attached: {attachment[0]}")
+        clock = self._deps.clock
+        setting = PlanSetting(
+            data_dir=self._deps.data_dir, environ=self._environ(), load_config=load,
+            ttl_s=self._deps.skills().approval_ttl_s,
+            **({"clock": clock} if clock is not None else {}),
+        )
+        await run_plan(
+            PlanRequest(question, self._session_id, self._deps.provider, context,
+                        attachment[1] if attachment is not None else None),
+            service=self._service, conn=self._deps.conn, view=_PlanScreen(self),
+            terminal=self._terminal, setting=setting,
+        )
+
+    def _plan_approval(self, header: list[str], content: list[str]) -> str:
+        """The plan's notice, laid out as a skill's (`_render_approval`): the harness's header,
+        a rule, every line of the steps as foreign rows, a rule. The full screen draws its box
+        from the same pieces."""
+        columns = self._deps.columns()
+        rows: list[str] = []
+        for line in content:
+            rows += wrap_rows(line, columns, FOREIGN_PREFIX)
+        rule = self._harness_rows([APPROVAL_RULE])
+        shown = "\n".join([*self._harness_rows(header), *rule, *rows, *rule])
+        if isinstance(self._terminal, ApprovalTerminal):
+            self._terminal.expect_approval(shown, header, rows)
+        return shown
 
     async def _cmd_skill(self, name: str, *rest: str) -> None:
         inputs = self._skill_inputs(rest)
@@ -929,3 +1008,36 @@ class Conversation:
         if outcome.status == "awaiting_approval":
             self._say("nothing was applied; `skill resume` continues it once this conversation "
                       "has left the session (/new, /resume or /exit)")
+
+
+class _PlanScreen:
+    """How `/plan` shows itself in a conversation (`plan_flow.PlanView`): harness lines as
+    harness lines; the reply and each step's result as foreign text (the result literal, not
+    read as Markdown), each under its harness line."""
+
+    def __init__(self, conversation: Conversation) -> None:
+        self._conversation = conversation
+
+    def say(self, text: str) -> None:
+        self._conversation._say(text)
+
+    def reply(self, text: str) -> None:
+        self._conversation._foreign(text, markdown=True)
+
+    def result(self, header: str, text: str) -> None:
+        self._conversation._say(header)
+        self._conversation._foreign(text)
+
+    def approval(self, header: list[str], content: list[str]) -> str:
+        return self._conversation._plan_approval(header, content)
+
+    @contextlib.asynccontextmanager
+    async def waiting(self) -> AsyncIterator[None]:
+        conversation = self._conversation
+        terminal = conversation._terminal
+        if isinstance(terminal, StyledTerminal):
+            async with terminal.working(conversation._deps.provider_name):
+                yield
+            return
+        conversation._say("waiting for the provider (Ctrl+C interrupts)")
+        yield

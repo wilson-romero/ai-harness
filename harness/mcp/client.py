@@ -95,6 +95,41 @@ class OfferedTool:
     annotations: Any = None
 
 
+class StopSignal:
+    """Ctrl+C for a session run outside the main thread (code-mode D10): the plan of a
+    conversation runs its calls in a worker thread, where no signal handler can be installed.
+    `set` may be called from any thread, before or during the session: it then ends the same
+    way as the first Ctrl+C (the tree is ended, `run_session` raises KeyboardInterrupt with
+    the outcome attached). `reason` says who stopped it (the person, a plan's deadline)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._callback: Callable[[], None] | None = None
+        self.reason: str | None = None
+
+    def set(self, reason: str = "interrupted") -> None:
+        with self._lock:
+            if self.reason is None:
+                self.reason = reason
+            callback = self._callback
+        if callback is not None:
+            callback()
+
+    def is_set(self) -> bool:
+        return self.reason is not None
+
+    def bind(self, callback: Callable[[], None]) -> None:
+        with self._lock:
+            self._callback = callback
+            already = self.reason is not None
+        if already:
+            callback()
+
+    def unbind(self) -> None:
+        with self._lock:
+            self._callback = None
+
+
 @dataclass(frozen=True)
 class SessionRequest:
     entry: ServerEntry
@@ -104,6 +139,7 @@ class SessionRequest:
     max_result_bytes: int = 0
     # Called with the offered tools before the call; the call is sent only if it allows it.
     check_offered: Callable[[Mapping[str, OfferedTool]], Decision] | None = None
+    stop: StopSignal | None = None  # a Ctrl+C that comes from another thread (code-mode D10)
 
 
 @dataclass
@@ -141,6 +177,11 @@ class _Interrupts:
             self._installed = True
 
     def _handle(self, signum: int, frame: object) -> None:
+        self.trigger()
+
+    def trigger(self) -> None:
+        """The first Ctrl+C, from the signal handler or from a `StopSignal` of another
+        thread. `pressed` is set first, so a session stopped this way always reports it."""
         if not self.pressed and self._cancel is not None:
             self.pressed = True
             self._cancel()
@@ -185,6 +226,8 @@ async def _supervise(
     loop = _running_loop()
     with anyio.CancelScope(deadline=deadline) as scope:
         interrupts.install(lambda: loop.call_soon_threadsafe(scope.cancel))
+        if request.stop is not None:
+            request.stop.bind(interrupts.trigger)
         devnull = open(os.devnull, "w")  # noqa: SIM115 - the session process's own stderr
         try:
             process = await _create_platform_compatible_process(
@@ -204,6 +247,8 @@ async def _supervise(
             with anyio.CancelScope(shield=True):
                 outcome.server_stopped = await _end_tree(process)
             devnull.close()
+            if request.stop is not None:
+                request.stop.unbind()
             # Inside the loop: the event loop's runner restores its own handler when it ends.
             interrupts.restore()
     if interrupts.pressed:

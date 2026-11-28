@@ -81,6 +81,11 @@ def _parse(line: str, *, short: bool) -> Question | Command | Empty:
             shown = terminal_safe(name)[:_SHOWN_NAME_CHARS]
             raise LineError(f"/{shown} is the start of more than one command: "
                             + ", ".join(f"/{n}" for n in names_starting(name)))
+        if resolved is None and names_starting(name):
+            # The only command it starts is typed in full only (`/plan`, code-mode D9).
+            shown = terminal_safe(name)[:_SHOWN_NAME_CHARS]
+            raise LineError(f"/{shown} is not a command; /{names_starting(name)[0]} is typed "
+                            "in full")
         name = resolved or name
     if name not in COMMANDS:
         shown = terminal_safe(name)[:_SHOWN_NAME_CHARS]

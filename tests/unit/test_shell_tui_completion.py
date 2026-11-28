@@ -56,7 +56,7 @@ async def test_slash_opens_the_commands_and_typing_filters_without_losing_a_key(
         await pilot.press("/")
         assert listing.showing and listing.highlighted is None  # nothing chosen yet
         assert _rows(listing)[0].startswith("/help") and "this list" in _rows(listing)[0]
-        assert len(listing.items) == 12  # with /mode (response-mode, 2026-11-27)
+        assert len(listing.items) == 13  # with /mode (response-mode) and /plan (code-mode)
         await pilot.press(*"sk")
         assert prompt.value == "/sk"  # every key typed is in the input, none taken
         assert [i.insert for i in listing.items] == ["/skill "]
