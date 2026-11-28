@@ -506,6 +506,254 @@ Sin código en este tramo; son condiciones para aceptar A2 y A3.
 - Una aprobación por turno, salvo que A2 lo permita por regla: el nonce no protege contra una inyección dentro del mismo turno.
 - «Una llamada al proveedor por /plan» se redefine como un tope de turnos; un `uncertain` corta el bucle.
 
+## Lo que decidió A2: lecturas permitidas por regla (2026-11-27)
+
+Construido en `feature/code-mode-loop`, desde `develop` = `a9c51fe`. Cumple los tres requisitos de A2 de la revisión independiente (arriba).
+
+### A2-1. `auto_read` en la lista local, solo para una lectura
+
+- **Qué.** `ToolEntry.auto_read: bool = False`. Un `true` en una herramienta `write`, o un valor que no es booleano (`"true"`, `1`), es un error de la lista: no se arranca nada y el mensaje nombra la herramienta. Un plan cuyos pasos son **todos** `auto_read` se aprueba por la regla; con uno solo que no lo es, el plan entero va a la caja, como antes.
+- **Por qué.** La persona ya escribe en la lista qué se puede leer; marcar qué se puede leer sin preguntar es el mismo acto, en el mismo fichero que solo ella edita (`_check_writers`). Que solo valga en `read` mantiene la decisión del dueño: toda escritura o ejecución necesita su aprobación del cambio exacto.
+- **Alternativas rechazadas.**
+  - Una lista aparte de herramientas automáticas: dos ficheros que pueden divergir.
+  - Regla por servidor entero: una herramienta nueva de ese servidor quedaría permitida sin que la persona la mire.
+  - Partir el plan (lo automático corre, lo demás pide la caja): la persona aprobaría la mitad de algo que el modelo pensó entero (D6).
+- **Impacto.** `harness/mcp/config.py`. Spec «Lecturas permitidas por regla».
+
+### A2-2. La lista, atada al leer el plan y comprobada al ejecutar cada paso
+
+- **Qué.** Al leer el plan, cada paso guarda `entry_sha256` (`policy.entry_sha256`): el SHA-256, con dominio `ai-harness/mcp-entry/v1`, de la forma canónica de la entrada del servidor (orden y sus argumentos, nombres de entorno, `cwd`, plazos) y de la herramienta (operación, `auto_read`, tope de resultado, argumentos declarados). La `description` queda fuera: solo redacta el catálogo. La fila del plan guarda un hash de todos (`entries_sha256`, migración 010). El ejecutor:
+  - compara la fila con el plan antes de consumir la aprobación: una fila sin atadura (anterior a 010) o con otra es `plan_altered`;
+  - lee la lista una vez, y antes de **cada** paso vuelve a calcular su hash con esa lista. Si difiere, el paso se rechaza (`list_changed`, `stopped_at` = ese paso) sin arrancar nada, y los siguientes no se llaman. Un plan aprobado por regla exige además que la herramienta siga siendo `auto_read`.
+  - Una herramienta o un servidor que ya **no** está en la lista no es «cambio»: la pasarela lo deniega como siempre (`tool_not_allowed`), y `test_the_policy_is_decided_again_when_the_plan_runs` sigue igual.
+- **Por qué.** Lo exige la revisión: entre la decisión y la ejecución la persona (o quien pueda escribir su lista) podía cambiar la orden de arranque, y la caja decía que esa orden no se aprobaba. Comprobar paso a paso con la lista que se usa para llamar cierra el hueco sin un TOCTOU entre pasos: la lista comprobada es la que arranca el servidor.
+- **Alternativas rechazadas.**
+  - Meter el hash en la `Proposal`: cambiaría el contenido de la caja y el hash aprobado de todo `/plan`, y las pruebas de `/plan` (que no se tocan) lo verían.
+  - Rechazar el plan entero antes del primer paso: el resultado es el mismo con un solo servidor; con dos, el paso que sí estaba atado corre y el informe nombra el que cambió (`test_a_step_after_the_first_is_refused_when_its_entry_changed`).
+  - Tratar una herramienta quitada como «cambio»: cambiaría la conducta y la auditoría de `/plan` (fila `tool_not_allowed`).
+- **Impacto.** `harness/mcp/policy.py`, `plan.py` (`PlanStep.entry_sha256`, `Plan.entries_sha256`), `plan_run.py` (`changed_entry`). La caja gana una línea del harness, `bound:`, con los 16 primeros caracteres del hash. La línea «that command is not part of this approval» se conserva: sigue siendo cierto que la orden no entra en el hash aprobado, y su test no se toca (decisión para el dueño, abajo).
+
+### A2-3. El medio `rule` y la migración 010
+
+- **Qué.** `010_plan_rules.sql` reconstruye `plan_runs`: `means` admite `rule`, `error_code` admite `list_changed` y hay una columna `entries_sha256`. Una aprobación por regla deja `approval = granted → consumed`, `means = rule`, `identity = rule:auto_read`, y en `audit_events` `plan.approval.granted` con `means=rule`. Después corre como cualquier otra: el mismo ejecutor, la misma comparación de hashes y el mismo consumo de un solo uso.
+- **Por qué hay que reconstruir.** SQLite no cambia un `CHECK` en su sitio, y `tool_calls.plan_id` apunta a esta tabla. Medido aquí (2026-11-27, SQLite de CPython 3.14): con las claves foráneas activas, tanto «crear, copiar, borrar, renombrar» con `defer_foreign_keys` como «renombrar primero» con `legacy_alter_table` fallan con `FOREIGN KEY constraint failed`. El procedimiento documentado de SQLite exige las claves apagadas, y `PRAGMA foreign_keys` no hace nada dentro de una transacción. Por eso `migrate` reconoce una primera línea `-- migrate: foreign keys off`: apaga las claves antes de la transacción, aplica el fichero, exige que `PRAGMA foreign_key_check` no devuelva nada (si devuelve algo, `MigrationError` y no se aplica nada) y las vuelve a encender pase lo que pase.
+- **Alternativas rechazadas.**
+  - Una columna nueva `approved_by` con `means` NULL: dos columnas para lo mismo, y `error_code` seguiría sin `list_changed`.
+  - Reconstruir también `tool_calls`: más filas en juego para nada.
+- **Impacto.** `harness/storage/database.py` (`FOREIGN_KEYS_OFF`, `MigrationError`), las guardas de versión de `test_storage.py` y `test_response_mode.py` (`[…, 10]`). Pruebas: `test_a_database_at_009_upgrades_to_010_and_keeps_its_plans_and_their_calls` y su control negativo `test_a_rebuilding_migration_that_would_break_a_reference_is_refused`.
+
+### A2-4. Cómo se apaga la regla: `--box` para una pregunta, `HARNESS_AUTO_READ=off` para todas
+
+**Revisada al verificar A2 (2026-11-27).** La primera versión solo tenía la variable y rechazaba una opción. Pero en la conversación la variable vale para todo el proceso, no para **una** pregunta, que es lo que pedía el tramo. Se añade la opción y la variable se queda.
+
+- **Qué.**
+  - `/plan --box PREGUNTA` (y `/agent --box PREGUNTA`, A3): todo plan de esa pregunta va a la caja. `--box` solo cuenta como **primera** palabra tras la orden; más adelante es texto de la pregunta (`/plan qué es --box` envía `qué es --box`). No se envía ni se guarda: el historial guarda `/plan PREGUNTA`. `--box` sin pregunta es un error y no envía nada. Está declarada en la tabla de órdenes (`commands.BOX`), así que `/help` la muestra.
+  - `HARNESS_AUTO_READ`, leída en cada `/plan` y `/agent` y en `main.py plan`: `on` (por defecto) u `off`. Con `off` todo plan va a la caja, como antes de A2. Cualquier otro valor se rechaza antes de enviar nada. En la CLI es ya por pregunta: `HARNESS_AUTO_READ=off uv run python main.py plan …`.
+- **Por qué.**
+  - La opción decide antes de enviar, en la misma línea que la pregunta, y no obliga a salir de la conversación.
+  - La variable sirve para quien no quiere la regla nunca, sin editar la lista.
+  - La ambigüedad que se temía (una pregunta que empieza por `--box`) es real pero estrecha: solo la primera palabra, y la ayuda lo dice. Una pregunta así se escribe con otra palabra delante.
+- **Alternativas rechazadas.**
+  - Solo la variable: no es por pregunta en la conversación (motivo de la revisión).
+  - Una orden aparte (`/planbox`): una orden más que hay que escribir entera, para lo mismo.
+  - Un interruptor de sesión (`/rule off`): vale para las preguntas siguientes, no para una, y se olvida encendido o apagado.
+  - Quitar `auto_read` de la lista: funciona, pero es editar el fichero cada vez.
+- **Impacto.** `plan_flow.box_option` y `auto_read_setting`, `commands.BOX`, `conversation._cmd_plan`; README. Pruebas: `test_box_turns_the_rule_off_for_one_question_only`, `test_box_without_an_answer_runs_nothing`, `test_box_alone_is_no_question` y su control `test_control_box_later_in_the_question_is_part_of_it`.
+
+### A2-5. Lo que se ve antes de que corra un plan por regla
+
+- **Qué.** Una línea del harness, `running plan: <id>, N step(s), every one a read your local MCP list allows by rule (auto_read); no approval is asked (--box, or HARNESS_AUTO_READ=off, asks for every plan). Ctrl+C stops it`, y debajo, como texto ajeno marcado (`|`), las mismas líneas que mostraría la caja: por paso, servidor, herramienta, operación, la decisión de la política con `auto_read`, los argumentos canónicos y qué lee. Ctrl+C lo para como a cualquier plan.
+- **Por qué.** Los argumentos los escribió el modelo: van marcados como ajenos aunque D5 ya rechazó saltos de línea e invisibles.
+- **Alternativas rechazadas.** Una línea del harness por paso con los argumentos dentro: mezclaría texto del modelo con el del harness.
+- **Impacto.** `plan_flow.RULE_HEADER`.
+
+### A2-6. La decisión que se muestra es la de la política
+
+- **Qué.** `PlanStep.decision` guarda `Decision.reason` tal como lo devolvió `decide_before_start` al leer el plan, y `step_lines` la escribe. Antes era la constante `allowed`.
+- **Impacto.** `test_the_decision_shown_is_the_policy_s_own` cambia la palabra de la decisión y la ve en la caja.
+
+### A2-7. Límites que no se arreglan aquí
+
+- La regla confía en el fichero de la persona: quien pueda escribirlo puede marcar `auto_read`. Es la misma frontera de siempre (`_check_writers` lo exige solo suyo; en Windows no se miran las ACL).
+- Una lectura automática saca datos de la máquina hacia ese servidor sin preguntar: es exactamente lo que la persona permite al escribir `auto_read`.
+
+### A2-8. Una regla que ya no vale no ejecuta nada
+
+- **Qué.** `record_rule` solo concede si la fila sigue `pending`; si no (otro proceso la tocó), devuelve otro estado. El flujo lo mira: sin `granted`, dice «could not be approved by rule; nothing was run» y no llama al ejecutor. Antes se ignoraba el valor devuelto; el ejecutor fallaba cerrado igualmente (`approval_not_usable`), pero tras arrancar su hilo y su conexión.
+- **Por qué.** Hallado al verificar A2: un valor de retorno que nadie mira es un control que no se ve decir NO.
+- **Impacto.** `plan_flow.approve_and_run`; `test_a_rule_that_no_longer_holds_runs_nothing`.
+
+## Lo que decidió A3: el bucle `/agent` (2026-11-27)
+
+Construido en `feature/code-mode-loop`, sobre A2. Cumple los cinco requisitos de A3 de la revisión independiente (arriba). El invariante no cambia: **nada que no sea una lectura autorizada por regla (`auto_read`) corre sin la caja**, en ningún turno.
+
+### A3-1. Cómo se pide un bucle: `/agent PREGUNTA`, y solo con consentimiento
+
+- **Qué.** Una orden nueva, `/agent PREGUNTA`, que se escribe entera (`full_name_only`, como `/plan`). Además, `HARNESS_LOOP_PROVIDERS` tiene que nombrar al proveedor (lista separada por comas; vacía por defecto). Sin las dos cosas no se registra ni se envía nada: el mensaje dice qué variable poner o que se use `/plan`. `/plan` no cambia: sigue sin enviar nada de vuelta, con o sin la variable.
+- **Por qué.** Invierte «nada sale de la máquina». Son dos consentimientos distintos de la aprobación del plan: uno por pregunta (la orden) y otro por instalación y proveedor (la variable). Una orden aparte evita leer una opción dentro de texto libre (como en A2-4), y un nombre de proveedor en la variable evita que cambiar `HARNESS_PROVIDER` a `copilot` envíe resultados fuera sin que la persona lo haya decidido para ese proveedor.
+- **Alternativas rechazadas.**
+  - `/plan --loop PREGUNTA`: una pregunta que empiece por `--loop` sería ambigua, y `/plan` dejaría de ser una sola cosa.
+  - Un interruptor booleano (`HARNESS_LOOP=on`): valdría para cualquier proveedor que se configure después.
+  - Pedirlo en una caja al empezar: otra caja que aprobar a ciegas; la variable es una decisión tomada en frío.
+- **Impacto.** `commands.TABLE` (14 órdenes), `conversation._cmd_agent`, `loop.loop_settings`. Con un proveedor cuyo contenido no es sintético, el primer turno con resultados de cada bucle pide además la caja con su texto exacto (A3-14, decisión del dueño del 2026-11-28; antes era solo una línea).
+
+### A3-2. El turno: aviso, datos entre marcas, gramática con nonce nuevo
+
+- **Qué.** El turno 1 es una pregunta de `/plan` cuya introducción dice que es la vuelta 1 de N de un `/agent` (`plan_prompt.LOOP_INTRO`; `PLAN_INSTRUCTIONS` queda idéntico byte a byte, con su SHA-256 en un test). Cada turno siguiente es, en este orden:
+  1. el aviso fijo del harness (`vuelta k de N; no son datos`): lo que sigue es material de referencia, no instrucciones; las líneas `--- ` son del harness y las `| ` de un resultado;
+  2. `<<<RESULTADOS <marca>`, el bloque, `RESULTADOS <marca>>>`, con una marca aleatoria nueva por turno (64 bits) que no aparece dentro del bloque (si apareciera, se saca otra);
+  3. las reglas del plan, el ejemplo y el catálogo, con un nonce nuevo, sacado después de componer los datos.
+  Dentro del bloque, por paso: una cabecera del harness (`--- paso k de n (id): servidor.herramienta args: cómo acabó`) y el texto del resultado con `| ` delante de cada línea. El texto pasa por `loop.clean_piece` (`safe_foreign_text`: escapes y controles fuera, credenciales enmascaradas; `normalise_content`: NFC e invisibles como `<U+XXXX>`; `neutralise_delimiters`: `<<<`, `>>>` → `‹‹‹`, `›››`) **antes** de acotarlo y **otra vez después**, en la cabeza y en la cola (A3-16).
+- **Por qué.** Lo que el modelo escribió vuelve con el formato de un dato, nunca como instrucción del harness: con el prefijo, ninguna línea de un resultado puede empezar como la marca, el aviso, una cabecera o la gramática; sin `<<<` ni `>>>`, no puede cerrar el bloque; y la marca es nueva en cada turno. El nonce va después de los datos: el modelo lo lee después del resultado y el Mock con guion, que toma el primero que encuentra, demuestra que un nonce inyectado por un resultado se rechaza (`nonce_mismatch`).
+- **Lo que el nonce no hace.** No protege de una inyección dentro del mismo turno: el resultado y el nonce nuevo viajan juntos, y un resultado puede convencer al modelo de escribir un plan válido. Lo que sí se mantiene: solo se lee la respuesta del modelo a ese turno, con ese nonce, y su plan pasa la misma política y la misma caja; un plan escrito dentro de un resultado nunca se toma por el del modelo.
+- **Alternativas rechazadas.**
+  - Mandar el resultado como JSON escapado: un modelo lo lee peor y el escape no impide que «entienda» una orden.
+  - Repetir el aviso al final del bloque: un resultado que imite el aviso queda igual de marcado con `| `; dos avisos no añaden nada.
+- **Impacto.** `harness/mcp/loop.py`, `plan_prompt.loop_rules`/`loop_instructions`.
+
+### A3-3. Los topes y por qué
+
+- **Qué.**
+  - Por paso, 4 096 bytes del resultado ya limpio; más, se corta por el medio: 2/3 de cabeza, 1/3 de cola y una línea del harness `[omitidos por el harness: N bytes del medio de este resultado]`.
+  - Por plan, 12 288 bytes repartidos: cada paso, `min(4096, 12288 // pasos)` (10 pasos: 1 228).
+  - Los argumentos de cada cabecera, a 200 caracteres.
+  - El turno entero, como mucho 28 000 caracteres (`TurnTooLarge`: no se envía y el bucle para, `turn_too_large`).
+- **Por qué.** El límite de Copilot ronda los 32 000 caracteres; el catálogo puede llegar a 8 000 (`MAX_CATALOGUE_CHARS`) y la gramática a unos 2 000. 12 288 de resultados más 10 cabeceras de unos 300, el aviso, la gramática y el catálogo completo quedan por debajo de 28 000, con margen para el recuento del proveedor (`test_the_largest_turn_fits_its_cap`: 10 pasos de 60 000 `€` cada uno). 28 000 está además muy por debajo de `SHOWN_MAX_BYTES` y de `MAX_SHOWN_CHARS` (256 KiB): lo que se muestra antes de enviar se ve entero. Cabeza y cola, porque un resultado suele decir en la cola cómo acabó.
+- **Alternativas rechazadas.** Un tope por plan sin reparto: el primer paso se comería el sitio de los demás.
+- **Impacto.** Constantes de `loop.py`; README.
+
+### A3-4. Cuándo para el bucle
+
+- **Qué.** Un turno es exactamente una pregunta al proveedor; N turnos son N llamadas, comprobado con el Mock en cada camino.
+  - Respuesta sin plan: es la respuesta final (`completed`, `answer`).
+  - El tope, `HARNESS_LOOP_MAX_TURNS` (5 por defecto; un entero de 1 a 10 en cifras ASCII; cualquier otra cosa se rechaza sin enviar nada) cuenta los turnos con catálogo. Si el turno N trae un plan, ese plan corre (aprobado como cualquiera) y sus resultados van en **un** turno de cierre N + 1, sin catálogo, gramática ni nonce, que pide un resumen de lo hecho y de lo pendiente. Su respuesta se muestra y **nunca** se lee como plan (`completed`, `cap`). Como mucho N + 1 envíos.
+  - Plan rechazado por el lector: el motivo se muestra y, **una vez por bucle**, vuelve al modelo con la gramática y un nonce nuevo (`kind = correction`); el motivo es la palabra de la lista cerrada y el detalle del propio lector, que nunca repite un valor de argumento. Un segundo rechazo para el bucle (`stopped`, `refused`); un rechazo en el turno N va al turno de cierre.
+  - Respuesta `uncertain`, fallida, con plazo vencido o truncada: el bucle para, no se lee y no se reenvía (`reply_not_completed`, `reply_truncated`).
+  - Un paso que falla (denegado por la pasarela, error de la herramienta, llamada fallida, su plazo o el del plan): el fallo vuelve **como dato** y el bucle sigue.
+  - Un plan que el propio harness para (`list_changed`, `plan_altered`, `approval_not_usable`, `plan_in_use`, `config_error`) o que no se ejecutó: el bucle para (`plan_stopped`).
+  - Aprobación rechazada, sin decidir o caducada: el bucle para (`not_approved`).
+  - Ctrl+C en una pregunta, en la caja o en un paso: para el paso en curso y el bucle, y no se envía nada más (`interrupted`).
+- **Por qué.**
+  - Una corrección por bucle: un error de forma (un nonce mal copiado, un argumento fuera de límites) se arregla casi siempre a la primera, y el motivo es texto del harness, no del modelo ni de un resultado. Más intentos gastan envíos del presupuesto en un modelo que no sigue la gramática.
+  - El fallo de un paso como dato: «el proyecto no existe» es información para responder; parar dejaría a la persona sin respuesta. Lo que el harness para por sí mismo no es un dato: es una señal de que algo cambió debajo, y seguir sería enviar a ciegas.
+  - El tope de 10: cada turno con Copilot son 11-14 s y uno de los 100 envíos del presupuesto; 10 turnos y el cierre son unos dos minutos y medio y la décima parte del presupuesto.
+- **Alternativas rechazadas.**
+  - Parar en cualquier fallo de un paso: el modelo nunca vería «no encontrado».
+  - Un turno de cierre que sí se lea como plan: el tope dejaría de serlo.
+  - Sin corrección: un nonce mal copiado acabaría el bucle sin respuesta.
+- **Impacto.** `harness/mcp/loop_flow.py`.
+
+### A3-5. La aprobación en cada turno
+
+- **Qué.** Cada plan del bucle se aprueba con `plan_flow.approve_and_run`, la misma función de `/plan`: un plan de solo lecturas `auto_read` sigue solo (A2); cualquier otro abre la caja, por su API pública, en **cada** turno. La caja dice entonces que los resultados vuelven al proveedor como datos en el turno siguiente y que el texto exacto se muestra antes. `ApprovalScreen`, `ApprovalButton` y `ProposalArea` no se tocan.
+- **Por qué.** Es el requisito de la revisión: el nonce no protege dentro del mismo turno, así que nada distinto de una lectura por regla puede correr sin que la persona lo vea.
+- **Alternativas rechazadas.** Aprobar el bucle entero al empezar: la persona aprobaría planes que aún no existen.
+- **Impacto.** `PlanSetting.loop_to` (solo redacta la caja y el informe).
+
+### A3-6. Lo que la persona ve, y lo que se envía
+
+- **Qué.** Antes de cada turno, una línea del harness `loop <id>: turn k of N: sending C characters to <proveedor>; exactly this text, nothing else:` y debajo, como texto ajeno, el texto entero que se envía: los mismos caracteres. Un test compara lo mostrado con el `prompt` que recibió el Mock, y `loop_turns` guarda los bytes y un HMAC (la clave de `args_key`) de ese texto. El contador (`turn 2 of 5`, `closing turn (3 of at most 3 sends)`) va en el panel lateral, que se vuelve a leer en cada turno (`TuiTerminal.refresh_panel`, pública), y `/status` dice el del bucle en curso o cómo acabó el último.
+- **Por qué.** «Lo que se muestra es lo que se envía»: el texto del turno lo compone el harness entero, así que se puede mostrar tal cual.
+- **Alternativas rechazadas.**
+  - Mostrar solo un resumen (bytes y pasos): la persona no vería qué sale.
+  - Guardar el texto para verlo después con `/context`: guardaría resultados, y con Copilot no se guarda contenido (D7).
+- **Impacto.** `conversation._loop_state`, `PanelState.loop`, `SidePanel` («Loop»).
+
+### A3-7. Lo que se guarda, y la recuperación tras una caída
+
+- **Qué.** En su propia migración, `013_loops.sql` (revisión de `fa6b6d1`, hallazgo 5, 2026-11-28: la 010 es de A2 sola, la 011 de `feature/workspace-tools`, en pausa, y la 012 queda para la rama de velocidad):
+  - `loop_runs`: id, sesión, proveedor, tope, turnos enviados, correcciones, estado (`running`, `completed`, `stopped`, `interrupted`) y un motivo de una lista cerrada;
+  - `loop_turns`: un registro por pregunta, escrito en **la misma transacción** que la solicitud (`SessionService` acepta un `link`), con el número de turno, su clase (`question`, `results`, `correction`, `closing`), el plan cuyos resultados lleva y el tamaño y el HMAC del texto del harness (en el turno 1, su bloque de instrucciones; en los demás, el texto entero).
+  Ninguna columna guarda una pregunta, un plan, un resultado ni una respuesta. El historial de la sesión guarda la pregunta `/agent …` y, de cada turno siguiente, solo una etiqueta (`/agent loop <id>: turn 2 of 5 (results)`), y solo con un proveedor sintético, como siempre (D7). El bucle tiene su `NamedLock("loop-<id>")`; en cuanto una conversación abre una sesión (`_switch_to`: al empezar, con `/new` o con `/resume`) y al empezar cada `/agent`, un bucle `running` cuyo bloqueo está libre (su proceso ya no existe) pasa a `interrupted` (`abandoned`), y `/status` lo dice sin duración. Nunca se reanuda.
+- **Por qué.** Basta para saber, tras una caída, qué bucle estaba en vuelo y que se interrumpió; su última pregunta la recupera el servicio como `uncertain`, sin reenviarla.
+- **Alternativas rechazadas.** Reanudar el bucle: reenviaría a ciegas.
+- **Impacto.** `loop_flow.recover_loops`, `last_loop`. Las guardas de versión pasan a `[…, 10, 13]`. Una base con la 010 de A2 sola recibe las tablas con la 013 (`test_a_database_at_the_a2_010_gets_the_loop_tables_from_013`); una base de una versión anterior de esta rama, cuya 010 ya traía las tablas, las pierde y las recibe de nuevo (`DROP TABLE IF EXISTS`: son contabilidad de bucles que nunca se reanudan y ninguna base publicada las tuvo), y acaba con el mismo esquema que una nueva (`test_a_database_whose_010_held_the_loops_ends_with_the_same_schema`). Si la 011 o la 012 se mergean después, su número es menor que 13 y una base que ya tenga la 013 las aplica igual: `migrate` aplica cada versión que falta, no solo las mayores.
+
+### Riesgos y límites de A3
+
+- Un resultado convence al modelo, en el mismo turno, de proponer otra lectura → solo corre sin la caja si es una lectura que la persona marcó `auto_read`; cualquier otra abre la caja. Límite aceptado: es lo que `auto_read` permite.
+- El Mock con guion toma el primer nonce que encuentra → los tests de inyección lo aprovechan (`nonce_mismatch`); un modelo real puede comportarse distinto. No medido con Copilot (tramo 3).
+- El tamaño de un turno se mide en caracteres de Python; Copilot puede contar de otra forma → 28 000 deja unos 4 000 de margen bajo el límite medido, y el `check` del proveedor sigue rechazando antes de registrar.
+- El HMAC del turno 1 cubre el bloque del harness, no la memoria ni la pregunta → se dice así en el registro; la pregunta queda en el historial como siempre.
+- Un bucle `running` de un proceso vivo en otra terminal → su bloqueo está tomado y `recover_loops` no lo toca.
+
+### A3-9. El progreso: turno, fase y segundos (2026-11-27, al terminar A3)
+
+- **Qué.** El panel lateral («Loop») muestra `turn k of N: <fase> (S s)`, con S los segundos desde que empezó el bucle. Las fases:
+  - `sending C characters and waiting for the reply`, mientras el proveedor responde (la pantalla completa sigue con su `thinking (N s)` de siempre);
+  - `plan of n step(s): approval`, mientras la regla o la caja deciden;
+  - `running step k of n`, que avisa el ejecutor desde su hilo justo antes de llamar al paso (`execute_plan(on_step=…)`, `PlanSetting.progress`), llevado al hilo de la conversación con `call_soon_threadsafe`. Solo observa.
+  Al terminar, el panel y `/status` dicen `completed (answer), 3 send(s), done in S s`, con S sacado de `created_at` y `finished_at` de `loop_runs`. En el modo plano no hay panel: el progreso son las propias líneas del harness (`turn k of N: sending …`, `running plan:`, cada paso con su duración).
+- **Por qué.** Lo pide la hoja de ruta («Hito 1»): con Copilot cada turno tarda 11-14 s, y la persona tiene que saber en qué está el bucle sin leer el transcrito.
+- **Alternativas rechazadas.**
+  - Separar «enviando» de «esperando»: el servicio no expone el momento del envío, y las dos fases durarían lo mismo que una.
+  - Un temporizador propio que repinte el panel cada segundo: otro hilo para un número que ya da la línea `thinking (N s)` durante la espera.
+- **Impacto.** `loop_flow._Loop._phase`/`_step`, `plan_flow._run`, `plan_run._run_steps`; `test_the_panel_follows_each_phase_with_the_loop_s_seconds`.
+
+### A3-10. `/agent --box`
+
+- **Qué.** Como `/plan --box` (A2-4): todo plan de ese bucle va a la caja, en cada turno. La opción no se envía ni se guarda.
+- **Impacto.** `conversation._cmd_agent`; `test_box_sends_every_plan_of_the_loop_to_the_box`.
+
+### A3-11. Trabajo futuro, sin código: menos turnos
+
+Cada turno con Copilot cuesta 11-14 s y un envío del presupuesto. Dos cosas los reducirían, y ninguna entra aquí:
+- **Referencias entre pasos** (`ai-harness/plan/2`): un argumento `{"$ref": "paso.campo"}` que tome un campo **declarado** (`result_fields` en la lista local) de un paso **anterior** del mismo plan. Ahorra el turno de «leer A para saber qué leer en B». Exige lo de D2: forma del resultado declarada por la persona, solo referencias hacia atrás, y la caja mostrando que el valor saldrá de un resultado (y que viajará como argumento al servidor de B: SEC-05).
+- **Leer varios elementos en una llamada**: herramientas de la lista que acepten una lista acotada de identificadores (por ejemplo, `projects: array<string>, max 10`). Hoy la política solo admite cadena, entero, booleano o enumerado; haría falta un tipo lista con tope de elementos y de bytes, y el catálogo diciéndolo.
+Las dos se miden antes con las cifras de A4 (cuántos turnos piden encadenar o repetir la misma lectura).
+
+### A3-8. Lo que queda abierto
+
+1. **El mensaje de la orden.** (a) `/agent` (tomada); (b) además `/plan --loop`. **Recomiendo (a)**: una sola forma, que no se confunde con una pregunta.
+2. **Correcciones.** (a) una por bucle (tomada); (b) ninguna; (c) una por turno. **Recomiendo (a)**.
+3. **El fallo de un paso.** (a) vuelve como dato (tomada); (b) para el bucle. **Recomiendo (a)**.
+4. ~~El contenido de un proveedor no sintético.~~ **Decidida por el dueño el 2026-11-28: (b)**, una caja por bucle con el texto exacto del primer envío con resultados; ver A3-14.
+5. **Ctrl+C en el aviso del código, dentro de un bucle.** (a) `undecided`, y el bucle para con `not_approved`, como en `/plan` (T2-9; tomada); (b) un motivo propio, `interrupted`. **Recomiendo (a)**: una sola regla para el aviso, y nada se envía en ninguno de los dos casos.
+6. ~~Dónde van las tablas del bucle.~~ **Resuelta el 2026-11-28 (revisión de `fa6b6d1`, hallazgo 5)**: en su propia migración, la 013; ver A3-7.
+7. **El texto de cada turno en la pantalla completa.** (a) en un bloque ajeno plegable como cualquier texto largo (tomada: `tui.py` solo gana `refresh_panel` y la entrada «Loop»); se ve entero con Enter o un clic; (b) siempre desplegado. **Recomiendo (b)** si el dueño quiere «ver exactamente lo que se envía» sin pulsar nada; en el modo plano ya sale entero.
+
+8. **Qué cuenta como argumento acotado (A3-12).** (a) `pattern` y `max_length` ≤ 64 (tomada); (b) además, juzgar el patrón (rechazar `.`, `\s`, clases negadas). **Recomiendo (a)**: juzgar una expresión regular es frágil y la lista es de la persona; el límite de 64 acota lo que lleva cada valor.
+
+## Revisión independiente de `fa6b6d1` (2026-11-28)
+
+Decisiones del dueño del 2026-11-28 (hallazgos 2, 3 y 4) y de esta rama (1, 5-8). Sustituyen a A3-8.4 y A3-8.6.
+
+### A3-12. Dentro de `/agent`, solo corre por regla lo que tiene todos los argumentos acotados (decisión del dueño)
+
+- **Qué.** Dentro de `/agent`, un plan corre sin la caja solo si cada paso es `auto_read` **y** cada argumento que su herramienta declara está acotado: `enum`, `integer`, `boolean`, o `string` con `pattern` y `max_length` ≤ 64 (`config.BOUNDED_STRING_MAX_LENGTH`, `config.free_argument`). Si un paso no lo cumple, el plan entero va a la caja, cuya cabecera dice por qué (`why: step 2 (synthetic.echo_env) takes free text in argument name; inside /agent, …`). La línea `running plan:` de un plan por regla dentro del bucle añade «and whose every argument is bounded». `/plan` en una sesión limpia sigue con la regla de A2.
+- **El patrón.** La política ya lo aplica con `re.fullmatch`: está anclado se escriba como se escriba, así que no se exige `^…$`. Se exige `max_length` ≤ 64 porque `max_length` es obligatorio pero puede llegar a 4 096: con 64 lo que lleva un valor elegido por el modelo queda acotado. Lo que el patrón deja pasar es decisión de la persona: el harness no juzga una expresión regular (`.*` es tan libre como ninguna), y SECURITY.md lo dice.
+- **Argumentos no declarados.** Nunca se envían: la pasarela los rechaza (`argument_not_allowed`) aunque el esquema del servidor los acepte. Por eso «acepta argumentos no declarados» no puede darse en la lista local.
+- **Por qué.** Dentro de un bucle, un resultado puede convencer al modelo de pedir otra lectura; con un argumento de texto libre, el modelo podría meter en él lo que leyó y mandarlo a un servidor (SEC-05) sin que la persona lo vea. Con argumentos acotados, lo que puede salir así son valores de una lista que la persona escribió.
+- **Lo que aún puede salir.** Los valores acotados que elige el modelo (qué proyecto, qué número): un canal pequeño, pero un canal. La persona decide qué herramientas llevan `auto_read`.
+- **Impacto.** `config.free_argument`, `PlanStep.free_argument`, `Plan.first_free`, `PlanSetting.bounded_only`, `plan_flow.free_text_reason`, `plan_run.approval_header(why=)`; `entry_sha256` ya liga los argumentos declarados, así que cambiarlos entre leer y ejecutar para el plan (`list_changed`).
+
+### A3-13. La conversación guarda los resultados: aviso, `/status` y `/plan` (decisión del dueño)
+
+- **Qué.** `/agent` sigue en la conversación de la sesión. Tras un bucle que envió algún turno con resultados (`loop_turns.plan_id` no nulo, escrito con la solicitud: cuenta también un envío `uncertain`), el harness dice una vez `note: this conversation now holds what the reads returned: …; /new starts a clean conversation`, y `/status` lo repite (`results: …`) mientras la sesión los tenga. En esa sesión, `/plan` (y `main.py plan`) aplica la condición de A3-12. Un bucle que acabó sin enviar resultados deja la sesión limpia.
+- **Por qué.** El proveedor ve la conversación entera al responder; una pregunta posterior, aunque sea `/plan`, está influida por lo que leyeron las herramientas.
+- **Impacto.** `loop_flow.holds_results`, `HOLDS_RESULTS`, `IN_THIS_SESSION`; `conversation._cmd_status`, `_cmd_plan`; `plan_cli`.
+
+### A3-14. Con un proveedor no sintético, una caja por bucle antes del primer envío con resultados (decisión del dueño)
+
+- **Qué.** Con un proveedor cuyo contenido no es sintético, la primera vez que un bucle va a enviar resultados se abre la caja (botones en la pantalla completa, código escrito en el modo plano y en la CLI) con el texto exacto de ese turno, ligado a su hash (`Proposal` de alcance `code-mode.loop-send`: sesión, bucle, turno, SHA-256 del texto, proveedor y el texto). Aprobada, el bucle sigue sin volver a preguntar. Rechazada, sin decidir, caducada (`ttl_s`, como cualquier aprobación), Ctrl+C en el aviso o una terminal no interactiva: no se envía nada y el bucle para (`stopped`, `send_not_approved`). La auditoría guarda `loop.send_approval` con el resultado, cómo se decidió y 16 caracteres del hash. Con el Mock (sintético) no hay caja ni línea. Un turno de corrección no la pide: lleva el motivo del rechazo, texto del harness, no lo que devolvió una lectura.
+- **Lo mostrado es lo enviado.** El texto es un punto fijo de lo que la caja muestra (`loop.sendable`, comprobado al componerlo), así que lo aprobado y lo enviado son los mismos bytes.
+- **Impacto.** `loop_flow._Loop._consent`, `SEND_SCOPE`, `SEND_FORMAT`, `SEND_BUTTON_QUESTION`; `ApprovalScreen`, `ApprovalButton` y `ProposalArea` no se tocan (la caja se usa por `PlanView.approval` y `approvals.decide`).
+
+### A3-15. Un bloque `json` sin el nonce del turno es la respuesta, dentro del bucle
+
+- **Qué.** Dentro de `/agent`, una respuesta en la que el nonce del turno no aparece en ningún sitio no tiene plan de ese turno: es la respuesta final, aunque traiga un bloque `json` (un ejemplo, unos datos). Un bloque que nombra **otro** nonce (`nonce_mismatch`: un plan viejo o uno que un resultado intentó colar) sigue siendo un rechazo. `/plan` no cambia: allí un rechazo y una respuesta acaban igual (se muestra y no pasa nada más), y el motivo `nonce_missing` informa.
+- **Por qué.** En el bucle, tomarlo por rechazo gastaba la corrección y acababa en `stopped (refused)` una respuesta buena. No corre nada en ningún caso, y la respuesta envía menos que la corrección.
+- **Impacto.** `loop_flow._Loop._next`.
+
+### A3-16. El texto enviado, limpio después del corte (hallazgo 1, MEDIO)
+
+- **Qué.** El resultado se limpia entero, se acota y se limpia **otra vez** la cabeza y la cola: un token seguido de `_` no es credencial en el texto entero (no hay frontera) y lo es en cuanto el corte quita el `_`. Después, el turno entero tiene que ser un punto fijo de `safe_foreign_text` y de `normalise_content` (`loop.sendable`); si no, no se envía y el bucle para (`stopped`, `turn_not_clean`). La pantalla muestra esos mismos bytes: su limpieza es la identidad sobre ellos.
+- **Impacto.** `loop.clean_piece`, `loop.sendable`, `TurnNotClean`; la 013 admite `turn_not_clean` y `send_not_approved`.
+
+### A3-17. `HARNESS_AUTO_READ` vacía es el valor por defecto
+
+- **Qué.** Sin definir, vacía o en blanco: `on`, a propósito y documentado. `on`/`off` (con espacios alrededor) valen; cualquier otra cosa (`ON`, `0`, `of`) se rechaza sin enviar nada.
+
 ### Decisiones abiertas del tramo 2
 
 1. **Título de los bloques de resultado en la pantalla completa.**

@@ -5,6 +5,7 @@ TABLES = {
     "schema_migrations", "sessions", "requests", "messages", "audit_events", "request_context",
     "skill_runs", "skill_steps", "approvals", "tool_calls", "effect_sources",
     "plan_runs",  # code-mode slice 2
+    "loop_runs", "loop_turns",  # code-mode A3
 }
 
 

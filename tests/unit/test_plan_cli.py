@@ -139,3 +139,28 @@ def test_a_session_in_use_is_refused_before_sending(setup, cli, conn, monkeypatc
         lock.release()
     assert code == 1 and "in use" in err
     assert rows(conn, "SELECT COUNT(*) FROM requests") == [(0,)]
+
+
+@pytest.mark.parametrize("holds", [True, False], ids=["holds-results", "clean"])
+def test_plan_in_a_session_that_holds_results_needs_bounded_arguments(tmp_path, cli, conn,
+                                                                      monkeypatch, holds,
+                                                                      hang_guard):  # noqa: F811
+    """A3-13: `plan` on a session whose conversation holds tool results applies the bounded
+    arguments condition, as `/plan` does in the conversation."""
+    from tests.mcp_support import DEFAULT_TOOLS
+    tools = {**DEFAULT_TOOLS, "echo_env": {**DEFAULT_TOOLS["echo_env"], "auto_read": True}}
+    mcp = McpList(tmp_path / "mcp", tools=tools)
+    step = {"id": "v", "server": "synthetic", "tool": "echo_env", "args": {"name": "DEMO_X"}}
+    responses = tmp_path / "respuestas.json"
+    responses.write_text(json.dumps({"etiqueta alpha": plan_reply(step)}), "utf-8")
+    env = {"HARNESS_PROVIDER": "mock", "HARNESS_MOCK_RESPONSES": str(responses),
+           "HARNESS_MCP_CONFIG": str(mcp.path)}
+    _, out, _ = cli("session", "create", "Plan sintético", **env)
+    monkeypatch.setattr(plan_cli, "holds_results", lambda *_: holds)
+    terminal = ScriptedTerminal([], [CODE])
+    monkeypatch.setattr(plan_cli, "TtyTerminal", lambda: terminal)
+    code, _, err = cli("plan", out.strip(), QUESTION, **env)
+    assert code == 0, err
+    means = "code" if holds else "rule"
+    assert rows(conn, "SELECT means FROM plan_runs") == [(means,)]
+    assert ("why:      step 1 (synthetic.echo_env) takes free text" in terminal.text) is holds
