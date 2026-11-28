@@ -314,7 +314,7 @@ Lo que ya existe y sobre lo que se construye. Cada premisa se midió aquí, en `
 | SEC-02 | Cruce de sesiones | Nonce por pregunta (D15) | `Proposal` ligada a sesión y solicitud |
 | SEC-01 | Credenciales | Un plan con una credencial se rechaza (D5) | Resultados enmascarados (D11) |
 
-La matriz `docs/security/sec-matrix.md` describe `develop`. Las filas se actualizan cuando el tramo 2 se mergee (tarea 6.x), no antes.
+La matriz `docs/security/sec-matrix.md` describe `develop`. El tramo 2 añade sus tests y requisitos a las filas SEC-03, 05, 07, 12, 14 y 15 en su propia rama (tarea 4.9) sin cambiar ningún estado, así que `sec-states.json` no cambia; las filas llegan a `develop` con el merge.
 
 ## Dependencias del tramo 2 (ramas de interfaz en curso)
 
@@ -384,6 +384,108 @@ Las fases siguientes añaden dos cosas:
 - órdenes de ejecución con nombre.
 
 **Consecuencia para el esquema.** El catálogo podrá incluir un «servidor» interno, que no es MCP. El esquema `plan/1` ya lo admite: `server` y `tool` son nombres que decide el catálogo, no la sintaxis del plan. El lector solo los comprueba contra la vista de la política que recibe. Cuando exista ese servidor interno, esa vista tendrá que incluirlo con su operación por herramienta, sin cambiar el formato del plan.
+
+## Lo que enseñó el tramo 2 (A1, 2026-11-27)
+
+Decisiones tomadas al construir `/plan`. Completan D8 a D12; donde cambian algo, lo dicen.
+
+### T2-1. El tope del catálogo y una pregunta que no cabe
+
+- **Qué.** El catálogo tiene su propio tope: 64 herramientas y 8 000 caracteres (`MAX_CATALOGUE_TOOLS`, `MAX_CATALOGUE_CHARS`). Si lo pasa, `/plan` no registra ni envía nada y dice cuánto ocupa. Después, el `check` del proveedor mide el texto entero (instrucciones, catálogo, memoria, adjunto y pregunta) antes de registrar nada, como en toda pregunta. Si no cabe, el error dice cuánto ocupa cada parte y nombra «the plan instructions and catalogue». No se recorta nada para que quepa.
+- **Por qué.** Recortar la memoria o el catálogo cambiaría lo que el modelo ve sin que la persona lo decida. 8 000 deja sitio a la memoria dentro de los 32 000 de Copilot. Con la lista sintética, las instrucciones y el catálogo ocupan 1 907 caracteres.
+- **Alternativas rechazadas.**
+  - Recortar el catálogo por orden: el modelo no sabría qué falta.
+  - Quitar la memoria en silencio: cambia la respuesta sin avisar.
+- **Impacto.** D8 «Tope» queda así. `tests/unit/test_mcp_plan_prompt.py` y `tests/unit/test_shell_plan.py::test_a_prompt_over_the_provider_limit_records_nothing`.
+
+### T2-2. La `description` de la lista: en el catálogo, no en la caja
+
+- **Qué.** Decisión abierta 5 del estudio, opción (a): `ToolEntry.description` es opcional, la escribe la persona, ocupa una línea de 120 caracteres como mucho y se rechaza si la limpieza de la terminal la cambiaría (control, invisibles, bordes en blanco). Va en el catálogo. **No** va en el contenido aprobado: «reads:» se escribe solo con el servidor, la herramienta y los argumentos del plan.
+- **Por qué.** La caja tiene que poder escribirse otra vez desde el plan solo. Si incluyera la descripción, editar la lista mientras la caja está abierta parecería una alteración del plan. La lista se vuelve a leer después de consumir la aprobación, y la política se decide otra vez en cada paso (D6).
+- **Alternativas rechazadas.**
+  - La descripción en la caja: ata el hash a un texto que no es el plan.
+  - `result_fields`: sin referencias (D2), nada los usaría todavía.
+- **Impacto.** `harness/mcp/config.py` (`DESCRIPTION_MAX`), `harness/mcp/plan_run.py` (`step_lines`).
+
+### T2-3. El plazo del plan
+
+- **Qué.** Decisión 5, opción (a): la suma de `startup_timeout_s + call_timeout_s` de cada paso, con un máximo de 300 s, guardada en la fila del plan y mostrada en la caja. Un temporizador activa la señal de parada (`StopSignal`) al vencer. El paso en curso termina con su árbol de procesos, como con Ctrl+C. El plan queda `timeout` con `error_code = deadline`, y los pasos siguientes no se llaman.
+- **Por qué.** Cada paso arranca su servidor (decisión 6, opción (a)), así que su tiempo máximo es el arranque más la llamada.
+- **Alternativas rechazadas.**
+  - Solo los plazos de llamada: un arranque lento se comería el plazo.
+  - Un valor fijo: otro número que mantener.
+- **Impacto.** `deadline_s`, `_run_steps`.
+
+### T2-4. Migración 009 y la fila del plan
+
+- **Qué.** `009_plan_runs.sql`, porque la 008 es de `feature/response-mode`.
+  - `plan_runs` guarda una fila por plan: hash del plan, hash de la aprobación, pasos, plazo, tope mostrado, estado de la aprobación (`pending`, `granted`, `rejected`, `expired`, `undecided`, `consumed`), medio (`code` o `button`), identidad, estado del plan, paso donde paró, código de error y marcas de tiempo.
+  - `tool_calls` gana `plan_id` y `plan_step`.
+  - SQL literal con `?`. Ninguna fila existente cambia.
+  - Una fila que espera aprobación de un proceso que ya no existe se marca `abandoned` en el siguiente `/plan` de la misma sesión. Una fila en `running` sin su bloqueo vivo se marca `interrupted` al ejecutar el siguiente plan.
+- **Por qué.** `approvals` exige un `run_id` de `skill_runs`, y un plan no es un Skill. Una tabla propia evita una clave falsa.
+- **Alternativas rechazadas.**
+  - Reutilizar `approvals` con un `skill_run` ficticio: mezcla dos máquinas de estados.
+- **Impacto.** `tests/unit/test_storage.py` espera la tabla y la versión 9. Al mergear `response-mode` quedan 1–9 sin hueco.
+
+### T2-5. El ejecutor: su hilo, su conexión, su bloqueo
+
+- **Qué.** `execute_plan` corre en un hilo del ejecutor de asyncio, con su propia conexión SQLite y un bloqueo con nombre `plan-<id>`.
+  - Compara en este orden:
+    - el hash del plan contra sus bytes canónicos;
+    - ese hash contra la fila;
+    - el hash de la aprobación contra la fila;
+    - los pasos que se ejecutarán (leídos de los bytes canónicos) contra los mostrados;
+    - la `Proposal`, escrita otra vez desde el plan con la sesión, la solicitud y el plan recibidos, contra el hash aprobado.
+  - Si algo difiere, termina `plan_altered` y no arranca nada. Después consume la aprobación con un único `UPDATE … WHERE approval = 'granted' AND approval_hash = ? AND expires_at > ?`.
+  - Lo que se audita usa la sesión y la solicitud de la fila, nunca las recibidas. Un `plan_id` sin fila devuelve un informe `not_run`, sin lanzar.
+  - Ctrl+C en la conversación cancela la tarea. `run_in_thread` lo convierte en `StopSignal("interrupted")`, quita la cancelación y espera el informe, para que la persona vea qué paso paró.
+- **Por qué.** El cliente MCP abre su propio bucle de eventos (`anyio.run`), y una conexión SQLite no se comparte entre hilos.
+  - Hallazgo al probar: con otra solicitud, el primer borrador lanzaba `FOREIGN KEY constraint failed` al auditar la denegación. Ahora se deniega y se audita bien.
+- **Alternativas rechazadas.**
+  - Ejecutar en el hilo de la conversación: bloquearía la pantalla y Ctrl+C.
+- **Impacto.** `harness/mcp/plan_run.py`, `harness/mcp/client.py` (`StopSignal`, `SessionRequest.stop`).
+
+### T2-6. La CLI y la terminal no interactiva
+
+- **Qué.** `main.py plan SESSION_ID PREGUNTA` usa el mismo flujo (`plan_flow.run_plan`).
+  - Exige stdin y stdout de consola. Sin ella sale con código 2 antes de leer la lista o abrir la base.
+  - Las líneas del harness van a stderr; la respuesta y los resultados, saneados, a stdout; la caja, a la terminal.
+  - En la conversación, una terminal no interactiva no ofrece caja: el plan queda `undecided`.
+  - La CLI no tiene `--project` en este tramo.
+- **Por qué.** Un plan que nadie puede aprobar no debe gastar un envío.
+- **Alternativas rechazadas.** Leer el código de stdin redirigido: cualquiera que escriba en esa tubería aprobaría.
+- **Impacto.** `harness/mcp/plan_cli.py`; dos líneas aditivas en `harness/cli.py`.
+
+### T2-7. `/plan` se escribe entero
+
+- **Qué.** `CommandSpec.full_name_only`. `resolve_name` nunca resuelve un prefijo a una orden así, y el parser dice «`/pla` is not a command; `/plan` is typed in full». La ayuda y el autocompletado la ofrecen igual. `/mode` no existe en esta rama. Cuando llegue será otra orden: no llama a `read_plan`.
+- **Por qué.** D9: un plan solo se pide cuando la persona escribe `/plan`.
+- **Impacto.** `harness/shell/commands.py`, `harness/shell/parser.py`.
+
+### T2-8. El resultado, preparado para A3
+
+- **Qué.** Cada paso devuelve un `StepResult` con estos campos: texto ya saneado y acotado, credenciales enmascaradas, bytes del resultado, si se cortó, duración y `call_id`. La vista lo pinta como texto ajeno bajo una línea del harness. Nada vuelve al proveedor.
+- **Por qué.** A3 tendrá que acotarlo y marcarlo para enviarlo. Ya tiene lo que necesita sin volver a llamar.
+- **Impacto.** Ninguno en este tramo.
+
+### Decisiones abiertas del tramo 2
+
+1. **Título de los bloques de resultado en la pantalla completa.**
+   - (a) el genérico «text from outside the harness», con la línea del harness encima (tomada, porque `tui.py` estaba fuera de alcance);
+   - (b) «result of step k», pasando una etiqueta a `show_rows` cuando se mergee `bugfix/windows-parity-2`.
+
+   **Recomiendo (b).**
+2. **`--project` en `main.py plan`.**
+   - (a) sin memoria (tomada);
+   - (b) como `ask --project`, con su auditoría de denegación.
+
+   **Recomiendo (b)** cuando se pida.
+3. **Terminal no interactiva en la conversación.**
+   - (a) sin caja (tomada);
+   - (b) mostrar la caja con «no se puede aprobar aquí».
+
+   **Recomiendo (b)**: la persona ve qué se habría ejecutado.
 
 ## Risks / Trade-offs
 

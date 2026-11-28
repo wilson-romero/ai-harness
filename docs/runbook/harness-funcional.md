@@ -258,7 +258,7 @@ La demo automática: `uv run python scripts/demo_mcp_gateway.py` → `demo: PASS
 
 Después, con `/send`, ese resultado vuelve a Copilot marcado como datos.
 
-**Estado: FALTA.** Lo decidido el 2026-11-27 (`docs/estudios/2026-11-27-code-mode.md` §10.1):
+**Estado: PARCIAL** (pasos 1 a 6 en `feature/code-mode-plan`, sin merge; la vuelta del resultado, la medición con Copilot real y las escrituras faltan). Lo decidido el 2026-11-27 (`docs/estudios/2026-11-27-code-mode.md` §10.1):
 - plan JSON interpretado por el harness, sin Monty;
 - una aprobación por hash del plan entero, con botón en pantalla completa y código tecleado en modo plano;
 - el resultado no vuelve a Copilot en el primer corte;
@@ -286,13 +286,39 @@ Cada paso es un change de OpenSpec pequeño, demostrable con el Mock, y lleva su
 
 **Paso 1, hecho en `feature/code-mode` (2026-11-27, tramo 1 de `openspec/changes/code-mode/`).** `harness/mcp/plan.py` lee el plan como función pura; nada lo usa todavía. Respecto a la fila 1 de la tabla, el esquema de la versión 1 **no** tiene `$ref`, `return` ni `for_each`: es una lista de llamadas con argumentos literales (design D2). Se comprueba con `uv run pytest tests/unit/test_mcp_plan.py`. El siguiente es el tramo 2 (filas 2 a 6).
 
+**Pasos 2 a 6, hechos en `feature/code-mode-plan` (2026-11-27, tramo 2).** `/plan <pregunta>` existe en la conversación (pantalla completa y `--plain`) y como `main.py plan SESSION_ID PREGUNTA`. Solo lecturas, con el Mock y el servidor sintético; el resultado no vuelve a Copilot (eso es la fila 8). Diferencias con la tabla:
+- fila 2: el catálogo lleva la `description` que tú escribes en la lista local (una línea, 120 caracteres como mucho), no la del servidor; no hay `result_fields`. Su tope propio es de 64 herramientas y 8 000 caracteres; además cuenta en el tope del proveedor, como toda la pregunta;
+- fila 3: la migración es la 009 (la 008 es de `feature/response-mode`);
+- fila 4: en la CLI y en `--plain` se teclea el código; la CLI exige una terminal interactiva y, si no la hay, no envía nada;
+- el plan tiene un plazo total: la suma de arranque y llamada de cada paso, 300 s como mucho.
+
 **El siguiente paso más pequeño (antes del tramo 1):** el paso 1 solo, sin tocar la conversación. Es una función pura que recibe el texto de la respuesta y el nonce y devuelve «sin propuesta», «propuesta válida» o «rechazada: motivo». Se prueba con unos quince textos de fixture. No necesita ninguna rama abierta. Puedes escribir el primer borrador del esquema en la lección 11 de la guía.
 
-### Comprobación de salida (cuando exista)
+### Comprobación de salida
 
 ```sh
-# no verificado: /plan aún no existe
 uv run python scripts/demo_code_mode.py
+```
+
+A mano, con el Mock: escribe una lista local con el servidor sintético y una respuesta guionizada que contenga un plan (el Mock pone el nonce de la pregunta donde la respuesta dice `{{plan_nonce}}`), y abre la conversación:
+
+```sh
+w=$(mktemp -d)
+cat > "$w/mcp.local.json" <<EOF
+{"format": "ai-harness/mcp/1", "servers": {"synthetic": {
+  "command": ["$(uv run python -c 'import sys; print(sys.executable)')", "$PWD/tests/fixtures/mcp/synthetic_server.py", "--state", "$w/mcpstate"],
+  "startup_timeout_s": 10, "call_timeout_s": 10,
+  "tools": {"get_project_metadata": {"operation": "read", "description": "lee la ficha de un proyecto de demo",
+            "arguments": {"project": {"type": "string", "max_length": 64, "pattern": "[a-z0-9][a-z0-9-]*", "required": true}}}}}}}
+EOF
+cat > "$w/respuestas.json" <<'EOF'
+{"etiqueta alpha": "Propongo este plan:\n\n```json\n{\"format\": \"ai-harness/plan/1\", \"nonce\": \"{{plan_nonce}}\", \"steps\": [{\"id\": \"a\", \"server\": \"synthetic\", \"tool\": \"get_project_metadata\", \"args\": {\"project\": \"demo-alpha\"}}, {\"id\": \"b\", \"server\": \"synthetic\", \"tool\": \"get_project_metadata\", \"args\": {\"project\": \"demo-beta\"}}]}\n```\n"}
+EOF
+HARNESS_DATA_DIR="$w/data" HARNESS_PROVIDER=mock HARNESS_MOCK_RESPONSES="$w/respuestas.json" \
+  HARNESS_MCP_CONFIG="$w/mcp.local.json" uv run python main.py chat
+# en la conversación: /plan ¿qué proyectos de demo tienen la etiqueta alpha?
+sqlite3 "$w/data/harness.sqlite3" "SELECT plan_id, plan_step, tool, status FROM tool_calls WHERE plan_id IS NOT NULL"
+cat "$w/mcpstate/calls.log"
 ```
 
 **PASS si:**
@@ -301,7 +327,7 @@ uv run python scripts/demo_code_mode.py
 - `"$w/mcpstate/calls.log"` no contiene ninguna llamada que el plan no declaraba;
 - un plan con `set_project_metadata` se rechaza antes de arrancar el servidor (`starts.log` vacío).
 
-Hasta entonces, el Nivel 5 se practica a mano: ejercicio de la pieza 9 de la guía («tú eres el bucle»).
+La vuelta del resultado al modelo (`/send`, fila 8) todavía no existe: hasta entonces, esa parte del Nivel 5 se practica a mano, con el ejercicio de la pieza 9 de la guía («tú eres el bucle»).
 
 ---
 
