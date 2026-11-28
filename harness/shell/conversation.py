@@ -24,7 +24,7 @@ import sqlite3
 import stat
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -40,6 +40,7 @@ from harness.core.answer_style import with_notice
 from harness.core.response_mode import describe_mode
 from harness.core.service import SessionService
 from harness.core.strict_json import decode_text_limited
+from harness.mcp.audit import args_key
 from harness.mcp.config import LoadedConfig, load_config
 from harness.mcp.loop import PROVIDERS_ENV, loop_settings
 from harness.mcp.loop_flow import (
@@ -56,6 +57,7 @@ from harness.mcp.plan_flow import (
     auto_read_setting,
     box_option,
     run_plan,
+    withdraw_pending_interrupt,
 )
 from harness.mcp.plan_prompt import PlanUnavailable, build_catalogue, shown_instructions
 from harness.memory.config import MemorySettings, ensure_data_dir_outside_vault
@@ -96,12 +98,18 @@ from harness.shell.terminal import (
     StyledTerminal,
     WaitInterrupted,
 )
-from harness.skills.approvals import APPROVAL_RULE, Proposal, approval_header
+from harness.skills.approvals import APPROVAL_RULE, Proposal, Verdict, approval_header, decide
 from harness.skills.config import SkillSettings
 from harness.skills.definition import _SKILL_NAME_RE, InvalidSkill, load_skill, skills_root
 from harness.skills.effects import Effect, default_effects
 from harness.skills.engine import MAX_INPUT_BYTES, OPEN_RUN_STATES, RunOutcome, SkillEngine
+from harness.storage import repositories as repo
+from harness.storage.database import transaction
 from harness.storage.locks import SessionLock
+from harness.workspace import session as workspace
+from harness.workspace.codes import WorkspaceRefused
+from harness.workspace.paths import Root
+from harness.workspace.server import Folder, folder_hmac
 from harness.text.safe_text import (
     neutralise_delimiters,
     safe_foreign_text,
@@ -249,6 +257,10 @@ class Conversation:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._current: asyncio.Task | None = None
         self._notes: tuple[str, ...] = ()  # memory notes of the last question (shell-tui D4)
+        # workspace-tools B2: the work folder of this session, in memory only (design B2-1),
+        # and whether a /plan or /agent is in course (the folder cannot change then).
+        self._workspace: Folder | None = None
+        self._plan_busy = False
 
     # -- output ---------------------------------------------------------------------------------
 
@@ -597,6 +609,9 @@ class Conversation:
         self._session, self._lock = taken
         self._attachment = None
         self._notes = ()
+        if self._workspace is not None:
+            self._workspace = None  # a work folder is chosen per session (D1)
+            self._say("workspace: - (another session: it starts without a work folder)")
         # A loop left `running` by a process that is gone is marked interrupted as soon as a
         # conversation opens a session (review of fa6b6d1, finding 6), not at the next /agent.
         recover_loops(self._deps.conn, self._deps.data_dir)
@@ -651,6 +666,7 @@ class Conversation:
             last_request=last[1] if last is not None else "-",
             mode=self._mode_shown(session),
             loop=self._loop_counter or last_loop(self._deps.conn, session.session_id),
+            workspace=self._workspace_shown(),
         )
 
     def _mode_shown(self, session: Session) -> str:
@@ -783,6 +799,8 @@ class Conversation:
             f"mode:     {session.response_mode}",
             f"sends: {panel.sends}",
             f"loop: {panel.loop}",
+            f"workspace: {panel.workspace}"
+            + (f", send: {self._consent_shown()}" if self._workspace is not None else ""),
             *([f"results: {HOLDS_RESULTS}"]
               if holds_results(self._deps.conn, session.session_id) else []),
             f"memory: {len(panel.notes)} note(s) in the last question",
@@ -913,7 +931,7 @@ class Conversation:
         """What a `/plan` question sends first, instead of the answer notice (code-mode D8):
         shown only when the MCP list has a read tool to offer."""
         try:
-            catalogue = build_catalogue(self._mcp_config()())
+            catalogue = build_catalogue(self._plan_config()())
         except PlanUnavailable:
             return
         except HarnessError as refused:
@@ -950,7 +968,7 @@ class Conversation:
         if size > MAX_QUESTION_BYTES:
             raise UsageError(f"the question has {size} bytes; the limit is {MAX_QUESTION_BYTES}; "
                              "nothing was sent")
-        load = self._mcp_config()
+        load = self._plan_config()
         auto_read = auto_read_setting(self._environ()) and not box  # a wrong value: stop here
         build_catalogue(load())  # no read tool, or a list that cannot be read: stop here
         context = self._context_for_question(question)
@@ -965,12 +983,16 @@ class Conversation:
                           else None),
             **({"clock": clock} if clock is not None else {}),
         )
-        await run_plan(
-            PlanRequest(question, self._session_id, self._deps.provider, context,
-                        attachment[1] if attachment is not None else None),
-            service=self._service, conn=self._deps.conn, view=_PlanScreen(self),
-            terminal=self._terminal, setting=setting,
-        )
+        self._plan_busy = True
+        try:
+            await run_plan(
+                PlanRequest(question, self._session_id, self._deps.provider, context,
+                            attachment[1] if attachment is not None else None),
+                service=self._service, conn=self._deps.conn, view=_PlanScreen(self),
+                terminal=self._terminal, setting=setting,
+            )
+        finally:
+            self._plan_busy = False
 
     async def _cmd_agent(self, *words: str) -> None:
         """`/agent QUESTION` (code-mode A3): `/plan`, and then each plan's results go back to
@@ -991,7 +1013,7 @@ class Conversation:
                 f"/agent sends what the reads return back to the provider, and "
                 f"{PROVIDERS_ENV} does not name {provider.name}; nothing was sent. Set "
                 f"{PROVIDERS_ENV}={provider.name} to allow it, or ask with /plan")
-        load = self._mcp_config()
+        load = self._plan_config()
         auto_read = auto_read_setting(environ) and not box
         build_catalogue(load())
         context = self._context_for_question(question)
@@ -1003,8 +1025,10 @@ class Conversation:
             data_dir=self._deps.data_dir, environ=environ, load_config=load,
             ttl_s=self._deps.skills().approval_ttl_s, auto_read=auto_read,
             loop_to=terminal_safe(provider.name),
+            withhold=self._withhold(provider.name),
             **({"clock": clock} if clock is not None else {}),
         )
+        self._plan_busy = True
         try:
             await run_loop(
                 PlanRequest(question, self._session_id, provider, context,
@@ -1016,6 +1040,165 @@ class Conversation:
             )
         finally:
             self._loop_counter = None
+            self._plan_busy = False
+
+    # -- /workspace (workspace-tools B2) ------------------------------------------------------
+
+    def _plan_config(self) -> Callable[[], LoadedConfig]:
+        """The policy view of `/plan` and `/agent`: the local list, plus the work folder's
+        internal server while one is set (D6). Read again each time, like the list."""
+        load = self._mcp_config()
+        folder = self._workspace
+        if folder is None:
+            return load
+        key = args_key(self._deps.data_dir)
+        return lambda: workspace.with_workspace(load(), folder, key)
+
+    def _withhold(self, provider: str) -> Callable[[object], str | None]:
+        """D14: results holding text of the work folder go to a provider outside the machine
+        only with this folder's consent for it, checked at every turn (it may be revoked)."""
+        conn, data_dir, folder = self._deps.conn, self._deps.data_dir, self._workspace
+
+        def withhold(report) -> str | None:
+            if not workspace.content_steps(report):
+                return None
+            if folder is None or not workspace.has_consent(conn, args_key(data_dir),
+                                                           folder.root, provider):
+                return f"{workspace.NO_CONSENT} (/workspace send on asks for it)"
+            return None
+
+        return withhold
+
+    def _workspace_shown(self) -> str:
+        if self._workspace is None:
+            return "-"
+        path = terminal_safe(str(self._workspace.root.path))
+        return f"{path} (suspended: replaced since it was chosen)" if self._workspace.suspended \
+            else path
+
+    def _consent_shown(self) -> str:
+        provider = self._deps.provider
+        if provider.synthetic_content:
+            return f"not needed ({terminal_safe(provider.name)} is synthetic)"
+        assert self._workspace is not None
+        on = workspace.has_consent(self._deps.conn, args_key(self._deps.data_dir),
+                                   self._workspace.root, provider.name)
+        return f"{'on' if on else 'off'} for {terminal_safe(provider.name)}"
+
+    def _audit_workspace(self, outcome: str, root: Root | None) -> None:
+        detail = (f"folder={folder_hmac(args_key(self._deps.data_dir), root)[:16]}"
+                  if root is not None else "folder=-")
+        with transaction(self._deps.conn):
+            repo.insert_audit(self._deps.conn, event_type="workspace.folder", outcome=outcome,
+                              actor="cli", session_id=self._session_id, detail=detail)
+
+    def _cmd_workspace(self, *words: str) -> None:
+        """`/workspace` shows the work folder of this session; `/workspace PATH` sets it,
+        `/workspace off` unsets it, `/workspace send on|off` gives or revokes the consent to
+        send what its reads return to this provider (D1, D14). Nothing is sent."""
+        if not words:
+            if self._workspace is None:
+                self._say("workspace: - (none set; /workspace PATH sets one for this session)")
+            else:
+                self._say(f"workspace: {self._workspace_shown()}; send: "
+                          f"{self._consent_shown()}")
+            return
+        if words[0] == "send":
+            self._workspace_send(words[1:])
+            return
+        if len(words) != 1:
+            raise UsageError("/workspace takes PATH, off, or send on|off")
+        if self._plan_busy:
+            raise UsageError("workspace_busy: the work folder cannot change while a plan or a "
+                             "loop is in course")
+        if words[0] == "off":
+            before, self._workspace = self._workspace, None
+            self._audit_workspace("off", before.root if before is not None else None)
+            self._say("workspace: - (the work folder tools are gone from /plan and /agent)")
+            self._refresh_panel()
+            return
+        raw = words[0]
+        if raw == "~" or raw.startswith("~/"):
+            raw = str(Path(raw).expanduser())
+        try:
+            vault = self._deps.memory().vault_root
+        except HarnessError:
+            vault = None
+        try:
+            root = workspace.choose(raw, data_dir=self._deps.data_dir,
+                                    environ=self._environ(), vault=vault)
+        except WorkspaceRefused as refused:
+            self._audit_workspace(refused.code, None)
+            kept = (f"; the work folder stays {self._workspace_shown()}"
+                    if self._workspace is not None else "; no work folder is set")
+            raise UsageError(f"/workspace refused: {refused.code}: {refused.detail}{kept}") \
+                from None
+        self._workspace = Folder(root)
+        self._audit_workspace("set", root)
+        self._say(f"workspace: {self._workspace_shown()}; /plan and /agent can now read it "
+                  "with workspace.read and workspace.list (reads by rule); send: "
+                  f"{self._consent_shown()}")
+        self._refresh_panel()
+
+    def _workspace_send(self, words: tuple[str, ...]) -> None:
+        if len(words) != 1 or words[0] not in ("on", "off"):
+            raise UsageError("/workspace send takes on or off")
+        if self._workspace is None:
+            raise UsageError("/workspace send: no work folder is set; /workspace PATH first")
+        root = self._workspace.root
+        provider = self._deps.provider
+        if provider.synthetic_content:
+            self._say(f"workspace: send: not needed: {terminal_safe(provider.name)} is "
+                      "synthetic and its content never leaves this machine")
+            return
+        key = args_key(self._deps.data_dir)
+        name = terminal_safe(provider.name)
+        if words[0] == "off":
+            workspace.record_consent(self._deps.conn, key, root, provider.name,
+                                     state="revoked", session_id=self._session_id)
+            self._say(f"workspace: send: off for {name}; /agent will not send what reads of "
+                      "this folder return")
+            return
+        proposal = workspace.consent_proposal(root, key, provider.name, self._session_id)
+        # The box expires and Ctrl+C grants nothing, as the loop's own box (`loop_flow.
+        # _Loop._consent`; review of d0a65d8, finding 4). What is granted then has no expiry:
+        # it lasts until `/workspace send off` (an owner decision, tasks.md 3b.8).
+        clock = self._deps.clock or (lambda: datetime.now(UTC))
+        ttl_s = self._deps.skills().approval_ttl_s
+        asked = clock()
+        expires = (asked + timedelta(seconds=ttl_s)).astimezone(UTC).isoformat()
+        header = [
+            "Send consent requested",
+            f"  folder:   {self._workspace_shown()} (shown here only, never sent or stored)",
+            f"  to:       {name}, a provider outside this machine",
+            f"  hash:     {proposal.sha256}",
+            f"  expires:  {expires} (UTC; the answer, not the consent, which lasts until "
+            "/workspace send off)",
+        ]
+        shown = self._plan_approval(header, proposal.content.split("\n"))
+        if self._terminal.is_interactive():
+            verdict = decide(self._terminal, shown, proposal.sha256, confirm_rejection=True,
+                             button_question=workspace.CONSENT_BUTTON_QUESTION)
+        else:
+            verdict = Verdict("undecided")
+        if withdraw_pending_interrupt():
+            verdict = Verdict("undecided")  # whatever was typed after the Ctrl+C grants nothing
+        state = verdict.decision
+        if state == "granted" and clock() > asked + timedelta(seconds=ttl_s):
+            state = "expired"  # answered after the box expired: it grants nothing
+        workspace.record_consent(self._deps.conn, key, root, provider.name, state=state,
+                                 session_id=self._session_id, approval_hash=proposal.sha256,
+                                 means=verdict.means)
+        if state == "granted":
+            self._say(f"workspace: send: on for {name}; each /agent turn is still shown "
+                      "before it goes, and the first one of each loop is asked again")
+        else:
+            self._say(f"workspace: send: stays off ({state}); nothing will be sent")
+
+    def _refresh_panel(self) -> None:
+        refresh = getattr(self._terminal, "refresh_panel", None)
+        if callable(refresh):
+            refresh()
 
     def _loop_state(self, counter: str) -> None:
         """The loop's counter, for the side panel and `/status`; the full screen reads its

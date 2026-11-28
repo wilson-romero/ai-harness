@@ -672,6 +672,7 @@ def test_a_loop_left_running_is_marked_interrupted_and_never_resumed(conn, data_
                             ("completed", "answer", 1, 5, 0)]
     assert provider.calls == 1
     assert re.search(r"loop: completed \(answer\), 1 send\(s\), done in \d+ s\n"
+                     r"workspace: -\n"  # workspace-tools B2
                      r"memory: 0 note\(s\) in the last question\nattachment: -\n"
                      r"> <end of input>\nend of input: leaving the conversation$", terminal.text)
 
@@ -862,7 +863,7 @@ def test_a_database_at_the_a2_010_gets_the_loop_tables_from_013(tmp_path):
     session = "0190a000-0000-7000-8000-000000000001"
     with pytest.raises(sqlite3.OperationalError):  # what the review found: no loop_runs
         conn.execute("SELECT 1 FROM loop_runs").fetchone()
-    assert migrate(conn) == [13]
+    assert migrate(conn) == [11, 13]  # and 011 (workspace-tools)
     from harness.mcp.loop_flow import last_loop
     assert last_loop(conn, UUID(session)) == "-"
     conn.close()
@@ -878,7 +879,7 @@ def test_a_database_whose_010_held_the_loops_ends_with_the_same_schema(tmp_path)
     data_dir.mkdir()
     conn, migrate = _database_at(tmp_path, data_dir, earlier)
     assert "loop_runs" in {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
-    assert migrate(conn) == [13]
+    assert migrate(conn) == [11, 13]  # and 011 (workspace-tools)
     fresh_dir = tmp_path / "f"
     fresh_dir.mkdir()
     from harness.storage.database import connect

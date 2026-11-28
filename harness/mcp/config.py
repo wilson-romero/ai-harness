@@ -13,9 +13,9 @@ import os
 import re
 import stat
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -23,6 +23,14 @@ from harness.core.errors import HarnessError
 from harness.core.git_guard import VersionableFile, ensure_not_versionable
 from harness.core.strict_json import loads_strict
 from harness.text.safe_text import safe_foreign_line
+
+if TYPE_CHECKING:
+    import sqlite3
+
+    from harness.mcp.audit import PlanLink
+    from harness.mcp.client import StopSignal
+    from harness.mcp.gateway import CallReport
+    from harness.mcp.policy import ParsedArguments
 
 CONFIG_ENV = "HARNESS_MCP_CONFIG"
 FORMAT = "ai-harness/mcp/1"
@@ -39,6 +47,11 @@ MAX_RESULT_BYTES = 1024 * 1024
 MAX_STRING_LENGTH = 4096
 MAX_PATTERN_LENGTH = 256
 DESCRIPTION_MAX = 120
+# Names of the servers the harness itself is (workspace-tools D6, D7): a local list that
+# declares one is refused when it is read (`reserved_server_name`), so the name in a plan
+# always means the harness's own table, never a program of the list.
+RESERVED_SERVER_NAMES = frozenset({"workspace"})
+RESERVED_SERVER_NAME = "reserved_server_name"
 
 
 class ConfigError(HarnessError):
@@ -181,14 +194,57 @@ class McpConfig(_Strict):
         max_length=64
     )
 
+    @field_validator("servers")
+    @classmethod
+    def _no_reserved_name(cls, value: dict[str, ServerEntry]) -> dict[str, ServerEntry]:
+        for name in sorted(value):
+            if name in RESERVED_SERVER_NAMES:
+                raise ValueError(f"{RESERVED_SERVER_NAME}: the server name {name} is the "
+                                 "harness's own work folder and cannot be declared here")
+        return value
+
+
+class InternalServer:
+    """A server the harness itself is (workspace-tools D6, D7): a literal table of tools in
+    code, decided by the same policy (`decide_before_start`), bound by the same entry hash and
+    audited in the same `tool_calls` table as an MCP server, but never started as a process.
+    It is not a `ServerEntry`: it has no command. A subclass gives `tools`, `bound` and `call`.
+    """
+
+    startup_timeout_s: int = 0
+    call_timeout_s: int = 10
+    tools: Mapping[str, ToolEntry] = {}
+
+    def bound(self) -> dict[str, Any]:
+        """What the plan's entry hash binds of this server besides its tools (`policy.
+        entry_sha256`): never a path in clear, so that a hash cannot be guessed back."""
+        raise NotImplementedError
+
+    def model_dump(self, mode: str = "json", exclude: set[str] | None = None) -> dict[str, Any]:
+        return self.bound()  # the shape `entry_sha256` reads from a `ServerEntry`
+
+    def call(self, conn: sqlite3.Connection, key: bytes, tool: str, parsed: ParsedArguments,
+             plan: PlanLink | None, stop: StopSignal | None = None) -> CallReport:
+        """Run one call the policy allowed and audit it, bounded by `call_timeout_s` and cut
+        by `stop` (Ctrl+C, the plan's deadline: KeyboardInterrupt with `.outcome`, as
+        `run_session`); never raises for what the tool finds (a refusal is a failed call
+        with the harness's reason)."""
+        raise NotImplementedError
+
 
 @dataclass(frozen=True)
 class LoadedConfig:
     config: McpConfig | None  # None: no HARNESS_MCP_CONFIG, so no servers at all
+    # The harness's own servers in force now (the work folder, when the person set one for
+    # the session); never read from the local list (workspace-tools D6).
+    internal: Mapping[str, InternalServer] = field(default_factory=dict)
 
     @property
-    def servers(self) -> Mapping[str, ServerEntry]:
-        return self.config.servers if self.config is not None else {}
+    def servers(self) -> Mapping[str, ServerEntry | InternalServer]:
+        listed = self.config.servers if self.config is not None else {}
+        if not self.internal:
+            return listed
+        return {**listed, **self.internal}
 
 
 def load_config(env: Mapping[str, str]) -> LoadedConfig:
