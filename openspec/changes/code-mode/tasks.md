@@ -604,6 +604,29 @@ Con `mutate.py` (cada uno se aplica, se corren sus tests con `-x` y se deshace).
 | R29 | `running plan:` sin «every argument is bounded» | `test_control_bounded_reads_by_rule_run_without_the_box_in_a_loop` |
 | R30 | la caja en cada turno, no una vez por bucle | `test_a_provider_outside_the_machine_asks_once_with_the_exact_text` |
 
+## 12. Ejecución en Windows (`develop` = `02b2c09`)
+
+Wilson ejecutó `develop` = `02b2c09` en Windows 11: 21 tests y una demo de este change fallan allí y pasan en macOS. Son los 19 de `tests/unit/test_shell_agent.py`, 2 de `tests/unit/test_mcp_auto_read.py` (`test_harness_auto_read_off_asks_the_box_for_every_plan` y `test_a_wrong_switch_sends_nothing[]`) y `scripts/demo_code_mode_loop.py`. En pantalla salía `internal_error: unexpected failure while talking to the server` y `calls.log` quedaba vacío. Rama `bugfix/windows-parity-4`.
+
+- [x] 12.1 Los tests y la demo dan a la conversación un entorno completo, no solo sus ajustes.
+  - Causa (medida en Windows): los tests pasaban `environ={"HARNESS_LOOP_PROVIDERS": "mock"}` (o `{"HARNESS_AUTO_READ": "off"}`, o `{}`) a `make_conversation`, y la demo igual. `Conversation._environ()` usa ese diccionario en lugar de `os.environ`; el proceso de sesión MCP arranca con él tal cual y `build_server_env` solo copia de él los `BASE_ENV_NAMES`. Así, el proceso de sesión y el servidor nacían sin SYSTEMROOT, PATH ni TEMP, y en Windows un Python sin ellos falla en su primer socket (`OSError` WinError 10106). Control en Windows: rellenar los `BASE_ENV_NAMES` que faltaban desde `os.environ` → 117 de 117 pasan.
+  - El producto no tiene la trampa: `harness/shell/app.py` no pasa `environ` (la conversación usa `os.environ`) y `harness/mcp/plan_cli.py` usa `os.environ`. Solo los tests y la demo llegaban ahí; la semántica del producto no cambia.
+  - Hecho, solo en los ayudantes de los tests:
+    - `tests/mcp_support.py::conversation_environ(settings)`: una copia del entorno de este proceso sin ningún ajuste del harness (`HARNESS_*` y `HARNESS_VARS`) más los ajustes dados;
+    - `tests/shell_support.py::make_conversation` pasa `environ` por ella. Lo usan todos los tests que dan `environ=` (también `tests/tui_support.py::Tui`) y la demo, así que ninguna llamada cambia.
+  - Buscado el mismo patrón en `tests/` y `scripts/` (`environ={`, `env={`, `run_session(…, {})`): `tests/unit/test_mcp_client.py` llama dos veces a `run_session` con `{}`, con un sustituto del proceso de sesión que solo duerme o imprime, sin sockets; pasan en Windows y se dejan. `DecisionEffect(env=…)` no lanza procesos.
+  - Oráculo: `tests/unit/test_shell_agent.py::test_a_test_s_settings_reach_the_processes_over_a_full_environment`. A través de `make_conversation`, como los demás, registra el entorno con que arranca el proceso de sesión y el que se construye para el servidor, y exige en los dos cada `BASE_ENV_NAMES` que tenga este proceso, con su valor; el bucle completa (el ajuste del test sigue valiendo). El mensaje nombra solo las variables, nunca sus valores.
+  - Recibo (2026-11-28, macOS arm64, Python 3.14.8):
+    - antes del arreglo, el test nuevo falla en macOS: el proceso de sesión arrancaba sin ninguno de los `BASE_ENV_NAMES` de este proceso (HOME, LOGNAME, TERM, TMPDIR y USER entre ellos). Es el fallo de Windows, sin Windows;
+    - con el arreglo, `test_shell_agent.py` y `test_mcp_auto_read.py` → 118 passed; `scripts/demo_code_mode_loop.py` → `demo: PASS`;
+    - control negativo (mutante: `conversation_environ` devuelve solo los ajustes): `1 failed`, «the session process started without […]»; restaurado, pasa;
+    - tanda `-m "not edge and not copilot"` con `caffeinate -i`: `2598 passed, 193 deselected in 464.10s`, código 0; `openspec validate --all --strict` → 29 passed, 0 failed; `sec-matrix: PASS (15 rows, 206 tests)`; `public-safety: PASS (524 file(s))`; `tests/unit/test_portability.py` → 4 passed. Edge no se ejecutó: no toca el proveedor ni el navegador.
+- [ ] 12.2 Deuda: un proceso de sesión que muere al arrancar se muestra como `internal_error` genérico.
+  - Lo que pasa: el que muere es el proceso de sesión del propio harness (`harness.mcp.worker`), no el servidor. Su stderr va a `os.devnull` (`harness/mcp/client.py::_supervise`) y, si sale sin escribir nada, `_guarded` lo cuenta como `internal_error`.
+  - Por qué no se arregla aquí: `server_exited` («the server process ended before answering») y `spawn_failed` («check its command in the MCP configuration») describirían mal el fallo, porque el servidor nunca arrancó y la configuración está bien. Un motivo nuevo exige migrar la lista cerrada del `CHECK` de `tool_calls.error_code` (`004_tool_calls.sql`). Mostrar la cola de stderr exige capturarlo acotado y redactado y decidir dónde se muestra. No es pequeño.
+  - Cómo se vería hecho: un proceso de sesión lanzado con un entorno que lo hace salir al arrancar (portable) da un motivo propio y una línea de stderr acotada y redactada; un control con el proceso sano no la da.
+- [ ] 12.3 Confirmación en Windows (no es puerta), en PowerShell, sobre la rama: `uv run pytest tests/unit/test_shell_agent.py tests/unit/test_mcp_auto_read.py -v` → 118 passed, y `uv run python scripts/demo_code_mode_loop.py` → `demo: PASS`. Estado: **NOT RUN**.
+
 ## 5. Tramo 3 · Sonda y medición con Copilot real (unos 12 envíos del presupuesto de 100)
 
 - [ ] 5.1 Sonda sin herramientas: un bloque `json` sintético de 80 líneas, comparado byte a byte. 1–2 envíos.

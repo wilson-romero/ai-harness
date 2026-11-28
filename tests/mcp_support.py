@@ -18,7 +18,7 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -201,6 +201,18 @@ def child_env(**extra: str) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k not in HARNESS_VARS}
     env["PYTHONUTF8"] = "1"
     env.update(extra)
+    return env
+
+
+def conversation_environ(settings: Mapping[str, str]) -> dict[str, str]:
+    """What a conversation built by a test or a demo reads as its environment: a copy of this
+    process's, without any harness setting (`HARNESS_*` and `HARNESS_VARS`), plus `settings`.
+    Never `settings` alone: the MCP session process and the servers start from it, and on
+    Windows a Python child without SYSTEMROOT, PATH or TEMP fails at its first socket
+    (WinError 10106)."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in HARNESS_VARS and not k.startswith("HARNESS_")}
+    env.update(settings)
     return env
 
 
