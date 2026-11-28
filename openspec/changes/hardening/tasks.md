@@ -139,11 +139,22 @@ Wilson ejecutó `develop` en Windows 11: sin navegador, 2321 pasados y 3 fallos;
   - sobre `95f78a7`, `-m "not edge and not copilot"`: 1 failed, 2368 passed. Falló `tests/security/test_mcp_structure.py::test_the_mcp_package_has_no_other_way_to_a_process_or_a_socket`, porque `run_bounded` importaba `subprocess` en `harness/mcp/`. Corregido en `abe9e6a` (9.1);
   - sobre `95f78a7`, `-m edge`: 190 passed en 1679,24 s, código 0, ninguno repetido. `abe9e6a` no toca nada que usen los tests de Edge;
   - sobre `abe9e6a`: `-m "not edge and not copilot"` → 2369 passed en 411,03 s, código 0; `openspec validate --all --strict` → 28 passed; `sec-matrix: PASS (15 rows, 169 tests)`; `public-safety: PASS (497 file(s))`.
+- [x] 9.5 Revisión independiente de la rama (2026-11-28, sobre `5b3de58`). Hallazgos de este change, corregidos con un test visto en rojo antes:
+  - (1) MEDIO, plausible y solo en Windows. `run_bounded` terminaba siempre el árbol al salir. En Windows, `main.py` va en un Job Object con KILL_ON_JOB_CLOSE, y el SDK lanza cada servidor MCP sin salirse de él (jobs anidados), así que el servidor moría al acabar `main.py`. Un servidor que el harness no hubiera parado habría dado igualmente `demo: PASS` en las comprobaciones `heartbeat_stopped` de `scripts/demo_mcp_gateway.py` ((g) y (h) sobre todo). En POSIX no pasa: el servidor está en otra sesión.
+    - Arreglo: `run_bounded(..., end_tree_on_exit=False)` por defecto termina el árbol solo si vence el plazo. Si sale a tiempo, cierra sus tuberías y su transporte, que no matan nada porque el proceso ya salió, y deja vivo lo que quedara; en Windows el job sigue abierto hasta que acaba la demo. `tree_ended` es `None` en ese caso. `collect_ids` pasa `end_tree_on_exit=True` y sigue terminándolo siempre; `harness_bounded` usa el valor por defecto.
+    - Oráculo: `test_without_a_deadline_a_descendant_survives_unless_asked`, con un hijo que sale y deja un descendiente: el descendiente escribe `survived`. El test de 9.1 con descendiente pasa ahora `end_tree_on_exit=True`.
+    - Control de que la comprobación de la demo sabe decir NO en macOS: con dos mutantes a la vez (el transporte no mata al servidor y `_end_tree` del harness no hace nada), `demo_mcp_gateway.py` → `demo: FAIL - the hanging server is still alive`. Con solo el segundo, PASS: el propio proceso de sesión para al servidor.
+  - (3) BAJO, tests. En Windows `TemporaryFile` es un fichero con nombre (`O_TEMPORARY`) que sigue en la lista hasta que el último descendiente que lo heredó cierra su descriptor, y `_end_tree` allí solo espera al líder. Los dos tests que miran la carpeta temporal la consultan durante 1 s como mucho antes de afirmar (`empty_soon`). El docstring de `run_bounded` ya no dice «anónimo» para Windows.
+  - Recibo (2026-11-28, macOS arm64, Python 3.14.8):
+    - antes de (1), el test nuevo falla con `the bounded run ended a descendant it was not asked to`;
+    - después, `test_check_sec_matrix.py` → 37 passed y `test_mcp_structure.py` pasa;
+    - `demo_mcp_gateway.py`, `demo_code_mode.py` y `demo_code_mode_loop.py` → `demo: PASS`.
 - [ ] 9.3 Confirmación en Windows (no es puerta), en PowerShell, sobre la rama:
-  - `uv run pytest tests/unit/test_check_sec_matrix.py -v`, solo y tres veces seguidas: los 36 pasan, también `test_a_collection_past_its_deadline_is_a_failure`, y `Get-ChildItem $env:TEMP -Filter tmp* -Directory | Measure-Object` da la misma cuenta antes y después;
+  - `uv run pytest tests/unit/test_check_sec_matrix.py -v`, solo y tres veces seguidas: los 37 pasan, también `test_without_a_deadline_a_descendant_survives_unless_asked` (9.5), también `test_a_collection_past_its_deadline_is_a_failure`, y `Get-ChildItem $env:TEMP -Filter tmp* -Directory | Measure-Object` da la misma cuenta antes y después;
   - `uv run python scripts/check_sec_matrix.py` → `sec-matrix: PASS`;
   - `uv run python scripts/demo_mcp_gateway.py` y `uv run python scripts/demo_code_mode.py` → `demo: PASS`.
-  - Lo que hay que confirmar allí: que el intérprete real que lanza uv entra en el Job Object (el SDK asigna el job justo después de crear el proceso; un hijo creado antes quedaría fuera, y entonces solo lo terminaría el job del propio lanzador de uv) y que ningún test deja carpetas temporales.
+  - `uv run python scripts/demo_code_mode_loop.py` → `demo: PASS`;
+  - Lo que hay que confirmar allí: que un servidor que el harness deja vivo sigue vivo tras `harness_bounded` (el test de 9.5 con un descendiente; en Windows el servidor está en el mismo Job Object que `main.py`), que el intérprete real que lanza uv entra en el Job Object (el SDK asigna el job justo después de crear el proceso; un hijo creado antes quedaría fuera, y entonces solo lo terminaría el job del propio lanzador de uv) y que ningún test deja carpetas temporales.
   - Estado: **NOT RUN**.
 
 ## Workflow follow-up

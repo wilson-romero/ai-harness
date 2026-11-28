@@ -183,7 +183,7 @@ Wilson ejecutó `develop` en Windows 11. Dos hallazgos son de esta caja: `test_k
 - [x] 7.3 Confirmación en Windows (no es puerta). En PowerShell, en la rama:
   - `uv run pytest tests/unit/test_shell_tui_arming.py tests/unit/test_shell_tui_buttons.py -v` → todo pasa, también con la máquina cargada;
   - `uv run pytest tests/unit/test_shell_tui_grid.py tests/unit/test_shell_tui_blocks.py tests/unit/test_shell_tui.py -v`, tres veces, y la batería completa `uv run pytest -m "not edge and not copilot"` → ningún `NoMatches`;
-  - Estado: **PASS** sobre `develop` = `a9c51fe` (2026-11-27, Windows 11): los tests de armado pasan en reposo y con una carga de CPU del 11 al 67 %; ningún `NoMatches` en tres ejecuciones; en la batería (2321 pasados, 3 fallos) ningún fallo es de esta caja.
+  - Estado: **PASS** sobre `develop` = `a9c51fe` (2026-11-27, Windows 11): según el informe de Windows, los tests de armado pasaron en reposo y otra vez mientras corría la batería completa, con una carga de CPU del 11 al 67 %; `test_shell_tui_grid.py`, `test_shell_tui_blocks.py` y `test_shell_tui.py` pasaron tres veces sin ningún `NoMatches`; en la batería (2321 pasados, 3 fallos) ningún fallo es de esta caja.
 
 ## 8. Demo
 

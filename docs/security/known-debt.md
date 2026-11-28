@@ -125,6 +125,16 @@ Una revisión de seguridad de `develop` (sobre `5af28ed`, con datos sintéticos 
 - **Decisión:** pendiente de Wilson: cada uno, si se aborda, en un change propio.
 - **Dueño:** Wilson.
 
+## 15. Un motivo del proveedor anterior al envío se pierde si el plazo vence mientras Edge se cierra
+
+- **Qué:**
+  - Condición exacta: el proveedor de Copilot Web lanza, antes de enviar nada, `AuthenticationRequired` (`_sign_in_needed`: la página pide iniciar sesión) o el `ProviderError` de la página de invitado. Al salir, ese error atraviesa el cierre de Edge (`close_owned`), y el cierre dura más que lo que queda hasta el plazo de la pregunta, que es la reserva de `min(SHUTDOWN_S, 25 %)` de `HARNESS_REQUEST_TIMEOUT_S`, 2 s con 8 s.
+  - El plazo del servicio vence durante el cierre, y la pregunta termina en `timeout` con «the deadline expired before the prompt was sent» en vez de su motivo. Un `AuthenticationRequired` debería terminar en `authentication_required`, con la sesión en ese estado y el consejo de `copilot login`.
+  - Solo el «not ready in time» (`ProviderTimeout`) viaja con la cancelación desde `bugfix/windows-parity-3` (`copilot-web-provider` 10.3).
+- **Riesgo:** no se envía nada y no se reintenta solo, así que no hay duplicado ni pérdida de datos. La persona ve un plazo genérico en vez de «inicia sesión» o «la dirección es la página de invitado», y la sesión no queda marcada como `authentication_required`.
+- **Decisión:** pendiente de Wilson; fuera del alcance de la ronda de paridad con Windows, que solo cubre el motivo de `timeout`. El arreglo natural es llevar cualquier motivo previo al envío con la cancelación y que el servicio lo clasifique por su tipo.
+- **Dueño:** Wilson.
+
 ## Fuera del alcance: aplazado (proyecto educativo)
 
 Decidido por Wilson el 2026-11-25: el proyecto sirve para aprender a construir un harness, no para producción. Se aplaza lo que solo sirve para operar en producción:
