@@ -562,7 +562,7 @@ El dueño contestó el 2026-11-27 y autorizó solo el tramo **B1**. Lo que sigue
 
 ### B1-5. Auditoría: qué fila deja cada caso (D7 concretada)
 
-- **Qué.** Migración **011** (`011_workspace_events.sql`): la 009 está en `develop` y la 010 la tomará `feature/code-mode-loop`. El ejecutor de migraciones aplica cada versión que falte, así que un hueco no estorba. Qué deja cada caso:
+- **Qué.** Migración **011** (`011_workspace_events.sql`): la 009, la 010 y la 013 son de `code-mode` y la 012 está reservada para otra rama (revisado el 2026-11-28, tras el merge de `develop` = `8a8afbd`). El ejecutor de migraciones aplica cada versión que falte, así que un hueco no estorba: la 011 entra igual en una base que está en la 010 que en una que ya tiene la 013 (`test_011_applies_on_a_database_at_010_and_at_013`). Qué deja cada caso:
   - un rechazo por la forma de la ruta o por las reglas de nombre (se decide sin tocar el disco): fila `denied` con `argument_invalid`;
   - un rechazo de la carpeta: fila `denied` con `server_not_allowed`;
   - lo que se descubre en el disco (enlace, binario, credencial, tamaño, nombre inexacto): fila `allowed` y `failed` con `tool_error`;

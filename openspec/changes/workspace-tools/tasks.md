@@ -14,6 +14,8 @@ Leyenda: **oráculo** = qué dice SÍ; **control negativo** = la mutación o el 
 
   Recibo (2026-11-27): aprobado por Wilson. El párrafo «Revisado el 2026-11-27 (Wilson): Corte 12 · Herramientas de la carpeta de trabajo» está al final de `docs/plan/2026-11-24-ai-harness-cortes.md`.
 
+  Revisado (2026-11-28, merge de `develop` = `8a8afbd`): `develop` ya trae el Corte 12 en la tabla de cortes (fila «12 · Herramientas de la carpeta de trabajo») y en la revisión «Revisado el 2026-11-27: plan por hitos», que además fija `code-run` como Corte 13. El párrafo de esta rama se quitó al resolver el merge para no duplicarlo; las decisiones del dueño siguen en `design.md`.
+
 - [x] 1.4 Registrar en `design.md` la respuesta del dueño a las decisiones abiertas 1–10. Si alguna cambia, editar la decisión en su sitio, marcarla y releer `specs/workspace-files/spec.md`. Hecho: cada decisión dice «tomada por el dueño el …».
 
   Recibo (2026-11-27): `design.md` «Decisiones del dueño (2026-11-27)». Las decisiones 1, 3, 4 y 10 las tomó el dueño. Las 2, 7, 8 y 9 se adoptaron por defecto, y el dueño puede revisarlas. No cambió ninguna regla de la spec.
@@ -66,7 +68,7 @@ Leyenda: **oráculo** = qué dice SÍ; **control negativo** = la mutación o el 
 
 - [x] 2.7 Auditoría (D7). Oráculo: un `SELECT` sobre `tool_calls` y la tabla de eventos tras un `read` permitido y otro denegado: `server='workspace'`, HMAC de 64, motivo exacto en la tabla de eventos y ninguna fila con el nombre del fichero (`instr` sobre todas las columnas de texto). Además, la migración nueva solo añade (test de migraciones vigente). Control negativo: guardar la ruta en claro hace fallar el `instr`. Recibo.
 
-  Recibo (2026-11-27, macOS 26 arm64, Python 3.14, commit del tramo B1): la migración es la **011** (`011_workspace_events.sql`; la 009 está tomada y la 010 la tomará `code-mode-loop`). `test_a_later_010_still_applies_after_011` prueba que el hueco no molesta. `test_storage.py`, `test_response_mode.py` y `test_sql_values.py` se ajustaron solo añadiendo. Control negativo: mutaciones 52–54 de 2.12 (la ruta en claro hace fallar 21 tests).
+  Recibo (2026-11-27, macOS 26 arm64, Python 3.14, commit del tramo B1): la migración es la **011** (`011_workspace_events.sql`). Revisado el 2026-11-28 tras el merge de `develop` (`8a8afbd`, con 009, 010 y 013; la 012 está reservada para otra rama): `test_011_applies_on_a_database_at_010_and_at_013` aplica la 011 sobre una base en la 010 (aplica `[11, 13]`) y sobre una base que ya tiene la 013 (aplica `[11]`), y en los dos casos el esquema final es el de una base nueva. Control negativo (visto el 2026-11-28): un `migrate` mutado que salta toda versión menor que la mayor ya aplicada (un ejecutor que no admite huecos) hace fallar el caso «en la 013» (`[absent1-later1]`, 1 failed, 1 passed); restaurado, 2 passed. `test_storage.py`, `test_response_mode.py` y `test_sql_values.py` se ajustaron solo añadiendo. Control negativo: mutaciones 52–54 de 2.12 (la ruta en claro hace fallar 21 tests).
 
 - [x] 2.8 `main.py workspace --root <ruta> check|read|list` en `harness/cli.py`. Oráculo: un test de integración con códigos de salida (0, 1 si se rechaza, 2 si es un mal uso) y el texto con `| ` delante. Recibo.
 
