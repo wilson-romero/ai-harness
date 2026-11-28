@@ -434,6 +434,94 @@ async def _end_tree(process: Any) -> bool:
     return stopped
 
 
+# -- one bounded child process, for the repository's checks (hardening 9.1) ---------------------
+
+BOUNDED_OUTPUT_LIMIT = 64 * 1024 * 1024  # bytes kept; the rest is read and dropped
+DRAIN_AFTER_EXIT_S = 1.0  # after the exit, for output a descendant still holds open
+
+
+@dataclass(frozen=True)
+class BoundedRun:
+    """What `run_bounded` saw. `returncode` is None when the deadline came first."""
+
+    returncode: int | None
+    output: bytes  # standard output, with standard error unless it was asked apart
+    errors: bytes  # standard error when asked apart, else empty
+    truncated: bool
+    tree_ended: bool
+
+
+def run_bounded(argv: list[str], *, cwd: Path, deadline_s: float,
+                env: Mapping[str, str] | None = None, separate_errors: bool = False,
+                output_limit: int = BOUNDED_OUTPUT_LIMIT) -> BoundedRun:
+    """Run `argv` in its own kill scope, the session process's (process group on POSIX, Job
+    Object on Windows), and end its whole tree with `_end_tree` when it exits or at
+    `deadline_s`, whichever comes first.
+
+    Standard output is read from a pipe while the process runs, so it can never block on a full
+    pipe. Standard error goes with it, or, with `separate_errors`, to an anonymous temporary
+    file (`tempfile.TemporaryFile`: no name, nothing to delete afterwards). Nothing named is
+    written to disk, so no surviving descendant can keep a file open that then cannot be
+    deleted: on Windows a uv launcher's child outlives the launcher by a few milliseconds.
+    A start that fails raises OSError.
+    """
+    import subprocess
+    import tempfile
+
+    if not separate_errors:
+        return anyio.run(_run_bounded, list(argv), cwd, env, subprocess.STDOUT, deadline_s,
+                         output_limit)
+    with tempfile.TemporaryFile() as errors:
+        run = anyio.run(_run_bounded, list(argv), cwd, env, errors, deadline_s, output_limit)
+        errors.seek(0)
+        kept = errors.read(output_limit + 1)
+    return BoundedRun(run.returncode, run.output, kept[:output_limit],
+                      run.truncated or len(kept) > output_limit, run.tree_ended)
+
+
+async def _run_bounded(argv: list[str], cwd: Path, env: Mapping[str, str] | None, errlog: Any,
+                       deadline_s: float, output_limit: int) -> BoundedRun:
+    process = await _create_platform_compatible_process(
+        command=argv[0], args=argv[1:], env=None if env is None else dict(env), errlog=errlog,
+        cwd=cwd,
+    )
+    output, truncated, drained = bytearray(), False, anyio.Event()
+
+    async def drain() -> None:
+        nonlocal truncated
+        try:
+            while True:
+                chunk = await process.stdout.receive()
+                room = output_limit - len(output)
+                output.extend(chunk[:room])
+                truncated = truncated or len(chunk) > room
+        except (OSError, anyio.EndOfStream, anyio.ClosedResourceError,
+                anyio.BrokenResourceError):
+            pass
+        finally:
+            drained.set()
+
+    returncode = None
+    try:
+        await _close_pipe(process.stdin)
+        async with anyio.create_task_group() as group:
+            group.start_soon(drain)
+            with anyio.move_on_after(deadline_s):
+                # The exit code, not `wait()`: on asyncio that also waits for the pipe's end,
+                # which a descendant holding it would delay.
+                while process.returncode is None:
+                    await anyio.sleep(EXIT_POLL_S * 5)
+                returncode = process.returncode
+            if returncode is not None:
+                with anyio.move_on_after(DRAIN_AFTER_EXIT_S):
+                    await drained.wait()
+            group.cancel_scope.cancel()
+    finally:
+        with anyio.CancelScope(shield=True):
+            ended = await _end_tree(process)
+    return BoundedRun(returncode, bytes(output), b"", truncated, ended)
+
+
 def _running_loop() -> Any:
     import asyncio
 

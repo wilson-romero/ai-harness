@@ -1,4 +1,4 @@
-"""Helpers shared by the demo scripts. Standard library only; same code on every platform."""
+"""Helpers shared by the demo scripts. Standard library only, except `harness_bounded`, which uses\nthe harness's bounded child process; same code on every platform."""
 
 from __future__ import annotations
 
@@ -6,8 +6,6 @@ import os
 import platform
 import subprocess
 import sys
-import tempfile
-import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -68,37 +66,29 @@ def harness_bounded(
 ) -> subprocess.CompletedProcess[str]:
     """Like `harness`, for commands that start other processes (MCP servers).
 
-    The output goes to files, not pipes, so no descendant can keep a pipe open and stall the
-    wait; the wait is a monotonic deadline measured here, and the process is killed and reaped
-    in `finally`. A process that had to be killed reports return code -9.
+    Run with `harness.mcp.client.run_bounded`: in a kill scope of its own, its output read
+    while it runs (nothing named on disk that a descendant could keep open), a monotonic
+    deadline measured here, and its whole tree ended when it exits or at the deadline. A
+    process that had to be killed reports return code -9.
     """
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-        out_path, err_path = Path(tmp) / "out.txt", Path(tmp) / "err.txt"
-        started = time.monotonic()
-        with out_path.open("wb") as out, err_path.open("wb") as err:
-            process = subprocess.Popen([sys.executable, "main.py", *args], cwd=ROOT, env=env,
-                                       stdin=subprocess.DEVNULL, stdout=out, stderr=err)
-            try:
-                while process.poll() is None and time.monotonic() - started < deadline_s:
-                    time.sleep(0.05)
-                code = process.poll()
-            finally:
-                if process.poll() is None:
-                    process.kill()
-                    try:
-                        process.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        pass
-        result = subprocess.CompletedProcess(
-            args, -9 if code is None else code,
-            out_path.read_text(encoding="utf-8", errors="replace"),
-            err_path.read_text(encoding="utf-8", errors="replace"),
-        )
+    from harness.mcp.client import run_bounded  # noqa: PLC0415 - only the demos that need it
+
+    run = run_bounded([sys.executable, "main.py", *args], cwd=ROOT, env=env,
+                      deadline_s=deadline_s, separate_errors=True)
+    result = subprocess.CompletedProcess(
+        args, -9 if run.returncode is None else run.returncode, _text(run.output),
+        _text(run.errors),
+    )
     if show:
         sys.stdout.write(result.stdout)
         sys.stdout.write(result.stderr)
         sys.stdout.flush()
     return result
+
+
+def _text(data: bytes) -> str:
+    """UTF-8 with universal newlines, as `Path.read_text` reads a captured file."""
+    return data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def spawn(env: dict[str, str], *args: str) -> subprocess.Popen[bytes]:
